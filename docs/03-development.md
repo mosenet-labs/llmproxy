@@ -12,8 +12,6 @@ LLMPROXY_CONFIG=config/gateway.example.toml cargo run -p llmproxy-gateway
 
 网关默认监听 `127.0.0.1:8080`。配置文件不包含真实密钥。当前自动入口尚未实现完整代理，返回 `501`；具体任务见[实施任务](02-tasks.md)。
 
-在无法访问 macOS 系统钥匙串的受限环境中，Pingora 的 Rustls 后端可能无法读取系统 CA。此时可在启动前设置 `SSL_CERT_FILE=/etc/ssl/cert.pem`，或指向部署环境提供的可信 CA 文件；不能关闭证书校验来规避这一问题。
-
 ## OTLP/OpenObserve
 
 默认将结构化 JSON 日志写到 stdout。设置以下变量可将 traces、logs 和 metrics 经 OTLP/HTTP 发往 OpenObserve：
