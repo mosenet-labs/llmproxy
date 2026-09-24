@@ -5,12 +5,19 @@ host = "api.openai.com"
 port = 443
 tls = true
 api_key_env = "OPENAI_API_KEY"
+connect_timeout_ms = 10000
+# 每次上游读取操作的超时，不是整个请求或 SSE 流的总时长。
+read_timeout_ms = 60000
+write_timeout_ms = 30000
 
 [openai_responses]
 host = "api.openai.com"
 port = 443
 tls = true
 api_key_env = "OPENAI_API_KEY"
+connect_timeout_ms = 10000
+read_timeout_ms = 60000
+write_timeout_ms = 30000
 
 [anthropic_messages]
 host = "api.anthropic.com"
@@ -18,3 +25,6 @@ port = 443
 tls = true
 api_key_env = "ANTHROPIC_API_KEY"
 anthropic_version = "2023-06-01"
+connect_timeout_ms = 10000
+read_timeout_ms = 60000
+write_timeout_ms = 30000

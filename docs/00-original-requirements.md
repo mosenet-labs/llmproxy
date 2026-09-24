@@ -12,8 +12,19 @@
 
 “自动路由”是**自动识别 OpenAI Chat、OpenAI Responses、Anthropic Messages 三种协议**，而不是根据模型自动选择上游。
 
+本轮优先实施：
+
+> 联调三个明确入口：Host/凭据/协议头、错误透传、SSE、超时和未知路径。
+
+> 文档先落地，开始实现
+
+对应的 Pingora 阶段分工、行为约定和验收矩阵见[三个明确入口的联调验收](05-explicit-routes-validation.md)。
+
 ## 关联文档
 
 - [架构设计与技术边界](01-architecture.md)
 - [分阶段实施任务与完成状态](02-tasks.md)
 - [本地运行和 OpenObserve 配置](03-development.md)
+- [访问日志设计](04-access-logging.md)
+- [三个明确入口的阶段分工与联调验收](05-explicit-routes-validation.md)
+- [Pingora 请求生命周期与阶段串联](06-pingora-request-lifecycle.md)

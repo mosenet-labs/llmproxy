@@ -50,5 +50,8 @@ fn resolve(
         tls: provider.tls,
         secret,
         anthropic_version: provider.anthropic_version.clone(),
+        connect_timeout_ms: provider.connect_timeout_ms,
+        read_timeout_ms: provider.read_timeout_ms,
+        write_timeout_ms: provider.write_timeout_ms,
     })
 }
