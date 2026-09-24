@@ -37,6 +37,8 @@ Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_f
 
 统一使用 OpenTelemetry：每次请求一个 trace span，结构化日志携带 route/protocol/upstream/status/latency，指标至少包含请求量、失败量和耗时直方图。只用固定的低基数字段做指标标签；不记录完整提示词、响应体、API key 或任意模型名。默认输出本地 JSON 日志。设置 OTLP 环境变量后经 OTLP/HTTP 导出 traces、logs、metrics。OpenObserve 的服务端地址为 `https://<host>/api/<org>`，三类信号分别写到 `/v1/traces`、`/v1/logs`、`/v1/metrics`；认证头由运行环境注入。参见 [OpenObserve OTLP 文档](https://openobserve.ai/docs/ingestion/logs/otlp/)。
 
+类 Nginx/Envoy 的逐请求访问日志采用独立事件和过滤规则，详见[访问日志设计](04-access-logging.md)。
+
 ## 安全和错误行为
 
 - 路由以方法和完整路径匹配，未知路径 `404`，不允许的方法 `405`。
