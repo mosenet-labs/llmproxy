@@ -1,0 +1,19 @@
+# 原始需求
+
+## 用户原话
+
+> 当前项目是一个空项目，基于当前项目我想使用pingora实现一个简单的llm provider的代理：
+> 可以有4个路由：三个路由分配对应openai chat、openai response、anthropic message的路由与一个自动的路由，项目上怎么做分层设计,以及项目架构要怎样?
+> 后期会增加一个使用topcoat做UI控制台
+
+> 好的，并我提的原始需求落地到docs下原始需求文档中，并将你分析的写入新的文档，原始需要需要有链接跳转到关联文档，再将你的分析拆分成任务也落地文档，并根据任务文档先在本地创建项目的基础架构，项目依赖都使用最新版本的库，要支持trace logs metrics，上报的服务可以考虑使用 openobserve
+
+## 补充确认
+
+“自动路由”是**自动识别 OpenAI Chat、OpenAI Responses、Anthropic Messages 三种协议**，而不是根据模型自动选择上游。
+
+## 关联文档
+
+- [架构设计与技术边界](01-architecture.md)
+- [分阶段实施任务与完成状态](02-tasks.md)
+- [本地运行和 OpenObserve 配置](03-development.md)

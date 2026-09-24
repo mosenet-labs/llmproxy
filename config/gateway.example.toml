@@ -1,0 +1,20 @@
+listen = "127.0.0.1:8080"
+
+[openai_chat]
+host = "api.openai.com"
+port = 443
+tls = true
+api_key_env = "OPENAI_API_KEY"
+
+[openai_responses]
+host = "api.openai.com"
+port = 443
+tls = true
+api_key_env = "OPENAI_API_KEY"
+
+[anthropic_messages]
+host = "api.anthropic.com"
+port = 443
+tls = true
+api_key_env = "ANTHROPIC_API_KEY"
+anthropic_version = "2023-06-01"
