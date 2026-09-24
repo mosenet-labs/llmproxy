@@ -2,7 +2,7 @@
 
 ## 目标和范围
 
-提供四个入口：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` 和 `POST /v1/auto`。前三个入口透明代理原生协议；自动入口识别协议后代理到对应上游，不转换协议请求体或响应体。后续加入 Topcoat 管理控制台。
+提供四个入口：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` 和 `POST /v1/auto`。前三个入口透明代理原生协议；自动入口识别协议后代理到对应上游，不转换协议请求体或响应体（HTTP 自动入口仍待实现）。Topcoat 控制台通过 PostgreSQL 管理 Provider。
 
 ## 分层与工程结构
 
@@ -11,10 +11,12 @@
   -> Pingora 接入层（方法/路径、鉴权、限制、流式代理）
   -> 应用层（协议识别、选择上游、配置快照）
   -> 领域层（协议、Provider、路由、配置校验）
-  -> 基础设施（环境变量密钥、配置文件、OTLP、日志和指标）
+  -> 基础设施（Toasty/PostgreSQL、凭据加密、配置文件、OTLP、日志和指标）
 ```
 
-`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。将来 `llmproxy-console` 作为独立服务接入共享配置模型；管理 API 负责保存和发布配置版本，代理请求读取不可变快照。首版使用启动时读取的 TOML 文件；热更新与持久化留到控制台阶段。
+`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是独立的 Topcoat 服务，复用 `topcoat-ant-design` 构建 Provider 管理页面；`llmproxy-store` 封装 Toasty 模型、PostgreSQL 迁移、事务和密钥加密。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
+
+设置 `LLMPROXY_DATABASE_URL` 启用数据库模式；未设置时保留启动时读取 TOML 的模式。每种协议允许多个 Provider，但只有一个当前绑定；在途请求持有原 Provider 快照。具体设计见 [Provider 管理控制台](07-provider-console.md)。
 
 ## 路由约定
 
@@ -25,7 +27,7 @@
 | `/v1/messages` | Anthropic Messages | `/v1/messages` |
 | `/v1/auto` | 依据头与 JSON 识别 | 对应的原生上游路径 |
 
-仅允许已配置的上游主机，客户端不能指定任意目标 URL。上游凭据只通过环境变量引用，启动时验证；客户端凭据不转发到 Provider。响应状态码、错误体和 SSE 字节流保持原样。默认不缓存 LLM 响应。
+仅允许已配置的上游主机，客户端不能指定任意目标 URL。数据库模式下上游凭据由控制台录入并加密保存，主密钥通过环境变量注入；TOML 模式保留环境变量凭据引用。客户端凭据不转发到 Provider。响应状态码、错误体和 SSE 字节流保持原样。默认不缓存 LLM 响应。
 
 ## 自动识别
 
@@ -45,8 +47,11 @@ Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_f
 - 请求头重写 `Host` 和 Provider 凭据，过滤逐跳头；保留必要的协议头。
 - 连接超时与响应读取超时分别配置，SSE 不做全量缓冲或自动压缩。
 - `POST` 请求在请求体已发出或响应已开始后不重试，避免重复生成和计费。
-- 配置在启动时校验，缺少 Provider 密钥时启动失败。
+- 配置在启动和热更新时校验；数据库连接、迁移或主密钥错误阻止数据库模式启动。运行中加载失败保留上一份有效快照。
+- 数据库模式允许空配置，未绑定 Provider 的协议返回 `503`；TOML 模式缺少凭据时启动失败。
 
-## Topcoat 控制台演进
+## Topcoat 控制台与后续演进
 
-管理服务与网关分进程运行，管理端口仅暴露在可信网络。控制台读取/修改配置、查看上游健康状态及聚合指标。管理 API 验证操作身份并记录审计事件。单机阶段可用 SQLite 保存配置，发布新版本后网关原子切换不可变配置快照；多实例时再引入集中存储与通知。Topcoat 当前是 Rust 全栈框架，见[项目文档](https://github.com/tokio-rs/topcoat)。
+管理服务与网关分进程运行，控制台当前绑定回环地址，提供 Provider 新增、编辑、启停、删除及当前协议绑定。采用 PostgreSQL 持久化、Toasty ORM、AES-256-GCM 凭据加密和乐观版本检查；本机表单使用 Host/Origin 校验和 CSRF token。
+
+登录权限、操作审计、健康检查和聚合指标视图是后续任务。需要多实例配置快速同步时，可在当前轮询基础上增加通知；数据库继续作为配置来源。Topcoat 项目资料见[官方仓库](https://github.com/tokio-rs/topcoat)。

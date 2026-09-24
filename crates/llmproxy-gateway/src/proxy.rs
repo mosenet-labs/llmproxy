@@ -21,49 +21,10 @@ use pingora::{
 use pingora_http::{RequestHeader, ResponseHeader};
 use tracing::Span;
 
-#[derive(Clone)]
-pub struct ResolvedConfig {
-    pub listen: String,
-    pub openai_chat: ResolvedProvider,
-    pub openai_responses: ResolvedProvider,
-    pub anthropic_messages: ResolvedProvider,
-}
-
-#[derive(Clone)]
-pub struct ResolvedProvider {
-    pub host: String,
-    pub port: u16,
-    pub tls: bool,
-    pub secret: String,
-    pub anthropic_version: Option<String>,
-    pub connect_timeout_ms: u64,
-    pub read_timeout_ms: u64,
-    pub write_timeout_ms: u64,
-}
-
-impl ResolvedProvider {
-    fn authority(&self) -> String {
-        let default_port = if self.tls { 443 } else { 80 };
-        if self.port == default_port {
-            self.host.clone()
-        } else {
-            format!("{}:{}", self.host, self.port)
-        }
-    }
-}
-
-impl ResolvedConfig {
-    fn provider(&self, protocol: Protocol) -> &ResolvedProvider {
-        match protocol {
-            Protocol::OpenAiChat => &self.openai_chat,
-            Protocol::OpenAiResponses => &self.openai_responses,
-            Protocol::AnthropicMessages => &self.anthropic_messages,
-        }
-    }
-}
+use crate::snapshot::{ProviderSnapshots, ResolvedProvider};
 
 pub struct Gateway {
-    config: Arc<ResolvedConfig>,
+    providers: ProviderSnapshots,
     requests: Counter<u64>,
     failures: Counter<u64>,
     duration: Histogram<f64>,
@@ -72,14 +33,15 @@ pub struct Gateway {
 pub struct RequestContext {
     start: Instant,
     protocol: Option<Protocol>,
+    provider: Option<Arc<ResolvedProvider>>,
     span: Option<Span>,
 }
 
 impl Gateway {
-    pub fn new(config: Arc<ResolvedConfig>) -> Self {
+    pub fn new(providers: ProviderSnapshots) -> Self {
         let meter = opentelemetry::global::meter("llmproxy-gateway");
         Self {
-            config,
+            providers,
             requests: meter.u64_counter("llmproxy.requests").build(),
             failures: meter.u64_counter("llmproxy.failures").build(),
             duration: meter
@@ -98,6 +60,7 @@ impl ProxyHttp for Gateway {
         RequestContext {
             start: Instant::now(),
             protocol: None,
+            provider: None,
             span: None,
         }
     }
@@ -121,6 +84,13 @@ impl ProxyHttp for Gateway {
                 ctx.protocol = Some(protocol);
                 if let Some(span) = &ctx.span {
                     span.record("llm.protocol", protocol.as_str());
+                }
+                // Pin one immutable provider for the full request, including SSE.
+                // Later refreshes affect only requests entering after selection.
+                ctx.provider = self.providers.select(protocol);
+                if ctx.provider.is_none() {
+                    session.respond_error(503).await?;
+                    return Ok(true);
                 }
                 Ok(false)
             }
@@ -150,8 +120,10 @@ impl ProxyHttp for Gateway {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let protocol = ctx.protocol.expect("request_filter set protocol");
-        let provider = self.config.provider(protocol);
+        let provider = ctx
+            .provider
+            .as_ref()
+            .expect("request_filter selected provider");
         // HttpPeer::new unwraps DNS errors when passed a hostname. Resolve here
         // so a lookup failure follows the normal upstream error path.
         let address = (provider.host.as_str(), provider.port)
@@ -184,7 +156,10 @@ impl ProxyHttp for Gateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         let protocol = ctx.protocol.expect("request_filter set protocol");
-        let provider = self.config.provider(protocol);
+        let provider = ctx
+            .provider
+            .as_ref()
+            .expect("request_filter selected provider");
         request.remove_header("authorization");
         request.remove_header("x-api-key");
         request.insert_header("host", provider.authority())?;

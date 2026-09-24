@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 llmproxy-core = { path = "../llmproxy-core" }
+llmproxy-store = { path = "../llmproxy-store" }
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time", "net"] }
 pingora = { version = "0.9.0", features = ["proxy", "rustls"] }
 pingora-http = "0.9.0"
 async-trait = "0.1.92"
@@ -19,3 +21,7 @@ opentelemetry = { version = "0.33.0", features = ["metrics", "trace"] }
 opentelemetry_sdk = { version = "0.33.0", features = ["metrics", "trace", "logs"] }
 opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "metrics", "logs"] }
 opentelemetry-appender-tracing = "0.33.0"
+
+[dev-dependencies]
+base64 = "0.23.1"
+toasty = { version = "0.10.0", default-features = false, features = ["postgresql"] }

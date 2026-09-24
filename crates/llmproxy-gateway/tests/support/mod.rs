@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Shared by integration test binaries with different scenarios.
+
 use std::{
     collections::VecDeque,
     fs::{self, File},
@@ -91,19 +93,56 @@ impl Gateway {
             }
         }
         fs::write(directory.join("config.toml"), config).unwrap();
+        let mut command = Self::command(&directory);
+        command.env("LLMPROXY_CONFIG", directory.join("config.toml"));
+        for (index, secret) in SECRETS.iter().enumerate() {
+            command.env(format!("LLMPROXY_TEST_KEY_{index}"), secret);
+        }
+        Self::launch(command, reservation, directory, id)
+    }
+
+    pub fn database(url: &str, master_key: &str) -> Self {
+        let _allocation = PORT_ALLOCATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "llmproxy-database-integration-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let mut command = Self::command(&directory);
+        command
+            .env("LLMPROXY_DATABASE_URL", url)
+            .env("LLMPROXY_MASTER_KEY", master_key)
+            .env(
+                "LLMPROXY_LISTEN",
+                reservation.local_addr().unwrap().to_string(),
+            );
+        Self::launch(command, reservation, directory, id)
+    }
+
+    fn command(directory: &std::path::Path) -> Command {
         let log = File::create(directory.join("gateway.log")).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_llmproxy-gateway"));
         // Do not inherit real credentials, exporters, proxy settings, or log filters.
         command
             .env_clear()
-            .env("LLMPROXY_CONFIG", directory.join("config.toml"))
             .env("RUST_LOG", "llmproxy_gateway=info,pingora=warn")
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log);
-        for (index, secret) in SECRETS.iter().enumerate() {
-            command.env(format!("LLMPROXY_TEST_KEY_{index}"), secret);
-        }
+        command
+    }
+
+    fn launch(
+        mut command: Command,
+        reservation: TcpListener,
+        directory: PathBuf,
+        id: usize,
+    ) -> Self {
+        let address = reservation.local_addr().unwrap();
         drop(reservation);
         let child = command.spawn().unwrap();
         let mut gateway = Self {

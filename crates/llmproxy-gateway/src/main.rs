@@ -1,37 +1,69 @@
 mod observability;
 mod proxy;
+mod snapshot;
 
-use std::{env, error::Error, fs, sync::Arc};
+use std::{env, error::Error, fs};
 
 use llmproxy_core::{config::GatewayConfig, protocol::Protocol};
 use pingora::{proxy::http_proxy_service, server::Server};
 
-use crate::proxy::{Gateway, ResolvedConfig, ResolvedProvider};
+use crate::{
+    proxy::Gateway,
+    snapshot::{ProviderSnapshot, ProviderSnapshots, ResolvedProvider},
+};
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let _telemetry = observability::init()?;
+    let (listen, providers, _refresh) = match env::var("LLMPROXY_DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            let master_key = env::var("LLMPROXY_MASTER_KEY")
+                .map_err(|_| "LLMPROXY_MASTER_KEY is required in database mode")?;
+            let listen =
+                env::var("LLMPROXY_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+            if listen.parse::<std::net::SocketAddr>().is_err() {
+                return Err("LLMPROXY_LISTEN must be an IP socket address".into());
+            }
+            let (providers, refresh) = ProviderSnapshots::database(&url, &master_key)?;
+            (listen, providers, Some(refresh))
+        }
+        Ok(_) | Err(env::VarError::NotPresent) => {
+            let (listen, providers) = load_file_config()?;
+            (listen, providers, None)
+        }
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err("LLMPROXY_DATABASE_URL must contain valid Unicode".into());
+        }
+    };
+    let mut server = Server::new(None)?;
+    server.bootstrap();
+    let mut service = http_proxy_service(&server.configuration, Gateway::new(providers));
+    service.add_tcp(&listen);
+    tracing::info!(listen = %listen, "gateway listening");
+    server.add_service(service);
+    server.run_forever();
+}
+
+fn load_file_config() -> Result<(String, ProviderSnapshots), Box<dyn Error + Send + Sync>> {
     let config_path =
         env::var("LLMPROXY_CONFIG").unwrap_or_else(|_| "config/gateway.example.toml".to_owned());
     let config: GatewayConfig = toml::from_str(&fs::read_to_string(&config_path)?)?;
     config.validate()?;
 
-    let resolved = ResolvedConfig {
-        listen: config.listen.clone(),
-        openai_chat: resolve(&config, Protocol::OpenAiChat)?,
-        openai_responses: resolve(&config, Protocol::OpenAiResponses)?,
-        anthropic_messages: resolve(&config, Protocol::AnthropicMessages)?,
-    };
-
-    let _telemetry = observability::init()?;
-    let mut server = Server::new(None)?;
-    server.bootstrap();
-    let mut service = http_proxy_service(
-        &server.configuration,
-        Gateway::new(Arc::new(resolved.clone())),
-    );
-    service.add_tcp(&resolved.listen);
-    tracing::info!(listen = %resolved.listen, "gateway listening");
-    server.add_service(service);
-    server.run_forever();
+    let snapshot = ProviderSnapshot::new([
+        (
+            Protocol::OpenAiChat,
+            resolve(&config, Protocol::OpenAiChat)?,
+        ),
+        (
+            Protocol::OpenAiResponses,
+            resolve(&config, Protocol::OpenAiResponses)?,
+        ),
+        (
+            Protocol::AnthropicMessages,
+            resolve(&config, Protocol::AnthropicMessages)?,
+        ),
+    ])?;
+    Ok((config.listen, ProviderSnapshots::new(snapshot)))
 }
 
 fn resolve(
