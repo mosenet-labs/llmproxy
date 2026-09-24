@@ -238,7 +238,7 @@ async fn exercise_http(database_url: &str) {
             true,
         ),
         (
-            "Messages Test",
+            "Messages 测试 & Backup",
             "anthropic_messages",
             "http://localhost/",
             "localhost",
@@ -249,8 +249,7 @@ async fn exercise_http(database_url: &str) {
         let mut fields = provider_form(&csrf, name, protocol);
         set(&mut fields, "upstream_url", upstream_url);
         let response = post(&client, &base, "/providers/save", &fields).await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers()["location"], "/?saved=1");
+        success_notice(&client, &base, response, "created", name, "已创建").await;
         let saved = store
             .list()
             .await
@@ -309,7 +308,7 @@ async fn exercise_http(database_url: &str) {
     assert!(
         providers
             .iter()
-            .filter(|provider| provider.name != "Messages Test")
+            .filter(|provider| provider.protocol != Protocol::AnthropicMessages)
             .all(|provider| provider.anthropic_version.is_none()),
         "non-Anthropic forms must ignore an unrelated version field"
     );
@@ -327,28 +326,33 @@ async fn exercise_http(database_url: &str) {
         .unwrap();
     assert!(filtered.contains("Chat Test"));
     assert!(!filtered.contains("Responses Test"));
-    assert!(!filtered.contains("Messages Test"));
+    assert!(!filtered.contains("Messages 测试"));
     assert!(!filtered.contains(PROVIDER_KEY));
     assert!(filtered.contains("设为当前服务"));
     assert!(filtered.contains(&format!("id=\"disable-{}\"", chat.id)));
     assert!(!filtered.contains(&format!("id=\"delete-{}\"", chat.id)));
     assert!(filtered.contains("确认停用「Chat Test」？"));
     assert!(filtered.contains("确认停用"));
+    confirmation_without_description(
+        &filtered,
+        &format!("disable-{}", chat.id),
+        "确认停用「Chat Test」？",
+    );
 
     // Hiding deletion in the UI must also be enforced for a direct POST, even
     // when the enabled provider has not been selected for the current route.
-    let rejected_delete = post(
-        &client,
-        &base,
-        "/providers/action",
-        &action_form(&csrf, chat.id, chat.version, "delete"),
-    )
-    .await
-    .text()
-    .await
-    .unwrap();
-    assert!(rejected_delete.contains("role=\"alert\""));
-    assert!(rejected_delete.contains("先停用"));
+    let mut delete_fields = action_form(&csrf, chat.id, chat.version, "delete");
+    set(&mut delete_fields, "provider_name", "伪造名称");
+    let rejected_delete = post(&client, &base, "/providers/action", &delete_fields)
+        .await
+        .text()
+        .await
+        .unwrap();
+    let failure = element(&rejected_delete, "article", "gr-notification-error");
+    assert!(failure.contains("role=\"alert\""));
+    assert!(failure.contains("「Chat Test」删除失败"));
+    assert!(failure.contains("先停用"));
+    assert!(!failure.contains("伪造名称"));
     let unchanged = store.get(chat.id).await.unwrap();
     assert!(unchanged.enabled && !unchanged.active);
     assert_eq!(unchanged.version, chat.version);
@@ -369,12 +373,16 @@ async fn exercise_http(database_url: &str) {
     set(&mut update, "api_key", "");
     set(&mut update, "id", &chat.id.to_string());
     set(&mut update, "version", &chat.version.to_string());
-    assert_eq!(
-        post(&client, &base, "/providers/save", &update)
-            .await
-            .status(),
-        StatusCode::SEE_OTHER
-    );
+    let response = post(&client, &base, "/providers/save", &update).await;
+    success_notice(
+        &client,
+        &base,
+        response,
+        "updated",
+        "Chat Renamed",
+        "已保存",
+    )
+    .await;
     let updated = store.get(chat.id).await.unwrap();
     assert_eq!(updated.name, "Chat Renamed");
     assert_eq!(updated.host, "127.0.0.1");
@@ -400,12 +408,16 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(store.get(chat.id).await.unwrap().version, updated.version);
 
     let activate = action_form(&csrf, updated.id, updated.version, "activate");
-    assert_eq!(
-        post(&client, &base, "/providers/action", &activate)
-            .await
-            .status(),
-        StatusCode::SEE_OTHER
-    );
+    let response = post(&client, &base, "/providers/action", &activate).await;
+    success_notice(
+        &client,
+        &base,
+        response,
+        "activate",
+        "Chat Renamed",
+        "已设为当前服务",
+    )
+    .await;
     let active = store.get(chat.id).await.unwrap();
     assert!(active.active && active.enabled);
     assert_eq!(
@@ -425,6 +437,11 @@ async fn exercise_http(database_url: &str) {
     assert!(list_html.contains(&format!("id=\"disable-{}\"", active.id)));
     assert!(!list_html.contains(&format!("id=\"delete-{}\"", active.id)));
     assert!(list_html.contains("确认停用「Chat Renamed」？"));
+    confirmation_without_description(
+        &list_html,
+        &format!("disable-{}", active.id),
+        "确认停用「Chat Renamed」？",
+    );
     assert!(
         list_html.contains("取消"),
         "disable confirmation must be localized"
@@ -436,51 +453,129 @@ async fn exercise_http(database_url: &str) {
         "/providers/action",
         &action_form(&csrf, active.id, active.version, "delete"),
     )
-    .await;
-    assert!(
-        rejected_delete
-            .text()
-            .await
-            .unwrap()
-            .contains("role=\"alert\"")
-    );
+    .await
+    .text()
+    .await
+    .unwrap();
+    let failure = element(&rejected_delete, "article", "gr-notification-error");
+    assert!(failure.contains("role=\"alert\""));
+    assert!(failure.contains("「Chat Renamed」删除失败"));
+    assert!(failure.contains("先停用"));
     assert!(store.get(chat.id).await.unwrap().active);
     let disable = action_form(&csrf, active.id, active.version, "disable");
-    assert_eq!(
-        post(&client, &base, "/providers/action", &disable)
-            .await
-            .status(),
-        StatusCode::SEE_OTHER
-    );
+    let response = post(&client, &base, "/providers/action", &disable).await;
+    let disabled_html = success_notice(
+        &client,
+        &base,
+        response,
+        "disable",
+        "Chat Renamed",
+        "已停用",
+    )
+    .await;
     let disabled = store.get(chat.id).await.unwrap();
     assert!(!disabled.active && !disabled.enabled);
     assert!(store.load_active().await.unwrap().is_empty());
-    let disabled_html = client
-        .get(&base)
+    assert!(disabled_html.contains(&format!("id=\"delete-{}\"", disabled.id)));
+    assert!(!disabled_html.contains(&format!("id=\"disable-{}\"", disabled.id)));
+    assert!(disabled_html.contains("确认删除「Chat Renamed」？"));
+    assert!(disabled_html.contains("确认删除"));
+    assert!(disabled_html.contains("取消"));
+    confirmation_without_description(
+        &disabled_html,
+        &format!("delete-{}", disabled.id),
+        "确认删除「Chat Renamed」？",
+    );
+
+    let enable = action_form(&csrf, disabled.id, disabled.version, "enable");
+    let response = post(&client, &base, "/providers/action", &enable).await;
+    success_notice(&client, &base, response, "enable", "Chat Renamed", "已启用").await;
+    let enabled = store.get(chat.id).await.unwrap();
+    assert!(enabled.enabled && !enabled.active);
+    let disable = action_form(&csrf, enabled.id, enabled.version, "disable");
+    let response = post(&client, &base, "/providers/action", &disable).await;
+    success_notice(
+        &client,
+        &base,
+        response,
+        "disable",
+        "Chat Renamed",
+        "已停用",
+    )
+    .await;
+    let disabled = store.get(chat.id).await.unwrap();
+    let response = post(
+        &client,
+        &base,
+        "/providers/action",
+        &action_form(&csrf, disabled.id, disabled.version, "delete"),
+    )
+    .await;
+    success_notice(&client, &base, response, "delete", "Chat Renamed", "已删除").await;
+    assert_eq!(store.list().await.unwrap().len(), 2);
+    assert!(store.get(chat.id).await.is_err());
+
+    let unknown_notice = client
+        .get(format!(
+            "{base}/?notice=unknown&provider_name=UntrustedNotice"
+        ))
         .send()
         .await
         .unwrap()
         .text()
         .await
         .unwrap();
-    assert!(disabled_html.contains(&format!("id=\"delete-{}\"", disabled.id)));
-    assert!(!disabled_html.contains(&format!("id=\"disable-{}\"", disabled.id)));
-    assert!(disabled_html.contains("确认删除「Chat Renamed」？"));
-    assert!(disabled_html.contains("确认删除"));
-    assert!(disabled_html.contains("取消"));
-    assert_eq!(
-        post(
-            &client,
-            &base,
-            "/providers/action",
-            &action_form(&csrf, disabled.id, disabled.version, "delete")
-        )
+    assert!(!unknown_notice.contains("UntrustedNotice"));
+}
+
+async fn success_notice(
+    client: &Client,
+    base: &str,
+    response: Response,
+    notice: &str,
+    provider_name: &str,
+    result: &str,
+) -> String {
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("notice", notice)
+        .append_pair("provider_name", provider_name)
+        .finish();
+    let location = response.headers()["location"].to_str().unwrap();
+    assert_eq!(location, format!("/?{query}"));
+    let response = client
+        .get(format!("{base}{location}"))
+        .send()
         .await
-        .status(),
-        StatusCode::SEE_OTHER
-    );
-    assert_eq!(store.list().await.unwrap().len(), 2);
-    assert!(store.get(chat.id).await.is_err());
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response.text().await.unwrap();
+    let notification = element(&html, "article", "gr-notification-success");
+    assert!(notification.contains("role=\"status\""));
+    assert!(notification.contains(&format!(
+        "「{}」{result}",
+        provider_name.replace('&', "&amp;")
+    )));
+    assert!(!html.contains("配置已保存"));
+    assert!(!html.contains(PROVIDER_KEY));
+    html
+}
+
+fn confirmation_without_description(html: &str, id: &str, title: &str) {
+    let confirmation = element(html, "aside", &format!("id=\"{id}\""));
+    assert!(confirmation.contains(title));
+    assert!(!confirmation.contains("aria-describedby"));
+    assert!(!confirmation.contains(&format!("id=\"{id}-description\"")));
+}
+
+fn element<'a>(html: &'a str, tag: &str, marker: &str) -> &'a str {
+    html.split(&format!("<{tag}"))
+        .skip(1)
+        .find_map(|section| {
+            let element = section.split_once(&format!("</{tag}>"))?.0;
+            element.contains(marker).then_some(element)
+        })
+        .expect("expected HTML element")
 }
 
 fn hidden(html: &str, name: &str) -> String {

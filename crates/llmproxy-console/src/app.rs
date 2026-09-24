@@ -17,9 +17,9 @@ use topcoat::{
     view::{Attributes, View, attributes, component, view},
 };
 use topcoat_ant_design::{
-    DialogConfig, FormFieldConfig, TagTone, UiLanguage, data_table, dialog,
-    dialog_close_attributes, form_field, head_assets, popconfirm, popconfirm_trigger_attributes,
-    tag,
+    DialogConfig, FormFieldConfig, NotificationTone, TagTone, UiLanguage, data_table, dialog,
+    dialog_close_attributes, form_field, head_assets, notification, popconfirm,
+    popconfirm_trigger_attributes, tag,
 };
 use url::{Host, Url};
 
@@ -200,7 +200,33 @@ pub struct ListQuery {
     #[serde(default)]
     state: String,
     #[serde(default)]
-    saved: String,
+    notice: String,
+    #[serde(default)]
+    provider_name: String,
+}
+
+fn success_location(action: &str, name: &str) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("notice", action)
+        .append_pair("provider_name", name)
+        .finish();
+    format!("/?{query}")
+}
+
+fn success_message(query: &ListQuery) -> String {
+    let action = match query.notice.as_str() {
+        "created" => "已创建",
+        "updated" => "已保存",
+        "enable" => "已启用",
+        "disable" => "已停用",
+        "activate" => "已设为当前服务",
+        "delete" => "已删除",
+        _ => return String::new(),
+    };
+    if query.provider_name.is_empty() {
+        return String::new();
+    }
+    format!("「{}」{action}", query.provider_name)
 }
 
 #[page("/")]
@@ -248,14 +274,22 @@ async fn provider_list(
     let csrf = &app_context::<AppState>(cx).csrf;
     let total = all.len();
     let enabled = all.iter().filter(|provider| provider.enabled).count();
+    let notice = signal(cx, || match error {
+        Some(error) => error.to_owned(),
+        None => success_message(query),
+    });
     Ok(view! {
         provider_editor(editor: &editor)
+        notification(
+            message: &notice,
+            title: if error.is_some() { "操作失败" } else { "操作成功" },
+            tone: if error.is_some() { NotificationTone::Error } else { NotificationTone::Success },
+            language: UiLanguage::ChineseSimplified,
+        )
         <section class="page-heading">
             <div><div class="eyebrow">"模型服务"</div><h1>"Provider 管理"</h1><p>"管理上游连接与凭据，为每种协议选择当前服务。"</p></div>
             <button class="button button-primary" type="button" (create.clone())><span aria-hidden="true">"＋"</span>"新建 Provider"</button>
         </section>
-        if let Some(error) = error { <div class="alert alert-error" role="alert">(error)</div> }
-        if !query.saved.is_empty() { <div class="alert alert-success" role="status">"配置已保存。网关将自动载入最新路由。"</div> }
         <section class="route-overview" id="routes" aria-label="三个协议的当前 Provider">
             for protocol in PROTOCOLS {
                 <a class="route-card" href=(format!("/?protocol={}", protocol.as_str()))>
@@ -327,26 +361,10 @@ async fn provider_action_confirmation(
     };
     let id = format!("{action}-{}", provider.id);
     let title = format!("确认{label}「{}」？", provider.name);
-    let impact = if delete {
-        "删除后，配置和凭据无法恢复。".to_owned()
-    } else if provider.active {
-        format!(
-            "停用后将解除当前服务绑定，{} 的新请求将暂时不可用。正在处理的请求不受影响。",
-            provider.protocol.upstream_path(),
-        )
-    } else {
-        "停用后将无法被设为当前服务，可随时重新启用。".to_owned()
-    };
-    let description = format!(
-        "{} · {}。{}",
-        protocol_label(provider.protocol),
-        provider_url(provider),
-        impact,
-    );
     let trigger = popconfirm_trigger_attributes(cx, &id);
     Ok(view! {
         <button class=(if delete { "text-link danger-link" } else { "text-link" }) type="button" (trigger)>(label)</button>
-        popconfirm(id: id.as_str(), title: title.as_str(), description: Some(description.as_str()), language: UiLanguage::ChineseSimplified,
+        popconfirm(id: id.as_str(), title: title.as_str(), language: UiLanguage::ChineseSimplified,
             attrs: attributes! { class="provider-action-confirmation" },
             <form class="inline-form" action="/providers/action" method="post"><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class="gr-button gr-button-danger" type="submit">(format!("确认{label}"))</button></form>
         )
@@ -478,20 +496,28 @@ pub async fn save(cx: &Cx, Form(mut input): Form<ProviderForm>) -> Result<impl V
                 Some(version) => store
                     .update(id, version, provider)
                     .await
-                    .map(|_| ())
+                    .map(|provider| provider.name)
                     .map_err(|error| error.to_string()),
                 None => Err("表单版本缺失，请重新打开编辑页".to_owned()),
             },
             None => store
                 .create(provider)
                 .await
-                .map(|_| ())
+                .map(|provider| provider.name)
                 .map_err(|error| error.to_string()),
         },
     };
     input.api_key.clear();
     match result {
-        Ok(()) => Err(see_other("/?saved=1").into()),
+        Ok(name) => Err(see_other(success_location(
+            if input.id.is_some() {
+                "updated"
+            } else {
+                "created"
+            },
+            &name,
+        ))
+        .into()),
         Err(error) => Ok(view! { editor_page(input: &input, error: Some(error.as_str())) }),
     }
 }
@@ -509,6 +535,14 @@ pub struct ActionForm {
 pub async fn perform_action(cx: &Cx, Form(input): Form<ActionForm>) -> Result<impl View> {
     check_csrf(cx, &input.csrf)?;
     let store = &app_context::<AppState>(cx).store;
+    let label = match input.action.as_str() {
+        "activate" => "设为当前服务",
+        "enable" => "启用",
+        "disable" => "停用",
+        "delete" => "删除",
+        _ => return Err(topcoat::router::error::bad_request("无效的操作").into()),
+    };
+    let name = store.get(input.id).await?.name;
     let result = match input.action.as_str() {
         "activate" => store.activate(input.id, input.version).await.map(|_| ()),
         "enable" => store
@@ -523,9 +557,9 @@ pub async fn perform_action(cx: &Cx, Form(input): Form<ActionForm>) -> Result<im
         _ => return Err(topcoat::router::error::bad_request("无效的操作").into()),
     };
     if result.is_ok() {
-        return Err(see_other("/?saved=1").into());
+        return Err(see_other(success_location(&input.action, &name)).into());
     }
-    let error = result.unwrap_err().to_string();
+    let error = format!("「{name}」{label}失败：{}", result.unwrap_err());
     let all = store.list().await?;
     let providers = all.clone();
     let query = ListQuery::default();
