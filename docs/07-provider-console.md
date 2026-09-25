@@ -55,11 +55,11 @@ Provider 管理包含名称、协议、上游地址、API Key、Anthropic 版本
 - 上游地址填写服务根地址，请求路径由所选协议决定；不接受自定义路径、查询参数、片段或 URL 内嵌凭据。当前支持域名和 IPv4。服务端解析后沿用数据库的 `host / port / tls` 字段，已有 Provider 无需迁移即可编辑。
 - 只有选择 Anthropic Messages 时显示并提交 Anthropic API 版本；其他协议在服务端忽略该字段。
 - 超时设置默认折叠，摘要展示当前连接、读取、写入毫秒数。校验失败时展开，保证错误字段能够获得焦点。
-- 保存期间防止重复提交，成功后关闭弹窗并刷新列表；失败保留已填写内容并清空 API Key。
+- 保存期间防止重复提交，成功后关闭弹窗并局部更新列表；失败保留已填写内容并清空 API Key。
 - 列表中的停用与删除均使用确认气泡，仅显示“确认停用/删除「Provider 名称」？”；取消和确认按钮使用相同尺寸。
 - 新建、保存、启用、停用、设为当前服务、删除成功后使用组件库 `notification` 显示包含记录名称的通知，例如“「deepseek」已停用”。列表操作失败也通过通知显示记录名称和失败原因。通知默认约 4.5 秒自动关闭，可手动关闭；表单校验错误保留在弹窗内。
 
-交互采用 Topcoat 原生 `Signal`、`@click / @input / @change / @invalid` 和 `:value / :hidden / :disabled` 绑定。页面只渲染一个 Dialog，列表中的非敏感 Provider 配置用于初始化编辑状态；保存通过标准 POST 提交给 Topcoat `Form`，由服务端校验并返回错误页或 303 跳转。控制台没有独立手写业务 JavaScript、`fetch` 或 DOM 替换逻辑。
+交互采用 Topcoat 原生 `Signal`、`@click / @input / @change / @invalid` 和 `:value / :hidden / :disabled` 绑定。页面只渲染一个 Dialog，列表中的非敏感 Provider 配置用于初始化编辑状态；保存和列表操作通过原生 `#[procedure]` 异步提交，由服务端校验并返回业务结果；成功后更新 `Signal`，由 `#[shard]` 局部重绘列表，notification 显示包含记录名称的本次操作结果。通知不再从 URL 或 Cookie 初始化，因此刷新不会重播。Topcoat 0.8.1 原生表达式不能捕获请求拒绝，提交处用少量 `raw!` 捕获原生 procedure 的异常，恢复提交状态；请求与 DOM 更新仍由框架完成。详见[异步操作方案](09-console-async-actions.md)。
 
 `topcoat-ant-design` 的 Dialog 已补充可选 `open` 与 `title` Signal。浏览器原生 `showModal / close` 的必要适配封装在组件库内，业务只管理 Rust 状态。Topcoat 会把运行时表达式编译成浏览器 JavaScript，仍须加载框架自己的 runtime 资源。
 

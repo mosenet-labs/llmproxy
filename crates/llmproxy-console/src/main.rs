@@ -7,7 +7,7 @@ use llmproxy_store::ProviderStore;
 use topcoat::{
     asset::RouterBuilderAssetExt,
     router::{BodyLimit, Router},
-    runtime::RouterBuilderRuntimeExt,
+    runtime::{RouterBuilderProcedureExt, RouterBuilderRuntimeExt, RouterBuilderShardExt},
 };
 use topcoat_ant_design::RouterBuilderUiExt;
 
@@ -40,8 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .page(app::routes)
         .route(app::providers_redirect)
         .page(app::form)
-        .page(app::save)
-        .page(app::perform_action)
+        .route(app::save)
+        .route(app::perform_action)
+        .procedure(app::save_provider)
+        .procedure(app::provider_action)
+        .shard(app::provider_list)
         .route(assets::component_css)
         .route(assets::console_css)
         .route(assets::runtime_js)

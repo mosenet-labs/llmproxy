@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     server.bootstrap();
     let mut service = http_proxy_service(&server.configuration, Gateway::new(providers));
     service.add_tcp(&listen);
-    tracing::info!(listen = %listen, "gateway listening");
+    observability::listening(&listen);
     server.add_service(service);
     server.run_forever();
 }

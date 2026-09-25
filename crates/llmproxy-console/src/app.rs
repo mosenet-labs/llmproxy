@@ -6,14 +6,14 @@ use topcoat::{
     context::{Cx, app_context},
     router::{
         Body, Next, Slot,
-        content::Form,
+        content::{Form, Json},
         error::{forbidden, see_other},
         layer, layout, page,
         request::{headers, original_uri},
         response::Response,
         route,
     },
-    runtime::{Event, Signal, signal},
+    runtime::{Event, Signal, procedure, shard, signal},
     view::{Attributes, View, attributes, class, component, view},
 };
 use topcoat_ant_design::{
@@ -214,57 +214,32 @@ pub struct ListQuery {
     protocol: String,
     #[serde(default)]
     state: String,
-    #[serde(default)]
-    notice: String,
-    #[serde(default)]
-    provider_name: String,
-}
-
-fn success_location(action: &str, name: &str) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("notice", action)
-        .append_pair("provider_name", name)
-        .finish();
-    format!("/?{query}")
-}
-
-fn success_message(query: &ListQuery) -> String {
-    let action = match query.notice.as_str() {
-        "created" => "已创建",
-        "updated" => "已保存",
-        "enable" => "已启用",
-        "disable" => "已停用",
-        "activate" => "已设为当前服务",
-        "delete" => "已删除",
-        _ => return String::new(),
-    };
-    if query.provider_name.is_empty() {
-        return String::new();
-    }
-    format!("「{}」{action}", query.provider_name)
 }
 
 #[page("/")]
 pub async fn list(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> {
-    let all = app_context::<AppState>(cx).store.list().await?;
-    let search = query.q.trim().to_lowercase();
-    let filtered: Vec<_> = all
-        .iter()
-        .filter(|provider| {
-            (search.is_empty()
-                || provider.name.to_lowercase().contains(&search)
-                || provider.host.to_lowercase().contains(&search))
-                && (query.protocol.is_empty() || provider.protocol.as_str() == query.protocol)
-                && match query.state.as_str() {
-                    "enabled" => provider.enabled,
-                    "disabled" => !provider.enabled,
-                    "active" => provider.active,
-                    _ => true,
-                }
-        })
-        .cloned()
-        .collect();
-    Ok(view! { provider_list(all: &all, providers: &filtered, query: &query, error: None) })
+    let _ = cx;
+    Ok(view! { provider_workspace(query: &query, edit_id: "", editor_open: false) })
+}
+
+#[component]
+async fn provider_workspace(
+    cx: &Cx,
+    query: &ListQuery,
+    edit_id: &str,
+    editor_open: bool,
+) -> Result<impl View> {
+    let success = signal(cx, String::new);
+    let failure = signal(cx, String::new);
+    let q = query.q.clone();
+    let protocol = query.protocol.clone();
+    let state = query.state.clone();
+    let edit_id = edit_id.to_owned();
+    Ok(view! {
+        notification(message: &success, title: "操作成功", tone: NotificationTone::Success, language: UiLanguage::ChineseSimplified)
+        notification(message: &failure, title: "操作失败", tone: NotificationTone::Error, language: UiLanguage::ChineseSimplified)
+        provider_list(q: $(q), protocol: $(protocol), state: $(state), edit_id: $(edit_id), editor_open: $(editor_open), success: $(success), failure: $(failure))
+    })
 }
 
 #[page("/routes")]
@@ -291,40 +266,60 @@ pub async fn routes(cx: &Cx) -> Result<impl View> {
     })
 }
 
-#[component]
-async fn provider_list(
+#[shard]
+pub async fn provider_list(
     cx: &Cx,
-    all: &[ProviderView],
-    providers: &[ProviderView],
-    query: &ListQuery,
-    error: Option<&str>,
-    #[default] editor_input: Option<&ProviderForm>,
-    #[default] editor_error: Option<&str>,
-    #[default] editor_open: bool,
+    q: String,
+    protocol: String,
+    state: String,
+    edit_id: String,
+    editor_open: bool,
+    success: Signal<String>,
+    failure: Signal<String>,
 ) -> Result<impl View> {
-    let defaults = ProviderForm::default();
-    let editor = EditorSignals::new(
-        cx,
-        editor_input.unwrap_or(&defaults),
-        editor_error,
-        editor_open,
-    );
+    let controls = ListSignals {
+        refresh: signal(cx, || 0.0),
+        busy: signal(cx, || false),
+        success,
+        failure,
+    };
+    let _revision = controls.refresh.get();
+    let all = app_context::<AppState>(cx).store.list().await?;
+    let query = ListQuery { q, protocol, state };
+    let search = query.q.trim().to_lowercase();
+    let filtered: Vec<_> = all
+        .iter()
+        .filter(|provider| {
+            (search.is_empty()
+                || provider.name.to_lowercase().contains(&search)
+                || provider.host.to_lowercase().contains(&search))
+                && (query.protocol.is_empty() || provider.protocol.as_str() == query.protocol)
+                && match query.state.as_str() {
+                    "enabled" => provider.enabled,
+                    "disabled" => !provider.enabled,
+                    "active" => provider.active,
+                    _ => true,
+                }
+        })
+        .cloned()
+        .collect();
+    let providers = filtered;
+    let defaults = if edit_id.is_empty() {
+        ProviderForm::default()
+    } else {
+        app_context::<AppState>(cx)
+            .store
+            .get(edit_id.parse::<i64>()?)
+            .await?
+            .into()
+    };
+    let editor = EditorSignals::new(cx, &defaults, None, editor_open);
     let create = editor_trigger(cx, &editor, ProviderForm::default());
     let csrf = &app_context::<AppState>(cx).csrf;
     let total = all.len();
     let enabled = all.iter().filter(|provider| provider.enabled).count();
-    let notice = signal(cx, || match error {
-        Some(error) => error.to_owned(),
-        None => success_message(query),
-    });
     Ok(view! {
-        provider_editor(editor: &editor)
-        notification(
-            message: &notice,
-            title: if error.is_some() { "操作失败" } else { "操作成功" },
-            tone: if error.is_some() { NotificationTone::Error } else { NotificationTone::Success },
-            language: UiLanguage::ChineseSimplified,
-        )
+        provider_editor(editor: &editor, controls: &controls)
         <section class=(PAGE_HEADING)>
             <div><div class="mb-[9px] text-xs text-muted max-[640px]:text-[11px]">"模型服务"</div><h1>"Provider 管理"</h1><p>"管理上游连接与凭据，为每种协议选择当前服务。"</p></div>
             <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())><span aria-hidden="true">"＋"</span>"新建 Provider"</button>
@@ -344,8 +339,8 @@ async fn provider_list(
                 data_table(label: "Provider 列表", attrs: attributes! { class="min-w-[760px] [&_th]:text-xs! [&_td]:py-[18px]!" },
                     <thead><tr><th>"名称 / 协议"</th><th>"上游地址"</th><th>"状态"</th><th>"凭据"</th><th class="text-right!">"操作"</th></tr></thead>
                     <tbody>
-                        for provider in providers {
-                            <tr>
+                        for provider in &providers {
+                            <tr id=(format!("provider-{}", provider.id))>
                                 <td><button class="block border-0 bg-transparent p-0 text-left text-[13px] font-semibold leading-5 text-[#3b4655] hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-[5px] block text-[11px] leading-[18px] text-muted">(protocol_label(provider.protocol))</span></td>
                                 <td><span class="whitespace-nowrap text-xs text-secondary">(provider_url(provider))</span><span class="mt-[5px] block text-[11px] leading-[18px] text-muted">"读取超时 "(provider.read_timeout_ms / 1000)" 秒"</span></td>
                                 <td><div class="flex max-w-[155px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" })) if provider.active { tag(tone: TagTone::Processing, "当前使用") }</div></td>
@@ -353,13 +348,13 @@ async fn provider_list(
                                 <td><div class="flex min-w-[125px] items-center justify-end gap-3">
                                     <button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, provider.clone().into()))>"编辑"</button>
                                     if provider.enabled && !provider.active {
-                                        action_form(csrf: csrf, provider: provider, action: "activate", label: "设为当前服务")
+                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "activate", label: "设为当前服务")
                                     }
                                     if provider.enabled {
-                                        provider_action_confirmation(provider: provider, csrf: csrf, delete: false)
+                                        provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: false)
                                     } else {
-                                        action_form(csrf: csrf, provider: provider, action: "enable", label: "启用")
-                                        provider_action_confirmation(provider: provider, csrf: csrf, delete: true)
+                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "enable", label: "启用")
+                                        provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: true)
                                     }
                                 </div></td>
                             </tr>
@@ -378,6 +373,7 @@ async fn provider_action_confirmation(
     cx: &Cx,
     provider: &ProviderView,
     csrf: &str,
+    controls: &ListSignals,
     delete: bool,
 ) -> Result<impl View> {
     let (action, label) = if delete {
@@ -388,24 +384,30 @@ async fn provider_action_confirmation(
     let id = format!("{action}-{}", provider.id);
     let title = format!("确认{label}「{}」？", provider.name);
     let trigger = popconfirm_trigger_attributes(cx, &id);
+    let submit = action_submit(cx, controls, csrf, provider, action);
+    let busy = &controls.busy;
     Ok(view! {
-        <button class=(class!(TEXT_LINK, "text-[#ef6466]! hover:text-[#ff4d4f]!" if delete)) type="button" (trigger)>(label)</button>
+        <button class=(class!(TEXT_LINK, "text-[#ef6466]! hover:text-[#ff4d4f]!" if delete)) type="button" (trigger) :disabled=$(busy.get())>(label)</button>
         popconfirm(id: id.as_str(), title: title.as_str(), language: UiLanguage::ChineseSimplified,
             attrs: attributes! { class="[&_footer]:items-center [&_footer_.gr-button]:h-8! [&_footer_.gr-button]:w-[88px]! [&_footer_.gr-button]:px-3! [&_footer_.gr-button]:py-1! [&_footer_.gr-button]:text-[13px]! [&_footer_.gr-button]:leading-[22px]!" },
-            <form class="m-0 inline-flex" action="/providers/action" method="post"><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class="gr-button gr-button-danger" type="submit">(format!("确认{label}"))</button></form>
+            <form class="m-0 inline-flex" action="/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class="gr-button gr-button-danger" type="submit" :disabled=$(busy.get())>(format!("确认{label}"))</button></form>
         )
     })
 }
 
 #[component]
 async fn action_form(
+    cx: &Cx,
+    controls: &ListSignals,
     csrf: &str,
     provider: &ProviderView,
     action: &str,
     label: &str,
 ) -> Result<impl View> {
+    let submit = action_submit(cx, controls, csrf, provider, action);
+    let busy = &controls.busy;
     Ok(
-        view! { <form class="m-0 inline-flex" action="/providers/action" method="post"><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class=(TEXT_LINK) type="submit">(label)</button></form> },
+        view! { <form class="m-0 inline-flex" action="/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
     )
 }
 
@@ -504,15 +506,66 @@ impl ProviderForm {
 
 #[page("/providers/form")]
 pub async fn form(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
-    let input = match query.id {
-        Some(id) => app_context::<AppState>(cx).store.get(id).await?.into(),
-        None => ProviderForm::default(),
-    };
-    Ok(view! { editor_page(input: &input, error: None) })
+    let _ = cx;
+    let filters = ListQuery::default();
+    let edit_id = query.id.map(|id| id.to_string()).unwrap_or_default();
+    Ok(view! { provider_workspace(query: &filters, edit_id: &edit_id, editor_open: true) })
 }
 
-#[page(POST "/providers/save")]
-pub async fn save(cx: &Cx, Form(mut input): Form<ProviderForm>) -> Result<impl View> {
+type Outcome = std::result::Result<String, String>;
+
+#[procedure]
+pub async fn save_provider(
+    cx: &Cx,
+    csrf: String,
+    id: String,
+    version: String,
+    name: String,
+    protocol: String,
+    upstream_url: String,
+    enabled: bool,
+    api_key: String,
+    anthropic_version: String,
+    connect_timeout_ms: String,
+    read_timeout_ms: String,
+    write_timeout_ms: String,
+) -> Result<Outcome> {
+    let id = if id.is_empty() {
+        None
+    } else {
+        Some(id.parse::<i64>()?)
+    };
+    let version = if version.is_empty() {
+        None
+    } else {
+        Some(version.parse::<u64>()?)
+    };
+    save_input(
+        cx,
+        ProviderForm {
+            csrf,
+            id,
+            version,
+            name,
+            protocol,
+            upstream_url,
+            enabled,
+            api_key,
+            anthropic_version,
+            connect_timeout_ms,
+            read_timeout_ms,
+            write_timeout_ms,
+        },
+    )
+    .await
+}
+
+#[route(POST "/providers/save")]
+pub async fn save(cx: &Cx, Form(input): Form<ProviderForm>) -> Result<Json<Outcome>> {
+    Ok(Json(save_input(cx, input).await?))
+}
+
+async fn save_input(cx: &Cx, mut input: ProviderForm) -> Result<Outcome> {
     check_csrf(cx, &input.csrf)?;
     let store = &app_context::<AppState>(cx).store;
     let result = match input.input() {
@@ -534,18 +587,18 @@ pub async fn save(cx: &Cx, Form(mut input): Form<ProviderForm>) -> Result<impl V
         },
     };
     input.api_key.clear();
-    match result {
-        Ok(name) => Err(see_other(success_location(
-            if input.id.is_some() {
-                "updated"
-            } else {
-                "created"
-            },
-            &name,
-        ))
-        .into()),
-        Err(error) => Ok(view! { editor_page(input: &input, error: Some(error.as_str())) }),
-    }
+    Ok(result
+        .map(|name| {
+            format!(
+                "「{name}」{}",
+                if input.id.is_some() {
+                    "已保存"
+                } else {
+                    "已创建"
+                }
+            )
+        })
+        .map_err(|error| format!("「{}」保存失败：{error}", input.name)))
 }
 
 #[derive(Deserialize)]
@@ -557,15 +610,39 @@ pub struct ActionForm {
     action: String,
 }
 
-#[page(POST "/providers/action")]
-pub async fn perform_action(cx: &Cx, Form(input): Form<ActionForm>) -> Result<impl View> {
+#[procedure]
+pub async fn provider_action(
+    cx: &Cx,
+    csrf: String,
+    id: String,
+    version: String,
+    action: String,
+) -> Result<Outcome> {
+    action_input(
+        cx,
+        ActionForm {
+            csrf,
+            id: id.parse()?,
+            version: version.parse()?,
+            action,
+        },
+    )
+    .await
+}
+
+#[route(POST "/providers/action")]
+pub async fn perform_action(cx: &Cx, Form(input): Form<ActionForm>) -> Result<Json<Outcome>> {
+    Ok(Json(action_input(cx, input).await?))
+}
+
+async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
     check_csrf(cx, &input.csrf)?;
     let store = &app_context::<AppState>(cx).store;
-    let label = match input.action.as_str() {
-        "activate" => "设为当前服务",
-        "enable" => "启用",
-        "disable" => "停用",
-        "delete" => "删除",
+    let (label, completed) = match input.action.as_str() {
+        "activate" => ("设为当前服务", "已设为当前服务"),
+        "enable" => ("启用", "已启用"),
+        "disable" => ("停用", "已停用"),
+        "delete" => ("删除", "已删除"),
         _ => return Err(topcoat::router::error::bad_request("无效的操作").into()),
     };
     let name = store.get(input.id).await?.name;
@@ -580,27 +657,53 @@ pub async fn perform_action(cx: &Cx, Form(input): Form<ActionForm>) -> Result<im
             .await
             .map(|_| ()),
         "delete" => store.delete(input.id, input.version).await.map(|_| ()),
-        _ => return Err(topcoat::router::error::bad_request("无效的操作").into()),
+        _ => unreachable!(),
     };
-    if result.is_ok() {
-        return Err(see_other(success_location(&input.action, &name)).into());
-    }
-    let error = format!("「{name}」{label}失败：{}", result.unwrap_err());
-    let all = store.list().await?;
-    let providers = all.clone();
-    let query = ListQuery::default();
-    Ok(
-        view! { provider_list(all: &all, providers: &providers, query: &query, error: Some(error.as_str())) },
-    )
+    Ok(result
+        .map(|_| format!("「{name}」{completed}"))
+        .map_err(|error| format!("「{name}」{label}失败：{error}")))
 }
 
-#[component]
-async fn editor_page(cx: &Cx, input: &ProviderForm, error: Option<&str>) -> Result<impl View> {
-    let all = app_context::<AppState>(cx).store.list().await?;
-    let query = ListQuery::default();
-    Ok(view! {
-        provider_list(all: &all, providers: &all, query: &query, error: None, editor_input: Some(input), editor_error: error, editor_open: true)
-    })
+struct ListSignals {
+    refresh: Signal<f64>,
+    busy: Signal<bool>,
+    success: Signal<String>,
+    failure: Signal<String>,
+}
+
+fn action_submit(
+    cx: &Cx,
+    controls: &ListSignals,
+    csrf: &str,
+    provider: &ProviderView,
+    action: &str,
+) -> Attributes {
+    let ListSignals {
+        refresh,
+        busy,
+        success,
+        failure,
+    } = controls;
+    let id = provider.id.to_string();
+    let version = provider.version.to_string();
+    let unavailable: Outcome = Err(format!(
+        "「{}」请求失败或结果未确认，请检查列表状态后重试",
+        provider.name
+    ));
+    attributes! { cx => @submit=$(async |event: Event| {
+        event.prevent_default();
+        if busy.get() { return; }
+        busy.set(true);
+        success.set("".to_owned());
+        failure.set("".to_owned());
+        // Native procedures have no Rust expression API for transport rejections in 0.8.
+        let result = raw!("await Promise.resolve(${provider_action}.call(${csrf}, ${id}, ${version}, ${action})).catch(() => ${unavailable})", unavailable.clone());
+        busy.set(false);
+        if result.is_ok() {
+            success.set(result.unwrap());
+            refresh.increment();
+        } else { failure.set(result.unwrap_err()); }
+    }) }
 }
 
 // Business state stays in Topcoat. IDs and versions remain strings in the
@@ -722,7 +825,11 @@ fn editor_trigger(cx: &Cx, editor: &EditorSignals, input: ProviderForm) -> Attri
 }
 
 #[component]
-async fn provider_editor(cx: &Cx, editor: &EditorSignals) -> Result<impl View> {
+async fn provider_editor(
+    cx: &Cx,
+    editor: &EditorSignals,
+    controls: &ListSignals,
+) -> Result<impl View> {
     let csrf = &app_context::<AppState>(cx).csrf;
     let EditorSignals {
         open,
@@ -743,12 +850,34 @@ async fn provider_editor(cx: &Cx, editor: &EditorSignals) -> Result<impl View> {
         write_timeout,
     } = editor;
     let close = dialog_close_attributes(cx, "provider-dialog");
+    let success = &controls.success;
+    let failure = &controls.failure;
+    let refresh = &controls.refresh;
+    let unavailable: Outcome = Err("保存请求失败或结果未确认，请检查列表状态后重试".to_owned());
     Ok(view! {
         dialog(config: DialogConfig::new("provider-dialog", "Provider 配置"),
             open: Some(open), title: Some(title), busy: busy, language: UiLanguage::ChineseSimplified,
             attrs: attributes! { cx => class="w-[min(720px,calc(100%_-_32px))]! max-[640px]:w-[calc(100%_-_24px)]! max-[640px]:max-h-[calc(100dvh_-_24px)]! [&_.gr-dialog-header]:px-6 [&_.gr-dialog-header]:pt-5 [&_.gr-dialog-header]:pb-4 [&_h2]:m-0 [&_h2]:text-lg max-[640px]:[&_.gr-dialog-header]:px-[18px] max-[640px]:[&_.gr-dialog-header]:py-4" @close=$(|_event: Event| api_key.set("".to_owned())) },
             <form class="m-0 flex min-h-0 flex-col" action="/providers/save" method="post" autocomplete="off"
-                @submit=$(|event: Event| { if busy.get() { event.prevent_default(); } else { busy.set(true); } })>
+                @submit=$(async |event: Event| {
+                    event.prevent_default();
+                    if busy.get() { return; }
+                    busy.set(true);
+                    error.set("".to_owned());
+                    success.set("".to_owned());
+                    failure.set("".to_owned());
+                    let result = raw!("await Promise.resolve(${save_provider}.call(${csrf}, ${id}.get(), ${version}.get(), ${name}.get(), ${protocol}.get(), ${upstream_url}.get(), ${enabled}.get(), ${api_key}.get(), ${anthropic_version}.get(), ${connect_timeout}.get(), ${read_timeout}.get(), ${write_timeout}.get())).catch(() => ${unavailable})", unavailable.clone());
+                    api_key.set("".to_owned());
+                    busy.set(false);
+                    if result.is_ok() {
+                        open.set(false);
+                        success.set(result.unwrap());
+                        refresh.increment();
+                    } else {
+                        error.set(result.unwrap_err());
+                        advanced.set(true);
+                    }
+                })>
                 <input type="hidden" name="csrf" value=(csrf.as_str())>
                 <input type="hidden" name="id" :value=$(id.get()) :disabled=$(id.get().is_empty())>
                 <input type="hidden" name="version" :value=$(version.get()) :disabled=$(id.get().is_empty())>

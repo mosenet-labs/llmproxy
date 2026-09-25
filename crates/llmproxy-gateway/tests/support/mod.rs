@@ -41,6 +41,7 @@ pub struct Gateway {
 #[derive(Clone, Copy)]
 pub struct Provider {
     pub address: SocketAddr,
+    pub host: Option<&'static str>,
     pub tls: bool,
     pub version: Option<&'static str>,
     pub connect_ms: u64,
@@ -52,6 +53,7 @@ impl Provider {
     pub fn http(address: SocketAddr) -> Self {
         Self {
             address,
+            host: None,
             tls: false,
             version: Some("2023-06-01"),
             connect_ms: 1500,
@@ -78,11 +80,11 @@ impl Gateway {
         let mut config = format!("listen = \"{address}\"\n");
         for (index, provider) in providers.iter().enumerate() {
             // localhost supplies a DNS name for the TLS SNI test.
-            let host = if provider.tls {
+            let host = provider.host.unwrap_or(if provider.tls {
                 "localhost"
             } else {
                 "127.0.0.1"
-            };
+            });
             config.push_str(&format!(
                 "\n[{}]\nhost = \"{host}\"\nport = {}\ntls = {}\napi_key_env = \"LLMPROXY_TEST_KEY_{index}\"\nconnect_timeout_ms = {}\nread_timeout_ms = {}\nwrite_timeout_ms = {}\n",
                 NAMES[index], provider.address.port(), provider.tls,

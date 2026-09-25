@@ -1,5 +1,4 @@
 use std::{
-    net::ToSocketAddrs,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,45 +8,35 @@ use llmproxy_core::{
     protocol::Protocol,
     routing::{Route, match_route},
 };
-use opentelemetry::{
-    KeyValue,
-    metrics::{Counter, Histogram},
-};
 use pingora::{
     Error, ErrorSource, ErrorType, Result,
+    protocols::Digest,
     proxy::{FailToProxy, ProxyHttp, Session},
     upstreams::peer::HttpPeer,
 };
 use pingora_http::{RequestHeader, ResponseHeader};
-use tracing::Span;
 
-use crate::snapshot::{ProviderSnapshots, ResolvedProvider};
+use crate::{
+    observability::{GatewayTelemetry, RequestTelemetry},
+    snapshot::{ProviderSnapshots, ResolvedProvider},
+};
 
 pub struct Gateway {
     providers: ProviderSnapshots,
-    requests: Counter<u64>,
-    failures: Counter<u64>,
-    duration: Histogram<f64>,
+    telemetry: GatewayTelemetry,
 }
 
 pub struct RequestContext {
-    start: Instant,
+    telemetry: RequestTelemetry,
     protocol: Option<Protocol>,
     provider: Option<Arc<ResolvedProvider>>,
-    span: Option<Span>,
 }
 
 impl Gateway {
     pub fn new(providers: ProviderSnapshots) -> Self {
-        let meter = opentelemetry::global::meter("llmproxy-gateway");
         Self {
             providers,
-            requests: meter.u64_counter("llmproxy.requests").build(),
-            failures: meter.u64_counter("llmproxy.failures").build(),
-            duration: meter
-                .f64_histogram("llmproxy.duration")
-                .with_unit("s")
-                .build(),
+            telemetry: GatewayTelemetry::new(),
         }
     }
 }
@@ -58,10 +47,9 @@ impl ProxyHttp for Gateway {
 
     fn new_ctx(&self) -> Self::CTX {
         RequestContext {
-            start: Instant::now(),
+            telemetry: RequestTelemetry::new(),
             protocol: None,
             provider: None,
-            span: None,
         }
     }
 
@@ -70,24 +58,16 @@ impl ProxyHttp for Gateway {
         let method = request.method.as_str();
         let path = request.uri.path();
         let route = match_route(method, path);
-        let span = tracing::info_span!(
-            "llmproxy.request",
-            http.method = method,
-            http.route = path,
-            llm.protocol = tracing::field::Empty,
-            http.status_code = tracing::field::Empty,
-        );
-        ctx.span = Some(span);
+        ctx.telemetry.begin(method, path);
 
         match route {
             Route::Proxy(protocol) => {
                 ctx.protocol = Some(protocol);
-                if let Some(span) = &ctx.span {
-                    span.record("llm.protocol", protocol.as_str());
-                }
                 // Pin one immutable provider for the full request, including SSE.
                 // Later refreshes affect only requests entering after selection.
                 ctx.provider = self.providers.select(protocol);
+                ctx.telemetry
+                    .selected(protocol, ctx.provider.as_ref().map(|p| p.authority()));
                 if ctx.provider.is_none() {
                     session.respond_error(503).await?;
                     return Ok(true);
@@ -124,29 +104,62 @@ impl ProxyHttp for Gateway {
             .provider
             .as_ref()
             .expect("request_filter selected provider");
-        // HttpPeer::new unwraps DNS errors when passed a hostname. Resolve here
-        // so a lookup failure follows the normal upstream error path.
-        let address = (provider.host.as_str(), provider.port)
-            .to_socket_addrs()
-            .map_err(|error| {
-                Error::because(ErrorType::ConnectError, "provider DNS lookup failed", error)
-                    .into_up()
-            })?
-            .next()
-            .ok_or_else(|| {
+        // Resolve before constructing HttpPeer, which would panic on a DNS error.
+        let connect_timeout = Duration::from_millis(provider.connect_timeout_ms);
+        let dns_start = Instant::now();
+        let address = match tokio::time::timeout(
+            connect_timeout,
+            tokio::net::lookup_host((provider.host.as_str(), provider.port)),
+        )
+        .await
+        {
+            Ok(Ok(mut addresses)) => addresses.next().ok_or_else(|| {
                 Error::explain(
                     ErrorType::ConnectError,
                     "provider DNS lookup returned no addresses",
                 )
                 .into_up()
-            })?;
+            }),
+            Ok(Err(error)) => {
+                Err(
+                    Error::because(ErrorType::ConnectError, "provider DNS lookup failed", error)
+                        .into_up(),
+                )
+            }
+            Err(_) => Err(Error::explain(
+                ErrorType::ConnectTimedout,
+                "provider DNS lookup timed out",
+            )
+            .into_up()),
+        };
+        ctx.telemetry.resolved(dns_start.elapsed(), &address);
+        let address = address?;
         let mut peer = HttpPeer::new(address, provider.tls, provider.host.clone());
-        let connect_timeout = Duration::from_millis(provider.connect_timeout_ms);
+        peer.options.tracer = Some(self.telemetry.connecting(&mut ctx.telemetry, address));
         peer.options.connection_timeout = Some(connect_timeout);
         peer.options.total_connection_timeout = Some(connect_timeout);
         peer.options.read_timeout = Some(Duration::from_millis(provider.read_timeout_ms));
         peer.options.write_timeout = Some(Duration::from_millis(provider.write_timeout_ms));
         Ok(Box::new(peer))
+    }
+
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        _peer: &HttpPeer,
+        #[cfg(unix)] fd: std::os::unix::io::RawFd,
+        #[cfg(windows)] sock: std::os::windows::io::RawSocket,
+        digest: Option<&Digest>,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        #[cfg(unix)]
+        let handle = fd as u64;
+        #[cfg(windows)]
+        let handle = sock as u64;
+        self.telemetry
+            .connected(&mut ctx.telemetry, reused, handle, digest);
+        Ok(())
     }
 
     async fn upstream_request_filter(
@@ -181,8 +194,9 @@ impl ProxyHttp for Gateway {
         &self,
         _session: &mut Session,
         response: &mut ResponseHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<()> {
+        ctx.telemetry.response_headers(response.status.as_u16());
         // This is a copy of the upstream header, before downstream framing is
         // selected. The upstream reader keeps its original framing information.
         let mut nominated = Vec::new();
@@ -238,9 +252,10 @@ impl ProxyHttp for Gateway {
         &self,
         _session: &mut Session,
         _peer: &HttpPeer,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
         mut error: Box<Error>,
     ) -> Box<Error> {
+        ctx.telemetry.connection_failed(&error);
         error.set_retry(false);
         error
     }
@@ -262,7 +277,7 @@ impl ProxyHttp for Gateway {
         &self,
         session: &mut Session,
         error: &Error,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> FailToProxy {
         // A stream that already started can only be terminated. Its HTTP status
         // remains the one the client received; never append an error body to SSE.
@@ -279,10 +294,7 @@ impl ProxyHttp for Gateway {
         if code != 0
             && let Err(write_error) = session.respond_error(code).await
         {
-            tracing::warn!(
-                error_type = write_error.etype().as_str(),
-                "failed to send gateway error"
-            );
+            ctx.telemetry.error_response_failed(&write_error);
         }
         FailToProxy {
             error_code: code,
@@ -299,37 +311,7 @@ impl ProxyHttp for Gateway {
         let status = session
             .response_written()
             .map(|header| header.status.as_u16());
-        let protocol = ctx.protocol.map(Protocol::as_str).unwrap_or("none");
-        let mut attributes = vec![KeyValue::new("protocol", protocol)];
-        if let Some(status) = status {
-            attributes.push(KeyValue::new("status", status as i64));
-        }
-        let error_type = error.map(|error| error.etype().as_str());
-        if let Some(error_type) = error_type {
-            attributes.push(KeyValue::new("error_type", error_type));
-        }
-        self.requests.add(1, &attributes);
-        let failed = error.is_some() || status.is_some_and(|status| status >= 500);
-        if failed {
-            self.failures.add(1, &attributes);
-        }
-        let duration = ctx.start.elapsed().as_secs_f64();
-        self.duration.record(duration, &attributes);
-        if let Some(span) = &ctx.span {
-            if let Some(status) = status {
-                span.record("http.status_code", status);
-            }
-            let _entered = span.enter();
-            tracing::info!(
-                status,
-                duration_seconds = duration,
-                protocol,
-                failed,
-                error_type,
-                error_source = error.map(|error| error.esource().as_str()),
-                "request completed"
-            );
-        }
+        self.telemetry.finish(&mut ctx.telemetry, status, error);
     }
 }
 

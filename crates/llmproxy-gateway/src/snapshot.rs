@@ -151,7 +151,10 @@ impl ProviderSnapshots {
             .name("provider-snapshot-refresh".to_owned())
             .spawn(move || {
                 runtime.block_on(async move {
-                    let mut interval = time::interval_at(time::Instant::now() + REFRESH_INTERVAL, REFRESH_INTERVAL);
+                    let mut interval = time::interval_at(
+                        time::Instant::now() + REFRESH_INTERVAL,
+                        REFRESH_INTERVAL,
+                    );
                     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
                     let mut unavailable = false;
                     loop {
@@ -161,7 +164,9 @@ impl ProviderSnapshots {
                                 .await
                                 .map_err(|_| ())?
                                 .map_err(|_| ())
-                                .and_then(|providers| ProviderSnapshot::from_database(providers).map_err(|_| ()))
+                                .and_then(|providers| {
+                                    ProviderSnapshot::from_database(providers).map_err(|_| ())
+                                })
                         };
                         let loaded = tokio::select! {
                             _ = &mut stopping => break,
@@ -171,14 +176,14 @@ impl ProviderSnapshots {
                             Ok(snapshot) => {
                                 background.replace(snapshot);
                                 if unavailable {
-                                    tracing::info!("provider snapshot refresh recovered");
+                                    crate::observability::snapshot_refresh(true);
                                     unavailable = false;
                                 }
                             }
                             Err(()) => {
                                 // Database errors may contain URLs, SQL values, or keys.
                                 if !unavailable {
-                                    tracing::warn!("provider snapshot refresh failed; retaining the last snapshot");
+                                    crate::observability::snapshot_refresh(false);
                                     unavailable = true;
                                 }
                             }

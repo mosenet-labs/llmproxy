@@ -45,6 +45,30 @@
 - [ ] 多用户管理身份验证、权限与操作审计。
 - [ ] 主密钥轮换工具及备份恢复流程。
 
-## 验收重点
+## O：网关可观测性收口
+
+详见[需求、阶段分工与验收约定](08-gateway-observability.md)。
+
+- [x] O1：记录 HttpPeer/tracer 能力边界及集中记录设计。
+- [x] O2：统一请求 span、完成日志、指标及运行事件出口。
+- [x] O3：补充 DNS、TCP/TLS、连接复用和受控错误诊断。
+- [x] O4：验证请求恰好一次记录、SSE、复用不重复握手、错误脱敏与三类遥测关联。
+- [x] O5：同步运行文档并通过 workspace 完整验证。
+
+本轮验证：`cargo fmt --all -- --check`、`cargo check --workspace --offline`、`cargo test --workspace --offline` 均通过；完整测试 33 项，包含真实本地 HTTP/SSE 与隔离 PostgreSQL 用例。
+
+## C：控制台异步操作与一次性通知
+
+详见[已确认方案与验收](09-console-async-actions.md)。
+
+- [x] C1：记录重复通知原因、异步方案和任务。
+- [x] C2：将保存和列表写操作改为 Topcoat 原生异步过程。
+- [x] C3：局部更新列表，一次性通知，保留筛选与页面位置。
+- [x] C4：处理业务失败、提交状态与凭据清理。
+- [x] C5：完成 HTTP、浏览器回归和 workspace 验证。
+
+本轮验证：`cargo fmt --all -- --check`、`cargo check --workspace --offline`、`cargo test --workspace --offline` 均通过，完整测试 33 项。浏览器验证记录见[异步操作文档](09-console-async-actions.md#验证记录)。
+
+## 完整验收
 
 P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --workspace`。P1 应通过本地模拟上游的实际 HTTP/SSE 请求；P2 应验证管理变更无须重启代理即可生效。

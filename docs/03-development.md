@@ -22,7 +22,7 @@ LLMPROXY_CONFIG=config/gateway.example.toml cargo run -p llmproxy-gateway
 
 尚未开始响应时，上游超时返回 `504`，其他上游传输故障返回 `502`。流开始后的故障会终止流，保持已经发送的状态码。Provider 自己返回的 HTTP 错误保留原状态和错误体。
 
-写入请求体超时后，Pingora 仍可能等待上游响应；该等待由读取超时约束，完整的上游响应仍可透传。同步 DNS 解析目前不受上述连接超时覆盖。详细边界见[超时契约](05-explicit-routes-validation.md#超时契约)。
+写入请求体超时后，Pingora 仍可能等待上游响应；该等待由读取超时约束，完整的上游响应仍可透传。DNS 使用异步解析，单独以 `connect_timeout_ms` 限制等待；随后 TCP+TLS 建联另有一份相同预算。系统 resolver 的底层工作可能在等待超时后继续完成。详细边界见[超时契约](05-explicit-routes-validation.md#超时契约)。
 
 ## 自动化联调
 
@@ -48,3 +48,13 @@ export RUST_LOG='llmproxy_gateway=info,pingora=warn'
 不要在配置文件或仓库中放置实际凭据。OpenObserve 会在基地址下接收 `/v1/traces`、`/v1/logs`、`/v1/metrics`。如使用 Collector，也可把变量指向 Collector 的 OTLP/HTTP 地址。开发环境没有 OTLP 地址时，仅启用本地日志；指标调用不会导出。
 
 参考：[OpenObserve OTLP 接入](https://openobserve.ai/docs/ingestion/logs/otlp/)。
+
+## 网关连接诊断
+
+网关的 span、完成日志、阶段指标和连接事件集中在 `observability` 模块。默认每个请求在结束时输出一条 `event_kind=request` 的 JSON 完成记录，含 DNS/连接获取/TCP/TLS/响应头耗时、复用标志、连接 ID、TLS 版本与 cipher、上游状态和错误阶段。SSE 中途失败时保留已发送状态，并记录 `failed=true`。缺失阶段不填 0。
+
+设置 OTLP 后，请求日志附带 `trace_id` / `span_id`，OpenObserve 中可据此关联 trace；默认本地日志仍可按进程内 `request_id` 查询。`llmproxy.phase.duration` 按固定 `phase` 标签统计各阶段耗时，复用连接不新增 TCP/TLS 握手样本。`llmproxy.connection.events` 的 `event=connected/released` 分别计数 L4 成功与对象释放。
+
+排查连接生命周期时可设置 `RUST_LOG=llmproxy_gateway=info,llmproxy_gateway::observability::connection=debug,pingora=warn`；DEBUG 事件独立于请求 span，通过 `connection_id` 关联。`error_stage=dns/connect/tls/response_headers/response_body/request_write/downstream/request` 表示受控诊断分类。总连接超时仍归 `connect`，不能据此声称测得 TLS 失败耗时。
+
+这些完成事件仍受 `RUST_LOG` 控制，独立访问日志出口与 W3C 上下文传播尚待后续任务。详见[可观测性设计](08-gateway-observability.md)。

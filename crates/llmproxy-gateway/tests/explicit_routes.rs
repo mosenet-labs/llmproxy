@@ -424,6 +424,31 @@ fn tls_client_hello_has_hostname_sni_and_handshake_timeout_is_504() {
     assert!(started.elapsed() < DEADLINE);
     assert!(started.elapsed() >= Duration::from_millis(provider.connect_ms));
     assert_eq!(upstream.count(), 1);
+    let deadline = Instant::now() + DEADLINE;
+    let record = loop {
+        let record = gateway
+            .logs()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|entry| {
+                entry["fields"]["event_kind"] == "request" && entry["fields"]["status"] == 504
+            });
+        if let Some(record) = record {
+            break record["fields"].clone();
+        }
+        assert!(Instant::now() < deadline, "missing TLS failure diagnostics");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(record["tcp_connected"], true);
+    assert!(record["connection_id"].is_number());
+    assert!(record["connection_acquire_seconds"].as_f64().unwrap() >= 0.7);
+    // The total deadline is a connect error; no successful TLS Digest exists.
+    assert!(matches!(
+        record["error_stage"].as_str(),
+        Some("connect" | "tls")
+    ));
+    assert!(record["tls_seconds"].is_null());
+    assert!(record["tls_version"].is_null());
     drop(release);
 }
 

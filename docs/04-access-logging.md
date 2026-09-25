@@ -47,4 +47,4 @@ Pingora 官方将 `ProxyHttp::logging()` 定义为请求完成或发生致命错
 
 不记录 `Authorization`、`x-api-key`、完整 URL 查询串、请求/响应 body、原始提示词。`User-Agent` 如需记录，应限制长度并使用 JSON 转义。指标标签只使用协议、路由模板、状态码等有限集合，避免请求 ID 进入指标。
 
-验收场景：正常请求、本地 `404/405/501`、上游连接失败、上游 `5xx`、SSE 正常结束和客户端中断，均恰好一条；JSON 可解析；`RUST_LOG=warn` 不影响访问日志；记录中没有凭据；队列满时丢弃指标递增。当前 [proxy.rs](../crates/llmproxy-gateway/src/proxy.rs) 的 `logging()` 只输出简短完成事件，尚未实现此设计。
+验收场景：正常请求、本地 `404/405/501`、上游连接失败、上游 `5xx`、SSE 正常结束和客户端中断，均恰好一条；JSON 可解析；`RUST_LOG=warn` 不影响访问日志；记录中没有凭据；队列满时丢弃指标递增。当前 [proxy.rs](../crates/llmproxy-gateway/src/proxy.rs) 的 `logging()` 已委托可观测性模块输出集中完成事件和连接诊断，见[可观测性收口](08-gateway-observability.md)；本篇设计中的独立过滤、有界异步队列和丢弃计数仍待实现。

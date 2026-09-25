@@ -23,5 +23,7 @@ opentelemetry-otlp = { version = "0.33.0", default-features = false, features = 
 opentelemetry-appender-tracing = "0.33.0"
 
 [dev-dependencies]
+serde_json.workspace = true
+opentelemetry_sdk = { version = "0.33.0", features = ["testing"] }
 base64 = "0.23.1"
 toasty = { version = "0.10.0", default-features = false, features = ["postgresql"] }

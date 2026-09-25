@@ -24,7 +24,7 @@
 | `early_request_filter` | 早期追踪 | 后续提取 traceparent、生成 request ID；本任务保留现有追踪入口 |
 | `request_filter` | 路由及本地拒绝 | 选择三个明确协议；生成 404/405/501；本地响应后返回 `Ok(true)` |
 | `upstream_peer` | Provider、TLS、超时 | 创建 HttpPeer，设置目标地址、端口、SNI，以及连接和读写超时 |
-| `connected_to_upstream` | 连接观测 | 后续访问日志记录连接地址及复用信息 |
+| `connected_to_upstream` | 连接观测 | 采集连接地址、复用信息、TCP/TLS Digest，交给统一遥测出口 |
 | `upstream_request_filter` | 请求头 | 改写 Host、凭据及配置控制的协议头；后续注入 trace 上下文 |
 | `request_body_filter` | 请求体 | 保持默认流式透传 |
 | `upstream_response_filter` | 上游响应头 | 保留状态与端到端响应头，清理逐跳头；后续记录上游状态、响应头耗时 |
@@ -49,7 +49,7 @@
 | `read_timeout_ms` | 60000 | 上游响应头/响应体的读取操作超时 |
 | `write_timeout_ms` | 30000 | 向上游写请求的操作超时 |
 
-读取超时不是整次 SSE 请求的总时限，也不是严格的首 token deadline。连接池 `idle_timeout` 不用于 SSE 无数据超时。同步 DNS 解析不受 HttpPeer 的连接超时覆盖，异步 DNS 与独立解析超时后续处理。
+读取超时不是整次 SSE 请求的总时限，也不是严格的首 token deadline。连接池 `idle_timeout` 不用于 SSE 无数据超时。DNS 使用 Tokio 异步解析，单独以 `connect_timeout_ms` 限制等待；DNS 结束后 TCP+TLS 建联另有一份同值预算。系统 resolver 的底层阻塞工作可能在等待超时后继续完成。
 
 Pingora 在请求体写入超时后仍可等待上游响应，该等待受读取超时约束。如果上游返回完整响应，保留该响应；如果随后读取也失败，则由保存的写入错误进入故障处理。因此写入超时不等于整次请求立即返回 504 的期限。
 
@@ -107,4 +107,4 @@ cargo test --workspace
 - 默认并发执行曾发现临时端口预留与网关启动间的竞态，已通过统一分配锁，以及 HTTP 响应和目标子进程唯一请求日志联合就绪检查解决。业务测试请求不重试。
 - SSE 断流断言检查实际传输错误，排除读取超时造成的假通过；客户端取消仅接受连接关闭类错误；写入超时校验日志中的 `WriteTimedout`。
 
-验收边界：TLS 用例验证 ClientHello SNI 和握手停滞超时，未覆盖完整 TLS 服务端握手或真实 Provider 的网络环境；本轮没有调用真实 Provider 或 OpenObserve。DNS 仍使用同步解析，超时边界见上文。遥测出口断言、W3C trace 传播及完整访问日志继续按[任务文档](02-tasks.md)实施。
+验收边界：TLS 用例验证 ClientHello SNI 和握手停滞超时，未覆盖完整 TLS 服务端握手或真实 Provider 的网络环境；本轮没有调用真实 Provider 或 OpenObserve。DNS 异步等待和集中遥测见[可观测性收口](08-gateway-observability.md)，超时边界见上文。W3C trace 传播及完整访问日志继续按[任务文档](02-tasks.md)实施。

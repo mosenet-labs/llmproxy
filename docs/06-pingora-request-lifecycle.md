@@ -116,4 +116,6 @@ Pingora 允许 `fail_to_connect` 或 `error_while_proxy` 返回可重试错误�
 
 请求结束后，框架还会清理资源并决定是否复用连接。`logging` 是请求收尾的观测点，不代表客户端应用已经确认消费了全部响应字节。
 
+当前各阶段采集的 DNS、TCP/TLS、连接复用和错误数据在 `observability` 模块统一记录，详见[可观测性收口与连接诊断](08-gateway-observability.md)。连接 tracer 独立于请求 span，避免池中连接延长请求 span 生命周期。
+
 完整访问日志字段与输出策略见[访问日志设计](04-access-logging.md)；各项能力的完成状态见[实施任务](02-tasks.md)。

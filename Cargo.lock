@@ -1799,6 +1799,7 @@ dependencies = [
  "llmproxy-store",
  "reqwest",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "toasty",
  "tokio",
@@ -1832,6 +1833,7 @@ dependencies = [
  "pingora",
  "pingora-http",
  "serde",
+ "serde_json",
  "toasty",
  "tokio",
  "toml",
@@ -2183,6 +2185,7 @@ dependencies = [
  "portable-atomic",
  "rand 0.9.5",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

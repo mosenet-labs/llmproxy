@@ -22,6 +22,14 @@
 
 ## 关联文档
 
+补充确认：Provider 写操作采用异步提交、局部更新列表和本次操作通知，避免通过 URL 参数反复弹出成功提示。用户要求“确定后写入文档并拆分任务后进行修复”。详见[异步操作与一次性通知](09-console-async-actions.md)。
+
+补充需求：沿用 Pingora 原生 `HttpPeer`，整合 `PeerOptions::tracer` 与 Rust `tracing`，观测 DNS、TCP 建连、TLS 握手、连接复用和错误。用户进一步要求：
+
+> 还有tracing logs metrics的记录尽量不要太分散，记录当前的需求与分析到文档拆分任务，并开始优化改造
+
+对应的能力边界、集中记录方案和验收任务见[网关可观测性收口](08-gateway-observability.md)。
+
 补充需求：Provider 通过 Topcoat UI 管理，采用 Ant Design 清爽简约后台风格，复用 `topcoat-ant-design` 组件库（缺少通用组件时可扩展）；ORM 使用 Toasty，数据库使用本地 PostgreSQL。连接凭据仅保存于本地环境配置。详见[Provider 控制台设计](07-provider-console.md)。
 
 - [架构设计与技术边界](01-architecture.md)
@@ -31,3 +39,5 @@
 - [三个明确入口的阶段分工与联调验收](05-explicit-routes-validation.md)
 - [Pingora 请求生命周期与阶段串联](06-pingora-request-lifecycle.md)
 - [Provider 管理控制台与 PostgreSQL](07-provider-console.md)
+- [网关可观测性收口与连接诊断](08-gateway-observability.md)
+- [Provider 异步操作与一次性通知](09-console-async-actions.md)

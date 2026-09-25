@@ -7,6 +7,30 @@ use opentelemetry_sdk::{
 };
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod connection;
+mod request;
+
+pub use request::{GatewayTelemetry, RequestTelemetry};
+
+pub fn listening(listen: &str) {
+    tracing::info!(event_kind = "runtime", listen, "gateway listening");
+}
+
+pub fn snapshot_refresh(available: bool) {
+    if available {
+        tracing::info!(
+            event_kind = "runtime",
+            "provider snapshot refresh recovered"
+        );
+    } else {
+        // Database errors can include URLs, SQL values, or credentials.
+        tracing::warn!(
+            event_kind = "runtime",
+            "provider snapshot refresh failed; retaining the last snapshot"
+        );
+    }
+}
+
 pub struct TelemetryGuard {
     tracer: Option<SdkTracerProvider>,
     logger: Option<SdkLoggerProvider>,
