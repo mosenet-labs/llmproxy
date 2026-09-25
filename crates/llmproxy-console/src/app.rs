@@ -305,8 +305,18 @@ pub async fn provider_list(
         failure,
     };
     let _revision = controls.refresh.get();
+    let draft_q = signal(cx, || q.clone());
+    let draft_protocol = signal(cx, || protocol.clone());
+    let draft_state = signal(cx, || state.clone());
+    let applied_q = signal(cx, || q);
+    let applied_protocol = signal(cx, || protocol);
+    let applied_state = signal(cx, || state);
     let all = app_context::<AppState>(cx).store.list().await?;
-    let query = ListQuery { q, protocol, state };
+    let query = ListQuery {
+        q: applied_q.get(),
+        protocol: applied_protocol.get(),
+        state: applied_state.get(),
+    };
     let search = query.q.trim().to_lowercase();
     let filtered: Vec<_> = all
         .iter()
@@ -344,6 +354,16 @@ pub async fn provider_list(
     let csrf = &app_context::<AppState>(cx).csrf;
     let total = all.len();
     let enabled = all.iter().filter(|provider| provider.enabled).count();
+    let refresh = controls.refresh.clone();
+    let reset = attributes! { cx => @click=$(|_event: Event| {
+        draft_q.set("".to_owned());
+        draft_protocol.set("".to_owned());
+        draft_state.set("".to_owned());
+        applied_q.set("".to_owned());
+        applied_protocol.set("".to_owned());
+        applied_state.set("".to_owned());
+        refresh.increment();
+    }) };
     Ok(view! {
         provider_editor(editor: &editor, controls: &controls)
         <section class=(PAGE_HEADING)>
@@ -352,15 +372,21 @@ pub async fn provider_list(
         </section>
         <section class="providers-panel overflow-visible rounded-lg border border-border bg-white shadow-xs" aria-labelledby="providers-heading">
             <div class="flex items-center justify-between gap-4 px-6 pt-5 max-[640px]:px-4 [&_h2]:m-0 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:text-base [&_h2]:font-semibold"><h2 id="providers-heading">"Provider 列表"<span class="rounded bg-surface px-2 text-[13px] font-normal leading-6 text-secondary">(total)</span></h2><span class="text-[13px] text-secondary">(enabled)" 个已启用"</span></div>
-            <form class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/ui" role="search">
-                <div class="flex h-9 w-[300px] items-center gap-2 rounded-md border border-control-border pl-3 focus-within:border-primary-hover focus-within:ring-2 focus-within:ring-primary/10 max-[640px]:w-full [&_input]:h-8 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:pl-0 [&_input]:text-sm [&_input]:shadow-none">icon(data: SEARCH_OUTLINED, attrs: attributes! { class="size-4 shrink-0 text-muted" aria-hidden="true" })<input aria-label="搜索名称或主机" name="q" value=(query.q.as_str()) placeholder="搜索名称或主机地址"></div>
-                <select name="protocol" aria-label="筛选协议"><option value="">"全部协议"</option>for protocol in PROTOCOLS { <option value=(protocol.as_str()) selected=(query.protocol == protocol.as_str())>(protocol_label(protocol))</option> }</select>
-                <select name="state" aria-label="筛选状态"><option value="">"全部状态"</option><option value="enabled" selected=(query.state == "enabled")>"已启用"</option><option value="disabled" selected=(query.state == "disabled")>"已停用"</option><option value="active" selected=(query.state == "active")>"当前使用"</option></select>
+            <form class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/ui" role="search" @submit=$(|event: Event| {
+                event.prevent_default();
+                applied_q.set(draft_q.get());
+                applied_protocol.set(draft_protocol.get());
+                applied_state.set(draft_state.get());
+                refresh.increment();
+            })>
+                <div class="flex h-9 w-[300px] items-center gap-2 rounded-md border border-control-border pl-3 focus-within:border-primary-hover focus-within:ring-2 focus-within:ring-primary/10 max-[640px]:w-full [&_input]:h-8 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:pl-0 [&_input]:text-sm [&_input]:shadow-none">icon(data: SEARCH_OUTLINED, attrs: attributes! { class="size-4 shrink-0 text-muted" aria-hidden="true" })<input aria-label="搜索名称或主机" name="q" :value=$(draft_q.get()) @input=$(|event: Event| draft_q.set(event.target.value)) placeholder="搜索名称或主机地址"></div>
+                <select name="protocol" aria-label="筛选协议" :value=$(draft_protocol.get()) @change=$(|event: Event| draft_protocol.set(event.target.value))><option value="">"全部协议"</option>for protocol in PROTOCOLS { <option value=(protocol.as_str()) selected=(draft_protocol.get_untracked() == protocol.as_str())>(protocol_label(protocol))</option> }</select>
+                <select name="state" aria-label="筛选状态" :value=$(draft_state.get()) @change=$(|event: Event| draft_state.set(event.target.value))><option value="">"全部状态"</option><option value="enabled" selected=(draft_state.get_untracked() == "enabled")>"已启用"</option><option value="disabled" selected=(draft_state.get_untracked() == "disabled")>"已停用"</option><option value="active" selected=(draft_state.get_untracked() == "active")>"当前使用"</option></select>
                 <button class=(BUTTON) type="submit">"查询"</button>
-                if !query.q.is_empty() || !query.protocol.is_empty() || !query.state.is_empty() { <a class=(class!(TEXT_LINK, "px-1")) href="/ui">"重置"</a> }
+                if !query.q.is_empty() || !query.protocol.is_empty() || !query.state.is_empty() { <button class=(class!(TEXT_LINK, "px-1")) type="button" (reset.clone())>"重置"</button> }
             </form>
             if providers.is_empty() {
-                <div class="border-t border-border px-6 py-12 text-center [&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-heading [&_p]:mt-0 [&_p]:mb-6 [&_p]:text-sm [&_p]:text-secondary">icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="mx-auto block size-10 text-[#bfbfbf]" aria-hidden="true" })<h3>(if all.is_empty() { "连接第一个模型服务" } else { "没有找到匹配的 Provider" })</h3><p>(if all.is_empty() { "添加上游地址与 API Key，即可开始管理你的模型连接。" } else { "尝试调整搜索关键词，或清除筛选条件。" })</p>if all.is_empty() { <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())>"新建 Provider"</button> } else { <a class=(class!(BUTTON, PRIMARY_BUTTON)) href="/ui">"清除筛选"</a> }</div>
+                <div class="border-t border-border px-6 py-12 text-center [&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-heading [&_p]:mt-0 [&_p]:mb-6 [&_p]:text-sm [&_p]:text-secondary">icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="mx-auto block size-10 text-[#bfbfbf]" aria-hidden="true" })<h3>(if all.is_empty() { "连接第一个模型服务" } else { "没有找到匹配的 Provider" })</h3><p>(if all.is_empty() { "添加上游地址与 API Key，即可开始管理你的模型连接。" } else { "尝试调整搜索关键词，或清除筛选条件。" })</p>if all.is_empty() { <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())>"新建 Provider"</button> } else { <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (reset.clone())>"清除筛选"</button> }</div>
             } else {
                 data_table(label: "Provider 列表", attrs: attributes! { class="min-w-[900px] [&_th]:px-6! [&_th]:text-[13px]! [&_td]:px-6! [&_td]:py-4! [&_td]:text-sm! [&_.gr-tag]:text-[13px]" },
                     <thead><tr><th>"名称 / 协议"</th><th>"上游地址"</th><th>"状态"</th><th>"凭据"</th><th class="text-right!">"操作"</th></tr></thead>
