@@ -37,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(app::protect)
         .layout(app::shell)
         .page(app::list)
+        .page(app::routes)
         .route(app::providers_redirect)
         .page(app::form)
         .page(app::save)

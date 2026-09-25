@@ -1,0 +1,45 @@
+@layer theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+
+@source "./src/**/*.rs";
+
+@theme {
+  --font-mono: "JetBrains Mono", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", ui-monospace, SFMono-Regular, monospace;
+  --color-primary: #1677ff;
+  --color-primary-hover: #4096ff;
+  --color-primary-soft: #e6f4ff;
+  --color-border: #e9edf2;
+  --color-control-border: #d9dfe8;
+  --color-surface: #f5f7fa;
+  --color-heading: #262626;
+  --color-secondary: #687384;
+  --color-muted: #8c96a5;
+}
+
+/* Share the library's layer order; utilities override these page defaults.
+   No Preflight: preserve the component library's native control defaults. */
+@layer components {
+  :root { @apply bg-surface font-mono text-heading; font-synthesis: none; }
+  html { scrollbar-gutter: stable; }
+  *, ::before, ::after { box-sizing: border-box; }
+  body { @apply m-0 min-w-[360px]; }
+  body:has(#provider-dialog:modal) { overflow: hidden; }
+  [hidden] { display: none !important; }
+  a { color: inherit; text-decoration: none; }
+  button, input, select { font: inherit; }
+  button, a, input, select { touch-action: manipulation; }
+  button { @apply cursor-pointer; }
+  button:disabled { @apply cursor-wait opacity-55; }
+  button, a { @apply transition-colors duration-150; }
+  button:focus-visible, a:focus-visible { @apply outline-2 outline-offset-2 outline-[#91caff]; }
+  input, select { @apply min-w-0; }
+  input:not([type="checkbox"]):not([type="hidden"]), select {
+    @apply h-[38px] rounded-md border border-solid border-control-border bg-white px-3 py-2 text-[13px] text-heading transition-[border-color,box-shadow] duration-150;
+  }
+  select { @apply pr-[30px]; }
+  input:focus, select:focus { @apply border-primary-hover outline-none ring-2 ring-primary/10; }
+  input::placeholder { @apply text-[#b0b6c0]; }
+  input[type="checkbox"] { @apply mt-[3px] mr-0 mb-0 ml-0 size-4 min-h-0 shrink-0 accent-primary; }
+}

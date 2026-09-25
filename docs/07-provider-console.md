@@ -48,6 +48,8 @@ Provider 管理包含名称、协议、上游地址、API Key、Anthropic 版本
 
 ## 表单交互
 
+- 控制台字体与 gitlab-reviewer 一致，使用 JetBrains Mono，中文按 Noto Sans SC、PingFang SC、Microsoft YaHei 回退。
+- Provider 管理（`/`）与路由概览（`/routes`）使用独立页面，导航选中项、标题与面包屑同步；共用内容区宽度和边距。协议路由卡片集中在路由概览，点击卡片返回对应协议的 Provider 列表。
 - 新建、编辑在列表上方打开模态对话框，复用组件库 Dialog；打开时保留当前列表和筛选，支持关闭按钮、取消和 Escape。
 - 连接信息只需填写一个“上游地址”，例如 `https://api.deepseek.com` 或 `http://127.0.0.1:11434`。自动识别 HTTP/HTTPS 和端口，未指定端口时分别使用 80/443，允许末尾 `/`；列表与编辑表单省略默认端口。
 - 上游地址填写服务根地址，请求路径由所选协议决定；不接受自定义路径、查询参数、片段或 URL 内嵌凭据。当前支持域名和 IPv4。服务端解析后沿用数据库的 `host / port / tls` 字段，已有 Provider 无需迁移即可编辑。
@@ -60,6 +62,14 @@ Provider 管理包含名称、协议、上游地址、API Key、Anthropic 版本
 交互采用 Topcoat 原生 `Signal`、`@click / @input / @change / @invalid` 和 `:value / :hidden / :disabled` 绑定。页面只渲染一个 Dialog，列表中的非敏感 Provider 配置用于初始化编辑状态；保存通过标准 POST 提交给 Topcoat `Form`，由服务端校验并返回错误页或 303 跳转。控制台没有独立手写业务 JavaScript、`fetch` 或 DOM 替换逻辑。
 
 `topcoat-ant-design` 的 Dialog 已补充可选 `open` 与 `title` Signal。浏览器原生 `showModal / close` 的必要适配封装在组件库内，业务只管理 Rust 状态。Topcoat 会把运行时表达式编译成浏览器 JavaScript，仍须加载框架自己的 runtime 资源。
+
+## 样式与构建
+
+- 使用 Topcoat 内置的 `topcoat::tailwind::BuildConfig`，在 Cargo 构建时扫描 `src/**/*.rs`，生成并嵌入控制台 CSS；不需要额外的 npm 构建流程。
+- 布局、响应式断点和状态样式写在 Rust `view!` 的 Tailwind 类中，重复的按钮、导航、表单网格样式使用常量配合 `class!` 组合。类名必须完整出现，避免运行时拼接导致 Tailwind 无法识别。
+- `crates/llmproxy-console/styles.css` 只保留 Tailwind 入口、Ant Design 风格的主题色和页面基础样式；原手写 `src/console.css` 已移除。保留 JetBrains Mono 字体和中文回退字体。
+- Dialog、通知、确认气泡、表格和标签继续复用 `topcoat-ant-design`。控制台与组件库共享 `theme / components / utilities` 层级，控制台样式后加载，确保页面响应式规则生效；不引入 Preflight，保留组件库的控件默认行为。
+- `build.rs` 监听 Rust 源码和样式入口变化；修改后重新运行 `bash scripts/dev.sh console` 即可生成新样式。首次构建可能由 Topcoat 下载 Tailwind CLI，与组件库使用同一套集成。
 
 ## 凭据与控制台边界
 
@@ -119,3 +129,5 @@ bash scripts/dev.sh gateway
 弹窗调整追加验证：控制台真实 HTTP 回归通过；浏览器验证新建/编辑保存、按协议显示版本字段、连接项对齐、超时默认折叠、无效超时展开聚焦和错误表单保持弹窗。
 
 Topcoat 原生交互替换后，控制台 HTTP 回归再次通过；浏览器验证创建/编辑提交、服务端校验失败重新打开模态框、Escape 关闭、从编辑切换新建时重置字段，以及原生 `invalid` 事件展开超时字段。组件库 13 项组件测试通过。
+
+Tailwind 迁移追加验证：HTTP 回归检查实际生成的 CSS 已嵌入且不包含未编译的 `@source / @apply`；浏览器检查桌面两页标题对齐、390px 窄屏无页面横向溢出、表单单列、协议字段切换、超时默认折叠，以及确认气泡两个按钮均为 88×32px。浏览器无脚本错误。

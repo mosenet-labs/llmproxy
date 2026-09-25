@@ -29,7 +29,10 @@ pub async fn component_css() -> Result<Response> {
 
 #[route(GET "/assets/console.css")]
 pub async fn console_css() -> Result<Response> {
-    asset("text/css; charset=utf-8", include_str!("console.css"))
+    asset(
+        "text/css; charset=utf-8",
+        include_str!(concat!(env!("OUT_DIR"), "/console.css")),
+    )
 }
 
 #[route(GET "/assets/runtime.js")]

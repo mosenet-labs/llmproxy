@@ -131,6 +131,17 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(response.headers()["cache-control"], "no-store");
     let html = response.text().await.unwrap();
     assert!(html.contains("连接第一个模型服务"));
+    assert_navigation(&html, "/", "Provider 管理");
+    assert!(!html.contains("id=\"routes\""));
+    let routes = client.get(format!("{base}/routes")).send().await.unwrap();
+    assert_eq!(routes.status(), StatusCode::OK);
+    let routes = routes.text().await.unwrap();
+    assert_navigation(&routes, "/routes", "路由概览");
+    assert!(!routes.contains("providers-panel"));
+    assert_eq!(routes.matches("尚未分配").count(), 3);
+    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        assert!(routes.contains(path));
+    }
     let alias = client
         .get(format!("{base}/providers"))
         .send()
@@ -145,8 +156,34 @@ async fn exercise_http(database_url: &str) {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{asset}");
-        assert!(response.bytes().await.unwrap().len() > 500, "{asset}");
+        let body = response.text().await.unwrap();
+        assert!(body.len() > 500, "{asset}");
+        if asset == "console.css" {
+            // Serve generated CSS, never the uncompiled Tailwind entry point.
+            assert!(body.contains("tailwindcss"));
+            assert!(body.contains("grid-template-columns:216px minmax(0,1fr)"));
+            assert!(body.contains("--color-primary:"));
+            assert!(!body.contains("@source"));
+            assert!(!body.contains("@apply"));
+        }
     }
+    let font = topcoat_ant_design::DEFAULT_FONT;
+    let font_css = client
+        .get(format!(
+            "{base}/_topcoat/fonts/JetBrains-Mono-{:016x}.css",
+            font.hash()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(font_css.status(), StatusCode::OK);
+    assert!(
+        font_css
+            .text()
+            .await
+            .unwrap()
+            .contains("font-family: \"JetBrains Mono\"")
+    );
 
     let editor = client
         .get(format!("{base}/providers/form"))
@@ -420,6 +457,17 @@ async fn exercise_http(database_url: &str) {
     .await;
     let active = store.get(chat.id).await.unwrap();
     assert!(active.active && active.enabled);
+    let routes = client
+        .get(format!("{base}/routes"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(routes.contains("Chat Renamed"));
+    assert!(routes.contains("当前 Provider"));
+    assert!(!routes.contains(PROVIDER_KEY));
     assert_eq!(
         store.load_active().await.unwrap()[0].secret,
         PROVIDER_KEY,
@@ -576,6 +624,26 @@ fn element<'a>(html: &'a str, tag: &str, marker: &str) -> &'a str {
             element.contains(marker).then_some(element)
         })
         .expect("expected HTML element")
+}
+
+fn assert_navigation(html: &str, active_href: &str, title: &str) {
+    assert!(html.contains(&format!("<title>{title} · LLMProxy</title>")));
+    assert!(html.contains(&format!("<h1>{title}</h1>")));
+    assert!(html.contains(&format!("<strong>{title}</strong>")));
+    assert!(!html.contains("href=\"/#routes\""));
+    let nav = html
+        .split_once("<nav")
+        .unwrap()
+        .1
+        .split("</nav>")
+        .next()
+        .unwrap();
+    assert_eq!(nav.matches("aria-current=\"page\"").count(), 1);
+    let active = nav
+        .split("<a ")
+        .find(|anchor| anchor.contains("aria-current=\"page\""))
+        .unwrap();
+    assert!(active.contains(&format!("href=\"{active_href}\"")));
 }
 
 fn hidden(html: &str, name: &str) -> String {

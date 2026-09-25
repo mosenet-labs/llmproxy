@@ -5,6 +5,12 @@ use topcoat_asset::{MANIFEST_VERSION, Manifest, ManifestEntry, RawAsset};
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+    topcoat::tailwind::BuildConfig::new()
+        .input("styles.css")
+        .output(out.join("console.css"))
+        .render()
+        .expect("render console Tailwind stylesheet");
+
     let id = topcoat_runtime::SCRIPT.id();
     let binary =
         fs::read(env::current_exe().expect("build script path")).expect("read build script");
@@ -31,4 +37,6 @@ fn main() {
     .expect("write runtime manifest");
     println!("cargo:rerun-if-changed={}", source.display());
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=styles.css");
+    println!("cargo:rerun-if-changed=src");
 }
