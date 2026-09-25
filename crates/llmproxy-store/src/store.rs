@@ -18,12 +18,12 @@ static MIGRATIONS: MigrationSet = MigrationSet::new(&[
     MigrationFile::new(
         202609240001,
         "0001_providers.sql",
-        include_str!("../migrations/0001_providers.sql"),
+        include_str!("../migrations/postgresql/0001_providers.sql"),
     ),
     MigrationFile::new(
         202609240002,
         "0002_store_key.sql",
-        include_str!("../migrations/0002_store_key.sql"),
+        include_str!("../migrations/postgresql/0002_store_key.sql"),
     ),
 ]);
 

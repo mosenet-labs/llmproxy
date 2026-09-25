@@ -26,7 +26,7 @@ SQLite 数据库文件与密钥文件都要备份；恢复时需要配对。这�
 ## 存储层改造
 
 1. `llmproxy-store` 为 Toasty 0.10 启用 `sqlite` feature，在一处解析数据库 URL 并确定后端；网关入口和 `llmproxy-db` 复用该解析结果。Provider 模型、加密、控制台操作和网关快照 API 保持共用。
-2. 保留已有 PostgreSQL 迁移内容、编号与校验历史，新增独立的 SQLite 迁移集。SQLite 建表使用兼容的自增主键、长度检查和整数/布尔存储；包括 `providers`、三条 `route_bindings` 和 `store_keys`。Toasty SQLite 驱动每个迁移文件执行一条语句，因此 SQLite 的建表和种子数据分成四个版本。首次 SQLite 启动自动应用版本化迁移，后续启动幂等；`llmproxy-db migrate` 对两种后端使用同一选择规则。PostgreSQL 保持现有显式迁移方式。
+2. 保留已有 PostgreSQL 迁移内容、编号与校验历史，迁移文件放在 `crates/llmproxy-store/migrations/postgresql/`；SQLite 文件放在相邻的 `sqlite/` 目录。SQLite 建表使用兼容的自增主键、长度检查和整数/布尔存储；包括 `providers`、三条 `route_bindings` 和 `store_keys`。Toasty SQLite 驱动每个迁移文件执行一条语句，因此 SQLite 的建表和种子数据分成四个版本。首次 SQLite 启动自动应用版本化迁移，后续启动幂等；`llmproxy-db migrate` 对两种后端使用同一选择规则。PostgreSQL 保持现有显式迁移方式。
 3. 把后端差异限制在迁移和事务辅助函数。PostgreSQL 保留 advisory lock、`FOR UPDATE/SHARE`；SQLite 写事务在开始时取得写锁（`BEGIN IMMEDIATE`），读事务提供一致快照，不生成 PostgreSQL 的行锁 SQL。Provider 启停、设为当前、删除、版本冲突和快照读取的业务规则保持一致。
 4. SQLite 每次从池中取连接时设置 `foreign_keys=ON` 与 5 秒 `busy_timeout`，连接文件时设置 WAL；测试同时持有两个池连接验证外键约束、等待配置和 WAL。Toasty 0.10 驱动没有连接初始化 hook，因此这些 PRAGMA 集中在存储层的连接辅助函数。SQLite 用于本机单实例部署，多实例共享数据库仍以 PostgreSQL 为主。
 
