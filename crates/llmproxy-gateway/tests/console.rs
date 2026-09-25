@@ -412,6 +412,7 @@ async fn exercise_http(database_url: &str) {
     assert!(!filtered.contains("Messages 测试"));
     assert!(!filtered.contains(PROVIDER_KEY));
     assert!(filtered.contains("设为当前服务"));
+    assert!(filtered.contains(&format!("id=\"activate-menu-{}\"", chat.id)));
     assert!(filtered.contains(&format!("id=\"disable-{}\"", chat.id)));
     assert!(!filtered.contains(&format!("id=\"delete-{}\"", chat.id)));
     assert!(filtered.contains("确认停用「Chat Test」？"));
@@ -526,7 +527,8 @@ async fn exercise_http(database_url: &str) {
         .text()
         .await
         .unwrap();
-    assert!(list_html.contains("当前 OpenAI Chat"));
+    assert!(list_html.contains("当前 Chat"));
+    assert!(!list_html.contains(&format!("id=\"activate-menu-{}\"", active.id)));
     assert!(list_html.contains(&format!("id=\"disable-{}\"", active.id)));
     assert!(!list_html.contains(&format!("id=\"delete-{}\"", active.id)));
     assert!(list_html.contains("确认停用「Chat Renamed」？"));
@@ -892,7 +894,7 @@ async fn exercise_http(database_url: &str) {
         .text()
         .await
         .unwrap();
-    assert!(list.contains("Chat / Responses"));
+    assert!(list.contains("Chat · Resp"));
     assert!(!list.contains("探测模型"));
     let current = store.get(provider.id).await.unwrap();
     let mut edit = provider_form(&csrf, "Unified Mock", "openai_chat");

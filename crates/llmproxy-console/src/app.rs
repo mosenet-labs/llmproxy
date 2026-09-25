@@ -29,8 +29,8 @@ use topcoat_ant_design::icons::{
 };
 use topcoat_ant_design::{
     DialogConfig, FormFieldConfig, NotificationTone, TagTone, UiLanguage, data_table, dialog,
-    dialog_close_attributes, form_field, head_assets, notification, popconfirm,
-    popconfirm_trigger_attributes, tag,
+    dialog_close_attributes, dropdown_menu, dropdown_menu_trigger_attributes, form_field,
+    head_assets, notification, popconfirm, popconfirm_trigger_attributes, tag,
 };
 use url::{Host, Url};
 
@@ -77,6 +77,14 @@ fn protocol_short_label(protocol: Protocol) -> &'static str {
         Protocol::OpenAiChat => "Chat",
         Protocol::OpenAiResponses => "Responses",
         Protocol::AnthropicMessages => "Messages",
+    }
+}
+
+fn protocol_compact_label(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::OpenAiChat => "Chat",
+        Protocol::OpenAiResponses => "Resp",
+        Protocol::AnthropicMessages => "Msg",
     }
 }
 
@@ -393,16 +401,16 @@ pub async fn provider_list(
                     <tbody>
                         for provider in &providers {
                             <tr id=(format!("provider-{}", provider.id))>
-                                <td><button class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-1 block text-[13px] leading-5 text-secondary">(provider.paths.supported().into_iter().map(protocol_short_label).collect::<Vec<_>>().join(" / "))</span></td>
+                                <td><button class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-1 block whitespace-nowrap text-[13px] leading-5 text-secondary" title=(provider.paths.supported().into_iter().map(protocol_label).collect::<Vec<_>>().join(" / "))>(provider.paths.supported().into_iter().map(protocol_compact_label).collect::<Vec<_>>().join(" · "))</span></td>
                                 <td><span class="whitespace-nowrap text-sm text-heading">(provider_url(provider))</span><span class="mt-1 block text-[13px] leading-5 text-secondary">"读取超时 "(provider.read_timeout_ms / 1000)" 秒"</span></td>
-                                <td><div class="flex max-w-[185px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" })) for active in &provider.active_protocols { tag(tone: TagTone::Processing, (format!("当前 {}", protocol_label(*active)))) }</div></td>
+                                <td><div class="flex max-w-[185px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" })) for active in &provider.active_protocols { tag(tone: TagTone::Processing, (format!("当前 {}", protocol_short_label(*active)))) }</div></td>
                                 <td><span class="inline-flex items-center gap-1.5 whitespace-nowrap text-[13px] text-secondary">if provider.key_configured { icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-3.5 text-muted" aria-hidden="true" }) }(if provider.key_configured { "已配置" } else { "未配置" })</span></td>
-                                <td><div class="flex min-w-[125px] flex-wrap items-center justify-end gap-3">
+                                <td><div class="flex min-w-[204px] items-center justify-end gap-3 whitespace-nowrap">
                                     <button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, provider.clone().into()))>"编辑"</button>
-                                    if provider.enabled { for protocol in provider.paths.supported() { if !provider.active_protocols.contains(&protocol) {
-                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "activate", protocol: protocol.as_str(), label: format!("设为当前 {}", protocol_label(protocol)))
-                                    } } }
                                     if provider.enabled {
+                                        if provider.paths.supported().into_iter().any(|protocol| !provider.active_protocols.contains(&protocol)) {
+                                            provider_activation_menu(controls: &controls, provider: provider, csrf: csrf)
+                                        }
                                         provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: false)
                                     } else {
                                         action_form(controls: &controls, csrf: csrf, provider: provider, action: "enable", protocol: "", label: "启用".to_owned())
@@ -417,6 +425,30 @@ pub async fn provider_list(
             }
         </section>
         <p class="mt-4 mb-0 flex items-start gap-2 text-[13px] leading-relaxed text-secondary">icon(data: INFO_CIRCLE_FILLED, attrs: attributes! { class="mt-1 size-3.5 shrink-0 text-muted" aria-hidden="true" })"设为当前服务后，该协议的新请求会使用此 Provider。"</p>
+    })
+}
+
+#[component]
+async fn provider_activation_menu(
+    cx: &Cx,
+    provider: &ProviderView,
+    csrf: &str,
+    controls: &ListSignals,
+) -> Result<impl View> {
+    let id = format!("activate-menu-{}", provider.id);
+    let label = format!("为「{}」选择当前协议", provider.name);
+    let trigger = dropdown_menu_trigger_attributes(cx, &id);
+    Ok(view! {
+        <button class=(class!(TEXT_LINK, "inline-flex items-center gap-1")) type="button" (trigger)>"设为当前" icon(data: DOWN_OUTLINED, attrs: attributes! { class="size-3 text-muted" aria-hidden="true" })</button>
+        dropdown_menu(id: id.as_str(), label: label.as_str(),
+            for protocol in provider.paths.supported() {
+                if provider.active_protocols.contains(&protocol) {
+                    <button type="button" disabled="" aria-label=(format!("{}，当前使用", protocol_label(protocol)))><span>(protocol_short_label(protocol))</span><span aria-hidden="true">"✓"</span></button>
+                } else {
+                    action_form(controls: controls, csrf: csrf, provider: provider, action: "activate", protocol: protocol.as_str(), label: protocol_short_label(protocol).to_owned())
+                }
+            }
+        )
     })
 }
 
@@ -439,7 +471,7 @@ async fn provider_action_confirmation(
     let submit = action_submit(cx, controls, csrf, provider, action, "");
     let busy = &controls.busy;
     Ok(view! {
-        <button class=(class!(TEXT_LINK, "text-[#cf1322]! hover:text-[#ff4d4f]!" if delete)) type="button" (trigger) :disabled=$(busy.get())>(label)</button>
+        <button class=(class!(TEXT_LINK, "text-[#cf1322]! hover:text-[#ff4d4f]!")) type="button" (trigger) :disabled=$(busy.get())>(label)</button>
         popconfirm(id: id.as_str(), title: title.as_str(), language: UiLanguage::ChineseSimplified,
             attrs: attributes! { class="[&_footer]:items-center [&_footer_.gr-button]:h-8! [&_footer_.gr-button]:w-[88px]! [&_footer_.gr-button]:px-3! [&_footer_.gr-button]:py-1! [&_footer_.gr-button]:text-sm! [&_footer_.gr-button]:leading-[22px]!" },
             <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class="gr-button gr-button-danger" type="submit" :disabled=$(busy.get())>(format!("确认{label}"))</button></form>
