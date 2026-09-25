@@ -47,7 +47,7 @@ async fn postgresql_provider_lifecycle_and_concurrency() {
     let separator = if base_url.contains('?') { '&' } else { '?' };
     let url = format!("{base_url}{separator}options=-c%20search_path%3D{schema}");
     let worker = tokio::spawn(async move {
-        exercise_store(&url).await;
+        exercise_store(&url, false).await;
     });
     let result = worker.await;
     toasty::sql::statement(format!("DROP SCHEMA {schema} CASCADE"))
@@ -57,17 +57,38 @@ async fn postgresql_provider_lifecycle_and_concurrency() {
     result.unwrap();
 }
 
-async fn exercise_store(url: &str) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_provider_lifecycle_and_concurrency() {
+    let directory = std::env::temp_dir().join(format!(
+        "llmproxy-store-sqlite-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+    exercise_store(&url, true).await;
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+async fn exercise_store(url: &str, sqlite: bool) {
     let key = STANDARD.encode([7; 32]);
     let store = ProviderStore::connect(url, &key).await.unwrap();
     assert!(
         store.list().await.is_err(),
         "connect must not migrate implicitly"
     );
-    // Concurrent startups must apply this migration once.
-    let (first, second) = tokio::join!(store.migrate(), store.migrate());
-    first.unwrap();
-    second.unwrap();
+    if sqlite {
+        store.migrate().await.unwrap();
+        store.migrate().await.unwrap();
+    } else {
+        // PostgreSQL serializes concurrent startups with an advisory lock.
+        let (first, second) = tokio::join!(store.migrate(), store.migrate());
+        first.unwrap();
+        second.unwrap();
+    }
     assert!(store.list().await.unwrap().is_empty());
     assert!(store.load_active().await.unwrap().is_empty());
 

@@ -48,33 +48,13 @@ pub struct Gateway {
 }
 
 struct TestDatabase {
-    base_url: String,
-    schema: String,
     url: String,
 }
 
 impl TestDatabase {
-    fn new(id: usize) -> Self {
-        let base_url = std::env::var("LLMPROXY_TEST_DATABASE_URL")
-            .expect("LLMPROXY_TEST_DATABASE_URL is required for gateway integration tests");
-        let schema = format!("llmproxy_proxy_test_{}_{id}", std::process::id());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let mut admin = toasty::Db::builder().connect(&base_url).await.unwrap();
-            toasty::sql::statement(format!("CREATE SCHEMA {schema}"))
-                .exec(&mut admin)
-                .await
-                .unwrap();
-        });
-        let separator = if base_url.contains('?') { '&' } else { '?' };
-        let url = format!("{base_url}{separator}options=-c%20search_path%3D{schema}");
+    fn new(directory: &std::path::Path) -> Self {
         Self {
-            base_url,
-            schema,
-            url,
+            url: format!("sqlite:{}", directory.join("providers.sqlite3").display()),
         }
     }
 
@@ -90,7 +70,7 @@ impl TestDatabase {
             store
                 .migrate()
                 .await
-                .map_err(|_| "migrate isolated schema")?;
+                .map_err(|_| "migrate isolated database")?;
             for (index, provider) in providers.into_iter().enumerate() {
                 let host = provider.host.unwrap_or(if provider.tls {
                     "localhost"
@@ -121,25 +101,7 @@ impl TestDatabase {
             Ok::<(), &'static str>(())
         });
         drop(runtime);
-        result.expect("populate isolated provider schema");
-    }
-}
-
-impl Drop for TestDatabase {
-    fn drop(&mut self) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let removed = runtime.block_on(async {
-            let mut admin = toasty::Db::builder().connect(&self.base_url).await?;
-            toasty::sql::statement(format!("DROP SCHEMA {} CASCADE", self.schema))
-                .exec(&mut admin)
-                .await
-        });
-        if removed.is_err() {
-            eprintln!("failed to remove isolated provider test schema");
-        }
+        result.expect("populate isolated provider database");
     }
 }
 
@@ -174,15 +136,15 @@ impl Gateway {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let database = TestDatabase::new(id);
-        database.populate(providers);
-        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let directory = std::env::temp_dir().join(format!(
             "llmproxy-integration-{}-{}",
             std::process::id(),
             id,
         ));
         fs::create_dir(&directory).unwrap();
+        let database = TestDatabase::new(&directory);
+        database.populate(providers);
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut command = Self::command(&directory);
         command
             .env("LLMPROXY_DATABASE_URL", &database.url)

@@ -6,11 +6,12 @@ use std::{
 };
 
 use llmproxy_core::{protocol::Protocol, provider::validate_upstream};
-use llmproxy_store::{ActiveProvider, ProviderStore};
+use llmproxy_store::{ActiveProvider, DatabaseConfig, ProviderStore};
 use tokio::{runtime::Builder, sync::oneshot, time};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(5);
+const MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Resolved credentials deliberately have no Debug or Serialize implementation.
 #[derive(Clone)]
@@ -121,16 +122,25 @@ impl ProviderSnapshots {
             .unwrap_or_else(|error| error.into_inner()) = snapshot;
     }
 
-    pub fn database(url: &str, master_key: &str) -> Result<(Self, DatabaseRefresh), &'static str> {
+    pub fn database(config: &DatabaseConfig) -> Result<(Self, DatabaseRefresh), &'static str> {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|_| "cannot initialize database runtime")?;
         let (store, initial) = runtime.block_on(async {
-            let store = time::timeout(DATABASE_TIMEOUT, ProviderStore::connect(url, master_key))
-                .await
-                .map_err(|_| "provider database connection timed out")?
-                .map_err(|_| "cannot connect to provider database; check configuration")?;
+            let store = time::timeout(
+                DATABASE_TIMEOUT,
+                ProviderStore::connect(config.url(), config.master_key()),
+            )
+            .await
+            .map_err(|_| "provider database connection timed out")?
+            .map_err(|_| "cannot connect to provider database; check configuration")?;
+            if config.backend().is_sqlite() {
+                time::timeout(MIGRATION_TIMEOUT, store.migrate())
+                    .await
+                    .map_err(|_| "provider database migration timed out")?
+                    .map_err(|_| "cannot migrate SQLite provider database")?;
+            }
             let providers = time::timeout(DATABASE_TIMEOUT, store.load_active())
                 .await
                 .map_err(|_| "initial provider snapshot timed out")?

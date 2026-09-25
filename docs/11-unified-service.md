@@ -11,7 +11,7 @@
 - Pingora `request_filter` 严格匹配 `/ui` 或 `/ui/` 子路径，在进程内调用 Topcoat `Router::handle`；不占用第二个端口。其他路径继续走现有代理逻辑。
 - 控制台表单体保持 32 KiB 限制；桥接层限量读取请求体，响应按帧发送。代理和 SSE 不经过控制台的缓冲逻辑。
 - 控制台数据库 runtime 在统一服务运行期间保持存活；Pingora 停止后释放资源，再刷新三类遥测。
-- PostgreSQL 是唯一的 Provider 来源；缺少数据库地址或主密钥时拒绝启动。控制台与代理读取同一数据库，代理请求使用内存快照。
+- 所选数据库是唯一的 Provider 来源；缺省 SQLite 自动初始化，显式 PostgreSQL 仍须配置主密钥并迁移。控制台与代理读取同一数据库，代理请求使用内存快照。详见[SQLite 兼容方案](12-sqlite-compatibility-plan.md)。
 - 控制台保留本机访问、Host/Origin/CSRF 保护；即使代理绑定非回环地址，`/ui` 仍只接收回环客户端。管理登录与权限属于后续任务。
 
 ## /ui 路径
@@ -31,8 +31,9 @@ Topcoat 0.8.1 的 runtime 固定生成 `/_topcoat` URL，尚无应用挂载前�
 
 ```dotenv
 LLMPROXY_LISTEN=127.0.0.1:3200
-LLMPROXY_DATABASE_URL=postgresql://<用户>:<密码>@127.0.0.1:5432/llmproxy_dev
-LLMPROXY_MASTER_KEY=<Base64 编码的 32 字节主密钥>
+# 以下两项仅在使用 PostgreSQL 时设置；默认 SQLite 可省略
+# LLMPROXY_DATABASE_URL=postgresql://<用户>:<密码>@127.0.0.1:5432/llmproxy_dev
+# LLMPROXY_MASTER_KEY=<Base64 编码的 32 字节主密钥>
 OTEL_SERVICE_NAME=llmproxy
 OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic%20<现有凭据>,stream-name=llmproxy"
 ```
@@ -58,6 +59,6 @@ OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic%20<现有凭据>,stream-name=llm
 
 ## 本地运行
 
-数据库已迁移时，在项目根目录运行 `cargo run`；首次启动可用 `bash scripts/dev.sh up` 编译并执行迁移。访问 `http://127.0.0.1:3200/ui`，三个代理入口使用同一主机与端口。更新后需停止旧进程，再启动统一服务。
+默认 SQLite 在项目根目录运行 `cargo run` 即可自动迁移；`bash scripts/dev.sh up` 也会先执行迁移。PostgreSQL 仍需先执行 `bash scripts/dev.sh migrate`。访问 `http://127.0.0.1:3200/ui`，三个代理入口使用同一主机与端口。更新后需停止旧进程，再启动统一服务。
 
 技术依据：[Topcoat Router::handle](https://docs.rs/topcoat/0.8.1/topcoat/router/struct.Router.html#method.handle)；Pingora 0.9.0 `ProxyHttp::request_filter`、Session 读写接口；本地 Topcoat runtime/font 源码。

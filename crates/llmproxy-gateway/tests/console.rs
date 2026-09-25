@@ -27,39 +27,22 @@ impl Drop for ConsoleProcess {
     }
 }
 
-/// Uses an isolated PostgreSQL schema and a temporary child cwd so the developer's
-/// .env, records, and running console cannot affect this HTTP acceptance test.
+/// Uses a temporary SQLite file and child cwd so the developer's .env,
+/// records, and running console cannot affect this HTTP acceptance test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn console_http_crud_and_request_protection() {
-    let Ok(base_url) = std::env::var("LLMPROXY_TEST_DATABASE_URL") else {
-        eprintln!("跳过控制台 HTTP 集成测试：未设置 LLMPROXY_TEST_DATABASE_URL");
-        return;
-    };
-    let mut admin = toasty::Db::builder()
-        .connect(&base_url)
-        .await
-        .unwrap_or_else(|_| panic!("无法连接 LLMPROXY_TEST_DATABASE_URL"));
-    let schema = format!(
-        "llmproxy_console_test_{}_{}",
+    let directory = std::env::temp_dir().join(format!(
+        "llmproxy-console-database-{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    );
-    toasty::sql::statement(format!("CREATE SCHEMA {schema}"))
-        .exec(&mut admin)
-        .await
-        .expect("create isolated schema");
-    let separator = if base_url.contains('?') { '&' } else { '?' };
-    let url = format!("{base_url}{separator}options=-c%20search_path%3D{schema}");
-    let worker = tokio::spawn(async move { exercise_http(&url).await });
-    let result = worker.await;
-    toasty::sql::statement(format!("DROP SCHEMA {schema} CASCADE"))
-        .exec(&mut admin)
-        .await
-        .expect("remove isolated schema");
-    result.unwrap();
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+    exercise_http(&url).await;
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 async fn exercise_http(database_url: &str) {

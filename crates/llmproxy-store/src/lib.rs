@@ -1,6 +1,7 @@
 //! Provider management persistence. Public views never contain stored credentials.
 
 mod crypto;
+mod database;
 mod model;
 mod store;
 
@@ -8,6 +9,7 @@ use std::fmt;
 
 use llmproxy_core::protocol::Protocol;
 
+pub use database::{Backend, DatabaseConfig};
 pub use store::ProviderStore;
 
 pub type StoreResult<T> = Result<T, StoreError>;

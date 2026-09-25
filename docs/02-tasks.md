@@ -107,11 +107,13 @@
 
 详细范围、配置约定及验收见[SQLite 兼容计划](12-sqlite-compatibility-plan.md)。不包含 PostgreSQL 与 SQLite 之间的数据迁移。
 
-- [ ] S1：统一后端选择，缺省使用持久化 SQLite 文件；SQLite 首次启动生成并保存本地主密钥。
-- [ ] S2：增加 SQLite 迁移集和自动初始化，保留现有 PostgreSQL 迁移历史。
-- [ ] S3：按后端处理事务及锁，验证双后端 Provider 管理和快照一致性。
-- [ ] S4：统一网关、数据库工具和开发脚本的启动行为，更新运行文档。
-- [ ] S5：增加默认 SQLite 的端到端测试，保留 PostgreSQL 回归并完成 workspace 验证。
+上文任务保留实施当时的 PostgreSQL 验收记录；以下 S 任务改变了缺省数据库和测试路径。
+
+- [x] S1：统一后端选择，缺省使用持久化 SQLite 文件；SQLite 首次启动生成并保存本地主密钥。
+- [x] S2：增加 SQLite 迁移集和自动初始化，保留现有 PostgreSQL 迁移历史。
+- [x] S3：按后端处理事务及锁，验证双后端 Provider 管理和快照一致性。
+- [x] S4：统一网关、数据库工具和开发脚本的启动行为，更新运行文档。
+- [x] S5：增加默认 SQLite 的端到端测试，保留 PostgreSQL 回归并完成 workspace 验证。
 
 ## 完整验收
 

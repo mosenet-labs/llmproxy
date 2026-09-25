@@ -14,16 +14,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     dotenvy::dotenv().ok();
     let settings = config::load()?;
     let _telemetry = llmproxy_telemetry::init()?;
+    if let Some(path) = settings.database.sqlite_path()? {
+        tracing::info!(component = "gateway", event_kind = "runtime", path = %path.display(), "sqlite database selected");
+    }
 
-    let (providers, _refresh) =
-        ProviderSnapshots::database(&settings.database_url, &settings.master_key)?;
+    let (providers, _refresh) = ProviderSnapshots::database(&settings.database)?;
     let _console_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
     let console = _console_runtime.block_on(llmproxy_console::Console::connect(
-        &settings.database_url,
-        &settings.master_key,
+        settings.database.url(),
+        settings.database.master_key(),
         settings.listen.port(),
     ))?;
 

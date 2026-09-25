@@ -1,4 +1,6 @@
 /target
 .DS_Store
 .env
+/data/
+*.sqlite3*
 config/gateway.toml

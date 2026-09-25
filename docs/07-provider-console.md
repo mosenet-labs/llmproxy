@@ -1,4 +1,4 @@
-# Provider 管理控制台与 PostgreSQL
+# Provider 管理控制台与数据库
 
 关联：[原始需求](00-original-requirements.md)、[架构设计](01-architecture.md)、[任务列表](02-tasks.md)、[本地运行](03-development.md)。
 
@@ -6,7 +6,7 @@
 
 - 使用 Topcoat 实现 Ant Design 风格的简洁中文后台，通过 UI 管理 Provider。
 - 复用 `topcoat-ant-design`；缺失的通用组件可在组件库中添加，再由控制台引用。
-- 使用 Toasty ORM 和 PostgreSQL 持久化。开发与测试分别使用 `llmproxy_dev`、`llmproxy_test`。
+- 使用 Toasty ORM 持久化；原始需求指定 PostgreSQL，现已补充默认 SQLite 兼容。开发与测试的 PostgreSQL 库可分别使用 `llmproxy_dev`、`llmproxy_test`。
 - 本地数据库连接信息和主密钥放在忽略提交的 `.env`；仓库提供 `.env.example`。
 
 ## 分层与数据流
@@ -15,7 +15,7 @@
 flowchart LR
     A["浏览器：Provider 管理"] --> B["llmproxy-console / Topcoat"]
     B --> C["llmproxy-store / Toasty"]
-    C --> D["PostgreSQL"]
+    C --> D["SQLite 或 PostgreSQL"]
     E["llmproxy-gateway 配置轮询"] --> C
     E --> F["不可变 Provider 快照"]
     G["Pingora 请求"] --> F
@@ -30,7 +30,7 @@ flowchart LR
 
 控制台与网关同进程、同端口运行（见[统一服务设计](11-unified-service.md)），网关请求路径不访问数据库。数据库配置变化通过周期性轮询加载，默认约一秒对后续请求生效。每个请求固定使用开始时选定的 Provider，正在进行的 SSE 不随配置更新切换目标或凭据。
 
-未配置 `LLMPROXY_DATABASE_URL` 时，统一服务拒绝启动。未选择当前 Provider 的协议入口返回 503；自动入口的协议识别任务独立推进。
+未配置 `LLMPROXY_DATABASE_URL` 时，统一服务使用本地持久化 SQLite；未选择当前 Provider 的协议入口返回 503。自动入口的协议识别任务独立推进。
 
 ## Provider 与协议绑定
 
@@ -79,7 +79,7 @@ Provider 管理和路由概览共用浅色导航、页头和内容区；移除�
 
 ## 凭据与控制台边界
 
-API Key 由 UI 输入，使用带认证的加密保存到数据库，主密钥从 `LLMPROXY_MASTER_KEY` 注入。主密钥为 Base64 编码的 32 个随机字节，控制台与代理模块使用同一值；重启时保持一致。
+API Key 由 UI 输入，使用带认证的加密保存到数据库。主密钥为 Base64 编码的 32 个随机字节；PostgreSQL 从 `LLMPROXY_MASTER_KEY` 注入，SQLite 默认从数据库旁的私有 `.key` 文件读取，也允许显式设置同一环境变量。控制台与代理模块使用同一值；重启时保持一致。
 
 首次迁移使用加密校验记录将数据库绑定到主密钥，后续读写和网关加载都会校验；主密钥错误时拒绝操作，避免不同服务写入彼此无法解密的凭据。请备份主密钥，当前尚未实现主密钥轮换。
 
@@ -91,11 +91,12 @@ API Key 由 UI 输入，使用带认证的加密保存到数据库，主密钥�
 
 组件库当前使用本地路径依赖 `../topcoat-ant-design`，依赖其中的中文标签以及本轮新增的受控 Dialog 支持。本机已经存在该目录；其他环境需要准备包含这些改动的组件库 checkout，已发布的同版本 crates.io 包尚不包含这些 API。组件库地址见 [topcoat-ant-design](https://github.com/mosenet-labs/topcoat-ant-design)。
 
-本机开发库和测试库已创建，`.env` 已准备。首次在其他环境启动时：
+默认 SQLite 启动时：
 
-1. 在 PostgreSQL 创建 `llmproxy_dev` 和 `llmproxy_test` 两个数据库。
-2. 复制 `.env.example` 为 `.env`，填写本机数据库 URL；测试库 URL 必须指向测试数据库。
-3. 按示例生成一次 `LLMPROXY_MASTER_KEY`，保存到 `.env`。控制台和网关使用相同值，之后不要重新生成覆盖。
+1. 准备相邻目录的 `topcoat-ant-design` 组件库。
+2. 不设置 `LLMPROXY_DATABASE_URL` 和 `LLMPROXY_MASTER_KEY`，首次启动自动创建 `./data/llmproxy.sqlite3`、密钥文件和 schema。
+
+改用 PostgreSQL 时，在 PostgreSQL 创建开发库，复制 `.env.example` 为 `.env` 并填写数据库 URL 与固定的 `LLMPROXY_MASTER_KEY`；可选填写 `LLMPROXY_TEST_DATABASE_URL` 运行 PostgreSQL 回归。现有 `.env` 中的 PostgreSQL URL 会优先于默认 SQLite。
 
 然后运行：
 
@@ -103,7 +104,7 @@ API Key 由 UI 输入，使用带认证的加密保存到数据库，主密钥�
 # 编译、执行数据库迁移，并同时启动控制台和网关
 bash scripts/dev.sh up
 
-# 或先执行迁移，再直接运行
+# PostgreSQL 可先显式执行迁移；默认 SQLite 可直接 cargo run
 bash scripts/dev.sh migrate
 cargo run
 ```

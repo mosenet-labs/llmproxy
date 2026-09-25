@@ -2,13 +2,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use llmproxy_core::provider::validate_upstream;
 use toasty::{
-    Db, Executor, Transaction,
+    Connection, Db, Executor, Transaction,
     migration::{MigrationFile, MigrationSet},
 };
+use toasty_core::driver::operation::TransactionMode;
 
 use crate::{
     ActiveProvider, ProviderInput, ProviderView, StoreError, StoreResult,
     crypto::KeyCipher,
+    database::Backend,
     model::{Provider, RouteBinding, StoreKey, protocol},
 };
 
@@ -25,9 +27,32 @@ static MIGRATIONS: MigrationSet = MigrationSet::new(&[
     ),
 ]);
 
+static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
+    MigrationFile::new(
+        202609240001,
+        "0001_providers.sql",
+        include_str!("../migrations/sqlite/0001_providers.sql"),
+    ),
+    MigrationFile::new(
+        202609240002,
+        "0002_route_bindings.sql",
+        include_str!("../migrations/sqlite/0002_route_bindings.sql"),
+    ),
+    MigrationFile::new(
+        202609240003,
+        "0003_seed_bindings.sql",
+        include_str!("../migrations/sqlite/0003_seed_bindings.sql"),
+    ),
+    MigrationFile::new(
+        202609240004,
+        "0004_store_key.sql",
+        include_str!("../migrations/sqlite/0004_store_key.sql"),
+    ),
+]);
+
 const KEY_VERIFIER: &str = "llmproxy.database-master-key.verifier.v1";
 const MASTER_KEY_ERROR: StoreError = StoreError::Configuration(
-    "数据库主密钥校验失败，请检查 LLMPROXY_MASTER_KEY；不能使用不同主密钥修改此数据库",
+    "数据库主密钥校验失败，请检查 LLMPROXY_MASTER_KEY 或 SQLite 配套密钥文件；不能使用不同主密钥修改此数据库",
 );
 
 /// Shared connection pool and credential cipher. Cloning does not reconnect.
@@ -35,11 +60,13 @@ const MASTER_KEY_ERROR: StoreError = StoreError::Configuration(
 pub struct ProviderStore {
     db: Db,
     cipher: KeyCipher,
+    backend: Backend,
 }
 
 impl ProviderStore {
     /// Connect to an existing database. Schema changes require `migrate`.
     pub async fn connect(url: &str, master_key: &str) -> StoreResult<Self> {
+        let backend = Backend::parse(url)?;
         let cipher = KeyCipher::new(master_key)?;
         let db = Db::builder()
             .models(toasty::models!(Provider, RouteBinding, StoreKey))
@@ -49,19 +76,34 @@ impl ProviderStore {
             .log_statement_params(false)
             .connect(url)
             .await?;
-        Ok(Self { db, cipher })
+        if backend.is_sqlite() {
+            let mut connection = db.connection().await?;
+            toasty::sql::query("PRAGMA journal_mode=WAL")
+                .exec(&mut connection)
+                .await?;
+        }
+        Ok(Self {
+            db,
+            cipher,
+            backend,
+        })
     }
 
     pub async fn migrate(&self) -> StoreResult<()> {
-        // Serialize migrations across processes. This transaction owns the lock;
-        // cancellation rolls it back, preventing a pooled session retaining it.
-        let mut db = self.db.clone();
-        let mut lock = db.transaction().await?;
-        toasty::sql::query("SELECT pg_advisory_xact_lock(725076982421)::text")
-            .exec(&mut lock)
-            .await?;
-        MIGRATIONS.apply(&self.db).await?;
-        locked_bindings(&mut lock, true).await?;
+        if self.backend.is_sqlite() {
+            SQLITE_MIGRATIONS.apply(&self.db).await?;
+        }
+        let mut connection = self.connection().await?;
+        let mut lock = self.transaction(&mut connection, true).await?;
+        if !self.backend.is_sqlite() {
+            // Serialize PostgreSQL migrations across processes. The lock is
+            // transaction scoped, so cancellation cannot strand a pool session.
+            toasty::sql::query("SELECT pg_advisory_xact_lock(725076982421)::text")
+                .exec(&mut lock)
+                .await?;
+            MIGRATIONS.apply(&self.db).await?;
+        }
+        locked_bindings(&mut lock, true, &self.backend).await?;
         if let Some(key) = StoreKey::filter_by_id(1_i64)
             .first()
             .exec(&mut lock)
@@ -86,6 +128,33 @@ impl ProviderStore {
         Ok(())
     }
 
+    async fn connection(&self) -> StoreResult<Connection> {
+        let mut connection = self.db.connection().await?;
+        if self.backend.is_sqlite() {
+            // SQLite PRAGMAs are connection local, including after pool growth.
+            toasty::sql::statement("PRAGMA foreign_keys=ON")
+                .exec(&mut connection)
+                .await?;
+            toasty::sql::query("PRAGMA busy_timeout=5000")
+                .exec(&mut connection)
+                .await?;
+        }
+        Ok(connection)
+    }
+
+    async fn transaction<'a>(
+        &self,
+        connection: &'a mut Connection,
+        write: bool,
+    ) -> StoreResult<Transaction<'a>> {
+        let builder = connection.transaction_builder();
+        if self.backend.is_sqlite() && write {
+            Ok(builder.mode(TransactionMode::Immediate).begin().await?)
+        } else {
+            Ok(builder.begin().await?)
+        }
+    }
+
     fn verify(&self, key: &StoreKey) -> StoreResult<()> {
         let value = self
             .cipher
@@ -102,7 +171,7 @@ impl ProviderStore {
         tx: &mut Transaction<'_>,
         write: bool,
     ) -> StoreResult<Vec<RouteBinding>> {
-        let bindings = locked_bindings(tx, write).await?;
+        let bindings = locked_bindings(tx, write, &self.backend).await?;
         let key = StoreKey::filter_by_id(1_i64)
             .first()
             .exec(tx)
@@ -115,8 +184,8 @@ impl ProviderStore {
     }
 
     pub async fn list(&self) -> StoreResult<Vec<ProviderView>> {
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
         let providers = Provider::all()
             .order_by(Provider::fields().id().asc())
@@ -131,8 +200,8 @@ impl ProviderStore {
     }
 
     pub async fn get(&self, id: i64) -> StoreResult<ProviderView> {
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
         let provider = find(&mut tx, id).await?;
         let view = provider.view(is_active(&bindings, id))?;
@@ -143,8 +212,8 @@ impl ProviderStore {
     pub async fn create(&self, input: ProviderInput) -> StoreResult<ProviderView> {
         let input = validate(input, true)?;
         let encrypted_key = self.cipher.encrypt(&input.api_key)?;
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
         check_unique_name(&mut tx, &input.name, None).await?;
         let provider = Provider::create()
@@ -174,8 +243,8 @@ impl ProviderStore {
         input: ProviderInput,
     ) -> StoreResult<ProviderView> {
         let input = validate(input, false)?;
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
         let mut bindings = self.bindings(&mut tx, true).await?;
         let mut provider = find(&mut tx, id).await?;
         check_version(&provider, version)?;
@@ -214,8 +283,8 @@ impl ProviderStore {
     }
 
     pub async fn set_enabled(&self, id: i64, version: u64, enabled: bool) -> StoreResult<()> {
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
         let mut bindings = self.bindings(&mut tx, true).await?;
         let mut provider = find(&mut tx, id).await?;
         check_version(&provider, version)?;
@@ -233,8 +302,8 @@ impl ProviderStore {
     }
 
     pub async fn activate(&self, id: i64, version: u64) -> StoreResult<()> {
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
         let mut bindings = self.bindings(&mut tx, true).await?;
         let mut provider = find(&mut tx, id).await?;
         check_version(&provider, version)?;
@@ -262,8 +331,8 @@ impl ProviderStore {
     }
 
     pub async fn delete(&self, id: i64, version: u64) -> StoreResult<()> {
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
         let bindings = self.bindings(&mut tx, true).await?;
         let provider = find(&mut tx, id).await?;
         check_version(&provider, version)?;
@@ -283,8 +352,8 @@ impl ProviderStore {
     }
 
     pub async fn load_active(&self) -> StoreResult<Vec<ActiveProvider>> {
-        let mut db = self.db.clone();
-        let mut tx = db.transaction().await?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
         let mut active = Vec::with_capacity(3);
         for binding in bindings {
@@ -314,14 +383,19 @@ impl ProviderStore {
     }
 }
 
-/// All control-plane writes lock the three fixed route rows in stable order.
-/// Readers take shared locks so a multi-query snapshot cannot see half a change.
-/// This intentionally favors simple, coherent configuration over write throughput.
-async fn locked_bindings(tx: &mut Transaction<'_>, write: bool) -> StoreResult<Vec<RouteBinding>> {
-    let sql = if write {
-        "SELECT protocol FROM route_bindings ORDER BY protocol FOR UPDATE"
-    } else {
-        "SELECT protocol FROM route_bindings ORDER BY protocol FOR SHARE"
+/// PostgreSQL locks fixed route rows; SQLite write transactions acquire the
+/// database write lock at BEGIN IMMEDIATE. Reads use one transaction snapshot.
+async fn locked_bindings(
+    tx: &mut Transaction<'_>,
+    write: bool,
+    backend: &Backend,
+) -> StoreResult<Vec<RouteBinding>> {
+    let sql = match backend {
+        Backend::Sqlite(_) => "SELECT protocol FROM route_bindings ORDER BY protocol",
+        Backend::PostgreSql if write => {
+            "SELECT protocol FROM route_bindings ORDER BY protocol FOR UPDATE"
+        }
+        Backend::PostgreSql => "SELECT protocol FROM route_bindings ORDER BY protocol FOR SHARE",
     };
     let rows = toasty::sql::query(sql).exec(tx).await?;
     if rows.len() != 3 {
@@ -455,4 +529,53 @@ fn validate(mut input: ProviderInput, creating: bool) -> StoreResult<ProviderInp
         })
     })?;
     Ok(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn sqlite_pool_connections_enable_foreign_keys_busy_timeout_and_wal() {
+        let directory = std::env::temp_dir().join(format!(
+            "llmproxy-sqlite-pragmas-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+        let store = ProviderStore::connect(&url, &STANDARD.encode([7; 32]))
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        let mut first = store.connection().await.unwrap();
+        let mut second = store.connection().await.unwrap();
+        for connection in [&mut first, &mut second] {
+            assert!(
+                toasty::sql::statement(
+                    "UPDATE route_bindings SET provider_id=999999 WHERE protocol='openai_chat'"
+                )
+                .exec(connection)
+                .await
+                .is_err()
+            );
+            let busy_timeout = toasty::sql::query("PRAGMA busy_timeout")
+                .exec(connection)
+                .await
+                .unwrap();
+            assert!(format!("{busy_timeout:?}").contains("5000"));
+            let journal_mode = toasty::sql::query("PRAGMA journal_mode")
+                .exec(connection)
+                .await
+                .unwrap();
+            assert!(format!("{journal_mode:?}").to_lowercase().contains("wal"));
+        }
+        drop((first, second, store));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

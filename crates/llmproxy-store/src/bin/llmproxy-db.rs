@@ -1,14 +1,13 @@
-use llmproxy_store::ProviderStore;
+use llmproxy_store::{DatabaseConfig, ProviderStore};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     if std::env::args().nth(1).as_deref() != Some("migrate") {
         return Err("用法：llmproxy-db migrate".into());
     }
-    let url = std::env::var("LLMPROXY_DATABASE_URL").map_err(|_| "请设置 LLMPROXY_DATABASE_URL")?;
-    let master_key =
-        std::env::var("LLMPROXY_MASTER_KEY").map_err(|_| "请设置 LLMPROXY_MASTER_KEY")?;
-    ProviderStore::connect(&url, &master_key)
+    let database = DatabaseConfig::from_env()?;
+    ProviderStore::connect(database.url(), database.master_key())
         .await?
         .migrate()
         .await?;
