@@ -16,10 +16,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+use llmproxy_core::protocol::Protocol;
+use llmproxy_store::{ProviderInput, ProviderStore};
+
 pub const DEADLINE: Duration = Duration::from_secs(8);
 pub const PATHS: [&str; 3] = ["/v1/chat/completions", "/v1/responses", "/v1/messages"];
-const NAMES: [&str; 3] = ["openai_chat", "openai_responses", "anthropic_messages"];
+const PROTOCOLS: [Protocol; 3] = [
+    Protocol::OpenAiChat,
+    Protocol::OpenAiResponses,
+    Protocol::AnthropicMessages,
+];
 pub const SECRETS: [&str; 3] = ["dummy-chat", "dummy-responses", "dummy-messages"];
+const MASTER_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 // Hold this through gateway startup: another test must not acquire the released
 // reservation while the child process is still initializing its listener.
@@ -36,6 +44,103 @@ pub struct Gateway {
     child: Child,
     pub address: SocketAddr,
     directory: PathBuf,
+    database: Option<TestDatabase>,
+}
+
+struct TestDatabase {
+    base_url: String,
+    schema: String,
+    url: String,
+}
+
+impl TestDatabase {
+    fn new(id: usize) -> Self {
+        let base_url = std::env::var("LLMPROXY_TEST_DATABASE_URL")
+            .expect("LLMPROXY_TEST_DATABASE_URL is required for gateway integration tests");
+        let schema = format!("llmproxy_proxy_test_{}_{id}", std::process::id());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut admin = toasty::Db::builder().connect(&base_url).await.unwrap();
+            toasty::sql::statement(format!("CREATE SCHEMA {schema}"))
+                .exec(&mut admin)
+                .await
+                .unwrap();
+        });
+        let separator = if base_url.contains('?') { '&' } else { '?' };
+        let url = format!("{base_url}{separator}options=-c%20search_path%3D{schema}");
+        Self {
+            base_url,
+            schema,
+            url,
+        }
+    }
+
+    fn populate(&self, providers: [Provider; 3]) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            let store = ProviderStore::connect(&self.url, MASTER_KEY)
+                .await
+                .map_err(|_| "connect isolated provider store")?;
+            store
+                .migrate()
+                .await
+                .map_err(|_| "migrate isolated schema")?;
+            for (index, provider) in providers.into_iter().enumerate() {
+                let host = provider.host.unwrap_or(if provider.tls {
+                    "localhost"
+                } else {
+                    "127.0.0.1"
+                });
+                let record = store
+                    .create(ProviderInput {
+                        name: format!("Test {}", PROTOCOLS[index].as_str()),
+                        protocol: PROTOCOLS[index],
+                        host: host.to_owned(),
+                        port: provider.address.port(),
+                        tls: provider.tls,
+                        api_key: SECRETS[index].to_owned(),
+                        enabled: true,
+                        anthropic_version: provider.version.map(str::to_owned),
+                        connect_timeout_ms: provider.connect_ms,
+                        read_timeout_ms: provider.read_ms,
+                        write_timeout_ms: provider.write_ms,
+                    })
+                    .await
+                    .map_err(|_| "create test provider")?;
+                store
+                    .activate(record.id, record.version)
+                    .await
+                    .map_err(|_| "activate test provider")?;
+            }
+            Ok::<(), &'static str>(())
+        });
+        drop(runtime);
+        result.expect("populate isolated provider schema");
+    }
+}
+
+impl Drop for TestDatabase {
+    fn drop(&mut self) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let removed = runtime.block_on(async {
+            let mut admin = toasty::Db::builder().connect(&self.base_url).await?;
+            toasty::sql::statement(format!("DROP SCHEMA {} CASCADE", self.schema))
+                .exec(&mut admin)
+                .await
+        });
+        if removed.is_err() {
+            eprintln!("failed to remove isolated provider test schema");
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -68,39 +173,25 @@ impl Gateway {
         let _allocation = PORT_ALLOCATION
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = reservation.local_addr().unwrap();
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let database = TestDatabase::new(id);
+        database.populate(providers);
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let directory = std::env::temp_dir().join(format!(
             "llmproxy-integration-{}-{}",
             std::process::id(),
             id,
         ));
         fs::create_dir(&directory).unwrap();
-        let mut config = format!("listen = \"{address}\"\n");
-        for (index, provider) in providers.iter().enumerate() {
-            // localhost supplies a DNS name for the TLS SNI test.
-            let host = provider.host.unwrap_or(if provider.tls {
-                "localhost"
-            } else {
-                "127.0.0.1"
-            });
-            config.push_str(&format!(
-                "\n[{}]\nhost = \"{host}\"\nport = {}\ntls = {}\napi_key_env = \"LLMPROXY_TEST_KEY_{index}\"\nconnect_timeout_ms = {}\nread_timeout_ms = {}\nwrite_timeout_ms = {}\n",
-                NAMES[index], provider.address.port(), provider.tls,
-                provider.connect_ms, provider.read_ms, provider.write_ms
-            ));
-            if let Some(version) = provider.version {
-                config.push_str(&format!("anthropic_version = \"{version}\"\n"));
-            }
-        }
-        fs::write(directory.join("config.toml"), config).unwrap();
         let mut command = Self::command(&directory);
-        command.env("LLMPROXY_CONFIG", directory.join("config.toml"));
-        for (index, secret) in SECRETS.iter().enumerate() {
-            command.env(format!("LLMPROXY_TEST_KEY_{index}"), secret);
-        }
-        Self::launch(command, reservation, directory, id)
+        command
+            .env("LLMPROXY_DATABASE_URL", &database.url)
+            .env("LLMPROXY_MASTER_KEY", MASTER_KEY)
+            .env(
+                "LLMPROXY_LISTEN",
+                reservation.local_addr().unwrap().to_string(),
+            );
+        Self::launch(command, reservation, directory, id, Some(database))
     }
 
     pub fn database(url: &str, master_key: &str) -> Self {
@@ -122,7 +213,7 @@ impl Gateway {
                 "LLMPROXY_LISTEN",
                 reservation.local_addr().unwrap().to_string(),
             );
-        Self::launch(command, reservation, directory, id)
+        Self::launch(command, reservation, directory, id, None)
     }
 
     fn command(directory: &std::path::Path) -> Command {
@@ -147,6 +238,7 @@ impl Gateway {
         reservation: TcpListener,
         directory: PathBuf,
         id: usize,
+        database: Option<TestDatabase>,
     ) -> Self {
         let address = reservation.local_addr().unwrap();
         drop(reservation);
@@ -155,6 +247,7 @@ impl Gateway {
             child,
             address,
             directory,
+            database,
         };
         let deadline = Instant::now() + DEADLINE;
         let readiness_path = format!("/__llmproxy_test_ready/{}/{id}", std::process::id());
@@ -224,6 +317,7 @@ impl Drop for Gateway {
             eprintln!("gateway diagnostics:\n{}", self.logs());
         }
         let _ = fs::remove_dir_all(&self.directory);
+        drop(self.database.take());
     }
 }
 

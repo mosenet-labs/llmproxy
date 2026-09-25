@@ -11,12 +11,12 @@
   -> Pingora 接入层（方法/路径、鉴权、限制、流式代理）
   -> 应用层（协议识别、选择上游、配置快照）
   -> 领域层（协议、Provider、路由、配置校验）
-  -> 基础设施（Toasty/PostgreSQL、凭据加密、配置文件、OTLP、日志和指标）
+  -> 基础设施（Toasty/PostgreSQL、凭据加密、环境配置、OTLP、日志和指标）
 ```
 
 `llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是进程内的 Topcoat 路由库，复用 `topcoat-ant-design` 构建 Provider 管理页面；`llmproxy-store` 封装 Toasty 模型、PostgreSQL 迁移、事务和密钥加密。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
 
-设置 `LLMPROXY_DATABASE_URL` 启用数据库模式；未设置时保留启动时读取 TOML 的模式。每种协议允许多个 Provider，但只有一个当前绑定；在途请求持有原 Provider 快照。具体设计见 [Provider 管理控制台](07-provider-console.md)。
+PostgreSQL 是唯一的 Provider 来源，启动必须设置 `LLMPROXY_DATABASE_URL` 和 `LLMPROXY_MASTER_KEY`。每种协议允许多个 Provider，但只有一个当前绑定；在途请求持有原 Provider 快照。具体设计见 [Provider 管理控制台](07-provider-console.md)。
 
 统一入口由 `llmproxy-gateway` 的 `llmproxy` 二进制承载，Pingora 在请求过滤阶段将 `/ui` 交给 Topcoat，其余按代理路径分发。默认 `127.0.0.1:3200`，见[单端口设计](11-unified-service.md)。
 
@@ -29,7 +29,7 @@
 | `/v1/messages` | Anthropic Messages | `/v1/messages` |
 | `/v1/auto` | 依据头与 JSON 识别 | 对应的原生上游路径 |
 
-仅允许已配置的上游主机，客户端不能指定任意目标 URL。数据库模式下上游凭据由控制台录入并加密保存，主密钥通过环境变量注入；TOML 模式保留环境变量凭据引用。客户端凭据不转发到 Provider。响应状态码、错误体和 SSE 字节流保持原样。默认不缓存 LLM 响应。
+仅允许已配置的上游主机，客户端不能指定任意目标 URL。上游凭据由控制台录入并加密保存，主密钥通过环境变量注入。客户端凭据不转发到 Provider。响应状态码、错误体和 SSE 字节流保持原样。默认不缓存 LLM 响应。
 
 ## 自动识别
 
@@ -51,8 +51,8 @@ Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_f
 - 请求头重写 `Host` 和 Provider 凭据，过滤逐跳头；保留必要的协议头。
 - 连接超时与响应读取超时分别配置，SSE 不做全量缓冲或自动压缩。
 - `POST` 请求在请求体已发出或响应已开始后不重试，避免重复生成和计费。
-- 配置在启动和热更新时校验；数据库连接、迁移或主密钥错误阻止数据库模式启动。运行中加载失败保留上一份有效快照。
-- 数据库模式允许空配置，未绑定 Provider 的协议返回 `503`；TOML 模式缺少凭据时启动失败。
+- 配置在启动和热更新时校验；缺少数据库环境变量、数据库连接失败、未执行迁移或主密钥错误均阻止启动。运行中加载失败保留上一份有效快照。
+- 数据库允许空 Provider 配置，未绑定 Provider 的协议返回 `503`。
 
 ## Topcoat 控制台与后续演进
 

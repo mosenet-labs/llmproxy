@@ -24,7 +24,7 @@ use crate::{
 pub struct Gateway {
     providers: ProviderSnapshots,
     telemetry: GatewayTelemetry,
-    console: Option<llmproxy_console::Console>,
+    console: llmproxy_console::Console,
 }
 
 pub struct RequestContext {
@@ -35,7 +35,7 @@ pub struct RequestContext {
 }
 
 impl Gateway {
-    pub fn new(providers: ProviderSnapshots, console: Option<llmproxy_console::Console>) -> Self {
+    pub fn new(providers: ProviderSnapshots, console: llmproxy_console::Console) -> Self {
         Self {
             providers,
             telemetry: GatewayTelemetry::new(),
@@ -58,11 +58,9 @@ impl ProxyHttp for Gateway {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        if crate::console::matches(session.req_header().uri.path())
-            && let Some(console) = &self.console
-        {
+        if crate::console::matches(session.req_header().uri.path()) {
             ctx.console = true;
-            crate::console::serve(console, session).await?;
+            crate::console::serve(&self.console, session).await?;
             return Ok(true);
         }
         let request = session.req_header();

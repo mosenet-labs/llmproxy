@@ -12,8 +12,9 @@
 - [三个明确入口的阶段分工与联调验收](docs/05-explicit-routes-validation.md)
 - [Pingora 请求生命周期与阶段串联](docs/06-pingora-request-lifecycle.md)
 - [Provider 管理控制台与 PostgreSQL](docs/07-provider-console.md)
+- [SQLite 兼容与默认数据库计划](docs/12-sqlite-compatibility-plan.md)
 
-当前 workspace 包含 `llmproxy-core`（领域模型）、`llmproxy-store`（Toasty/PostgreSQL）、`llmproxy-gateway`（Pingora）和 `llmproxy-console`（Topcoat 控制台库），以及 `llmproxy-telemetry`（统一遥测）。运行入口为 `llmproxy`，由 Pingora 提供唯一监听端口。
+当前 workspace 包含 `llmproxy-core`（领域模型）、`llmproxy-store`（Toasty/PostgreSQL）、`llmproxy-gateway`（Pingora）和 `llmproxy-console`（Topcoat 控制台库），以及 `llmproxy-telemetry`（统一遥测）。运行入口为 `llmproxy`，由 Pingora 提供唯一监听端口；启动必须配置 PostgreSQL 和数据库主密钥。
 
 ## 本地启动控制台与网关
 
@@ -25,4 +26,4 @@ bash scripts/dev.sh up
 
 控制台：`http://127.0.0.1:3200/ui`；代理：`http://127.0.0.1:3200/v1/*`。在控制台新增 Provider 并“设为当前”后，对应入口约一秒生效。
 
-数据库迁移完成后，也可直接在项目根目录运行 `cargo run`。统一读取 `.env` 中的 `LLMPROXY_LISTEN` 和 `OTEL_SERVICE_NAME`。
+数据库迁移完成后，也可直接在项目根目录运行 `cargo run`。进程通过 `dotenvy` 读取 `.env` 中的数据库、监听和遥测配置。

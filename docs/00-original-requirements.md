@@ -22,6 +22,16 @@
 
 ## 关联文档
 
+最新补充：
+
+> 数据库需要兼容sqlite，默认如果没有指定将直接使用sqlite，说说你的方案
+>
+> 好的，做一个sqlite兼容的计划，不需要考虑数据在两种类似的数据中相互迁移
+
+对应的默认行为、主密钥处理和任务见[SQLite 兼容计划](12-sqlite-compatibility-plan.md)。
+
+最新确认：Provider 必须由数据库动态管理，删除早期 TOML 配置来源。实现与验证见[数据库唯一配置来源](02-tasks.md#v数据库唯一配置来源)。
+
 最新确认：单进程、单端口集成控制台与网关；控制台使用 `/ui`，统一服务名和日志流，执行实现。见[统一服务设计与任务](11-unified-service.md)。
 
 > 不用/admin改用/ui 其他的按你的建议来，执行吧
@@ -36,7 +46,7 @@
 
 对应的能力边界、集中记录方案和验收任务见[网关可观测性收口](08-gateway-observability.md)。
 
-补充需求：Provider 通过 Topcoat UI 管理，采用 Ant Design 清爽简约后台风格，复用 `topcoat-ant-design` 组件库（缺少通用组件时可扩展）；ORM 使用 Toasty，数据库使用本地 PostgreSQL。连接凭据仅保存于本地环境配置。详见[Provider 控制台设计](07-provider-console.md)。
+补充需求：Provider 通过 Topcoat UI 管理，采用 Ant Design 清爽简约后台风格，复用 `topcoat-ant-design` 组件库（缺少通用组件时可扩展）；ORM 使用 Toasty，数据库使用本地 PostgreSQL。上游凭据加密保存在数据库，数据库主密钥由本地环境配置提供。详见[Provider 控制台设计](07-provider-console.md)。
 
 - [架构设计与技术边界](01-architecture.md)
 - [分阶段实施任务与完成状态](02-tasks.md)
@@ -49,3 +59,4 @@
 - [Provider 异步操作与一次性通知](09-console-async-actions.md)
 - [控制台与网关统一可观测性](10-shared-telemetry.md)
 - [单进程、单端口与 /ui 控制台](11-unified-service.md)
+- [SQLite 兼容与默认数据库计划](12-sqlite-compatibility-plan.md)

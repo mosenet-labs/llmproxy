@@ -11,7 +11,7 @@
 - Pingora `request_filter` 严格匹配 `/ui` 或 `/ui/` 子路径，在进程内调用 Topcoat `Router::handle`；不占用第二个端口。其他路径继续走现有代理逻辑。
 - 控制台表单体保持 32 KiB 限制；桥接层限量读取请求体，响应按帧发送。代理和 SSE 不经过控制台的缓冲逻辑。
 - 控制台数据库 runtime 在统一服务运行期间保持存活；Pingora 停止后释放资源，再刷新三类遥测。
-- 保留数据库模式与 TOML 代理模式。控制台依赖 PG，仅在数据库模式启用；TOML 模式 `/ui` 返回 404。
+- PostgreSQL 是唯一的 Provider 来源；缺少数据库地址或主密钥时拒绝启动。控制台与代理读取同一数据库，代理请求使用内存快照。
 - 控制台保留本机访问、Host/Origin/CSRF 保护；即使代理绑定非回环地址，`/ui` 仍只接收回环客户端。管理登录与权限属于后续任务。
 
 ## /ui 路径
@@ -31,6 +31,8 @@ Topcoat 0.8.1 的 runtime 固定生成 `/_topcoat` URL，尚无应用挂载前�
 
 ```dotenv
 LLMPROXY_LISTEN=127.0.0.1:3200
+LLMPROXY_DATABASE_URL=postgresql://<用户>:<密码>@127.0.0.1:5432/llmproxy_dev
+LLMPROXY_MASTER_KEY=<Base64 编码的 32 字节主密钥>
 OTEL_SERVICE_NAME=llmproxy
 OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic%20<现有凭据>,stream-name=llmproxy"
 ```

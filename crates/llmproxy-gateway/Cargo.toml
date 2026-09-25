@@ -19,7 +19,6 @@ pingora = { version = "0.9.0", features = ["proxy", "rustls"] }
 pingora-http = "0.9.0"
 async-trait = "0.1.92"
 serde.workspace = true
-toml = "1.1.6"
 tracing.workspace = true
 llmproxy-telemetry = { path = "../llmproxy-telemetry" }
 dotenvy = "0.15.7"

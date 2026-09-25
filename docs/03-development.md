@@ -1,20 +1,10 @@
 # 本地运行与遥测
 
-## 控制台与数据库模式
+## 控制台与网关启动
 
 本轮本机已准备 `llmproxy_dev`、`llmproxy_test` 和忽略提交的 `.env`。运行 `bash scripts/dev.sh up` 会编译、迁移数据库，并启动单一 `llmproxy` 进程（3200），`/ui` 为控制台、`/v1/*` 为代理。新增 Provider 后选择“设为当前”；没有绑定的协议入口返回 `503`。从其他机器克隆时按 [Provider 控制台启动说明](07-provider-console.md#启动) 准备数据库、组件库和环境变量。
 
-## TOML 模式启动
-
-未设置 `LLMPROXY_DATABASE_URL` 时，复制 `config/gateway.example.toml`，并为其中的 `api_key_env` 设置环境变量。启动示例：
-
-```sh
-export OPENAI_API_KEY='...'
-export ANTHROPIC_API_KEY='...'
-LLMPROXY_CONFIG=config/gateway.example.toml cargo run -p llmproxy-gateway
-```
-
-网关默认监听 `127.0.0.1:3200`。配置文件不包含真实密钥。当前自动入口尚未实现完整代理，返回 `501`；具体任务见[实施任务](02-tasks.md)。
+启动必须提供 `LLMPROXY_DATABASE_URL` 和 `LLMPROXY_MASTER_KEY`；缺少任一项会直接失败。数据库迁移后可在项目根目录运行 `cargo run`。网关默认监听 `127.0.0.1:3200`。当前自动入口尚未实现完整代理，返回 `501`；具体任务见[实施任务](02-tasks.md)。
 
 ## Provider 超时
 
@@ -32,7 +22,7 @@ cargo test --workspace
 cargo test -p llmproxy-gateway --test explicit_routes
 ```
 
-网关测试使用本地 TCP 模拟上游和自动启动的网关进程，不需要真实 API key 或 OpenObserve；测试进程会清理临时文件和子进程。数据库相关测试需要显式导出 `LLMPROXY_TEST_DATABASE_URL`，在独立 schema 中执行并清理，不会清空数据库；未设置时会跳过数据库测试。可先 `set -a; source .env; set +a` 再运行测试。运行环境需要允许监听和访问回环地址。完整行为约定与测试矩阵见[三个明确入口的联调验收](05-explicit-routes-validation.md)。
+网关测试使用本地 TCP 模拟上游和自动启动的网关进程，不需要真实 Provider API key 或 OpenObserve。完整集成测试必须显式导出 `LLMPROXY_TEST_DATABASE_URL`；每个测试在独立 schema 中创建临时 Provider 并清理，不会清空数据库。可先 `set -a; source .env; set +a` 再运行测试。未设置测试数据库 URL 时，明确入口和可观测性集成测试会失败，避免把未执行的代理验证误报为通过。运行环境需要允许监听和访问回环地址。完整行为约定与测试矩阵见[三个明确入口的联调验收](05-explicit-routes-validation.md)。
 
 ## OTLP/OpenObserve
 

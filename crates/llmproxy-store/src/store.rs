@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use llmproxy_core::config::ProviderConfig;
+use llmproxy_core::provider::validate_upstream;
 use toasty::{
     Db, Executor, Transaction,
     migration::{MigrationFile, MigrationSet},
@@ -434,17 +434,15 @@ fn validate(mut input: ProviderInput, creating: bool) -> StoreResult<ProviderInp
     {
         return Err(StoreError::Validation("超时值超出支持范围".into()));
     }
-    let config = ProviderConfig {
-        host: input.host.clone(),
-        port: input.port,
-        tls: input.tls,
-        api_key_env: "PROVIDER_KEY".into(),
-        anthropic_version: input.anthropic_version.clone(),
-        connect_timeout_ms: input.connect_timeout_ms,
-        read_timeout_ms: input.read_timeout_ms,
-        write_timeout_ms: input.write_timeout_ms,
-    };
-    config.validate().map_err(|message| {
+    validate_upstream(
+        &input.host,
+        input.port,
+        input.anthropic_version.as_deref(),
+        input.connect_timeout_ms,
+        input.read_timeout_ms,
+        input.write_timeout_ms,
+    )
+    .map_err(|message| {
         StoreError::Validation(match message {
             "port must be nonzero" => "端口须为 1–65535".into(),
             "connect_timeout_ms must be nonzero"

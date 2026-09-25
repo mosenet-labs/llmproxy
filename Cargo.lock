@@ -1836,7 +1836,6 @@ dependencies = [
  "serde_json",
  "toasty",
  "tokio",
- "toml",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

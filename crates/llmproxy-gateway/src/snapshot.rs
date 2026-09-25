@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use llmproxy_core::{config::ProviderConfig, protocol::Protocol};
+use llmproxy_core::{protocol::Protocol, provider::validate_upstream};
 use llmproxy_store::{ActiveProvider, ProviderStore};
 use tokio::{runtime::Builder, sync::oneshot, time};
 
@@ -63,17 +63,14 @@ impl ProviderSnapshot {
         for provider in providers {
             // Validate the entire candidate before replacing the live snapshot,
             // including rows that may have been edited outside the console.
-            ProviderConfig {
-                host: provider.host.clone(),
-                port: provider.port,
-                tls: provider.tls,
-                api_key_env: "DATABASE_CREDENTIAL".to_owned(),
-                anthropic_version: provider.anthropic_version.clone(),
-                connect_timeout_ms: provider.connect_timeout_ms,
-                read_timeout_ms: provider.read_timeout_ms,
-                write_timeout_ms: provider.write_timeout_ms,
-            }
-            .validate()?;
+            validate_upstream(
+                &provider.host,
+                provider.port,
+                provider.anthropic_version.as_deref(),
+                provider.connect_timeout_ms,
+                provider.read_timeout_ms,
+                provider.write_timeout_ms,
+            )?;
             if provider.secret.trim().is_empty() || provider.secret.contains(['\r', '\n']) {
                 return Err("invalid active provider credential");
             }
