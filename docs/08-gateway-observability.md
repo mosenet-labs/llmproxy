@@ -35,7 +35,7 @@ Pingora 回调 → RequestTelemetry（请求内采集）
                  └─ 低基数 metrics
 
 PeerOptions::tracer → ConnectionProbe → 独立连接生命周期事件
-observability::init → subscriber / 三类 exporter / shutdown
+llmproxy_telemetry::init → subscriber / 三类 exporter / shutdown
 ```
 
 | 阶段 | 采集/动作 | 记录位置 |
@@ -76,7 +76,8 @@ DNS 改用 Tokio 异步解析，独立使用 Provider 的 `connect_timeout_ms` �
 
 ## 实现位置与验证范围
 
-- [observability.rs](../crates/llmproxy-gateway/src/observability.rs)：subscriber、OTLP 三类出口，以及启动/快照刷新事件。
+- [llmproxy-telemetry](../crates/llmproxy-telemetry/src/lib.rs)：网关与控制台共用的 subscriber、OTLP 三类出口、服务名与退出刷新，见[统一可观测性](10-shared-telemetry.md)。
+- [observability.rs](../crates/llmproxy-gateway/src/observability.rs)：网关启动/快照刷新事件。
 - [request.rs](../crates/llmproxy-gateway/src/observability/request.rs)：请求采集对象、统一完成事件、span 收尾、错误分类和指标。
 - [connection.rs](../crates/llmproxy-gateway/src/observability/connection.rs)：Pingora tracer 适配、进程内连接身份、释放清理与生命周期计数。
 - [代理回调](../crates/llmproxy-gateway/src/proxy.rs)：异步 DNS、连接参数和阶段数据采集；不直接调用 tracing 或 metrics。

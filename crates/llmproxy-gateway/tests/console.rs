@@ -1,3 +1,5 @@
+mod support;
+
 use std::{
     net::TcpListener,
     path::PathBuf,
@@ -73,14 +75,15 @@ async fn exercise_http(database_url: &str) {
     let directory =
         std::env::temp_dir().join(format!("llmproxy-console-{}-{port}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
-    let rejected = Command::new(env!("CARGO_BIN_EXE_llmproxy-console"))
+    std::fs::write(directory.join(".env"), "OTEL_SERVICE_NAME=llmproxy\n").unwrap();
+    let rejected = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
         .env_clear()
         .env("LLMPROXY_DATABASE_URL", database_url)
         .env(
             "LLMPROXY_MASTER_KEY",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         )
-        .env("LLMPROXY_CONSOLE_PORT", port.to_string())
+        .env("LLMPROXY_LISTEN", format!("127.0.0.1:{port}"))
         .current_dir(&directory)
         .output()
         .expect("start console with a wrong master key");
@@ -89,18 +92,21 @@ async fn exercise_http(database_url: &str) {
         "wrong master key must fail before listening"
     );
     assert!(!String::from_utf8_lossy(&rejected.stderr).contains(database_url));
-    let child = Command::new(env!("CARGO_BIN_EXE_llmproxy-console"))
+    let log_path = directory.join("console.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
         .env_clear()
         .env("LLMPROXY_DATABASE_URL", database_url)
         .env("LLMPROXY_MASTER_KEY", MASTER_KEY)
-        .env("LLMPROXY_CONSOLE_PORT", port.to_string())
+        .env("LLMPROXY_LISTEN", format!("127.0.0.1:{port}"))
         .current_dir(&directory)
-        .stdout(Stdio::null())
+        .stdout(log)
         .stderr(Stdio::null())
         .spawn()
         .expect("start console process");
     let mut process = ConsoleProcess { child, directory };
-    let base = format!("http://127.0.0.1:{port}");
+    let origin = format!("http://127.0.0.1:{port}");
+    let base = format!("{origin}/ui");
     let client = Client::builder()
         .no_proxy()
         .redirect(Policy::none())
@@ -131,12 +137,12 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(response.headers()["cache-control"], "no-store");
     let html = response.text().await.unwrap();
     assert!(html.contains("连接第一个模型服务"));
-    assert_navigation(&html, "/", "Provider 管理");
+    assert_navigation(&html, "/ui", "Provider 管理");
     assert!(!html.contains("id=\"routes\""));
     let routes = client.get(format!("{base}/routes")).send().await.unwrap();
     assert_eq!(routes.status(), StatusCode::OK);
     let routes = routes.text().await.unwrap();
-    assert_navigation(&routes, "/routes", "路由概览");
+    assert_navigation(&routes, "/ui/routes", "路由概览");
     assert!(!routes.contains("providers-panel"));
     assert_eq!(routes.matches("尚未分配").count(), 3);
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
@@ -148,7 +154,7 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert_eq!(alias.status(), StatusCode::SEE_OTHER);
-    assert_eq!(alias.headers()["location"], "/");
+    assert_eq!(alias.headers()["location"], "/ui");
     for asset in ["components.css", "console.css", "runtime.js"] {
         let response = client
             .get(format!("{base}/assets/{asset}"))
@@ -166,13 +172,20 @@ async fn exercise_http(database_url: &str) {
             assert!(!body.contains("@source"));
             assert!(!body.contains("@apply"));
         }
+        if asset == "runtime.js" {
+            for endpoint in ["procedures", "shards", "pages"] {
+                assert!(body.contains(&format!("/ui/_topcoat/runtime/{endpoint}")));
+            }
+        }
     }
-    let font = topcoat_ant_design::DEFAULT_FONT;
+    let font_href = html
+        .split("href=\"")
+        .skip(1)
+        .map(|value| value.split('"').next().unwrap())
+        .find(|value| value.starts_with("/ui/_topcoat/fonts/"))
+        .expect("prefixed font stylesheet");
     let font_css = client
-        .get(format!(
-            "{base}/_topcoat/fonts/JetBrains-Mono-{:016x}.css",
-            font.hash()
-        ))
+        .get(format!("{origin}{font_href}"))
         .send()
         .await
         .unwrap();
@@ -184,6 +197,22 @@ async fn exercise_http(database_url: &str) {
             .unwrap()
             .contains("font-family: \"JetBrains Mono\"")
     );
+
+    for (path, title) in [("/ui", "Provider 管理"), ("/ui/routes", "路由概览")] {
+        let response = client
+            .post(format!("{base}/_topcoat/runtime/pages{path}"))
+            .header("content-type", "application/json")
+            .body(r#"{"signals":{}}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "native page re-run {path}"
+        );
+        assert_navigation(&response.text().await.unwrap(), path, title);
+    }
 
     let editor = client
         .get(format!("{base}/providers/form"))
@@ -371,7 +400,7 @@ async fn exercise_http(database_url: &str) {
         .find(|provider| provider.name == "Chat Test")
         .unwrap();
     let filtered = client
-        .get(format!("{base}/?q=Chat&protocol=openai_chat&state=enabled"))
+        .get(format!("{base}?q=Chat&protocol=openai_chat&state=enabled"))
         .send()
         .await
         .unwrap()
@@ -580,7 +609,7 @@ async fn exercise_http(database_url: &str) {
 
     let unknown_notice = client
         .get(format!(
-            "{base}/?notice=unknown&provider_name=UntrustedNotice"
+            "{base}?notice=unknown&provider_name=UntrustedNotice"
         ))
         .send()
         .await
@@ -589,6 +618,218 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert!(!unknown_notice.contains("UntrustedNotice"));
+
+    assert_eq!(
+        client
+            .get(format!("{base}/unknown-private-path?key=secret-query"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        client
+            .put(format!("{base}/providers/save"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/providers/save"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("x".repeat(40 * 1024))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    for secret in [
+        PROVIDER_KEY,
+        MASTER_KEY,
+        database_url,
+        csrf.as_str(),
+        "secret-query",
+        "unknown-private-path",
+    ] {
+        assert!(
+            !logs.contains(secret),
+            "sensitive value leaked to console logs"
+        );
+    }
+    let events: Vec<serde_json::Value> = logs
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON log line"))
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["fields"]["service_name"] == "llmproxy")
+    );
+    let requests: Vec<_> = events
+        .iter()
+        .filter(|event| event["fields"]["event_kind"] == "request")
+        .collect();
+    for status in [200, 303, 403, 404, 405, 413] {
+        assert!(
+            requests
+                .iter()
+                .any(|event| event["fields"]["status"] == status),
+            "missing request status {status}"
+        );
+    }
+    assert!(
+        requests
+            .iter()
+            .all(|event| event["fields"]["component"] == "console")
+    );
+    let ids: std::collections::HashSet<_> = requests
+        .iter()
+        .map(|event| event["fields"]["request_id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), requests.len(), "one event per request");
+    let operations: Vec<_> = events
+        .iter()
+        .filter(|event| event["fields"]["event_kind"] == "provider_operation")
+        .collect();
+    for action in [
+        "create", "update", "activate", "enable", "disable", "delete",
+    ] {
+        assert!(
+            operations
+                .iter()
+                .any(|event| event["fields"]["action"] == action
+                    && event["fields"]["outcome"] == "success"
+                    && event["fields"]["provider_name"].as_str().is_some()),
+            "missing named operation {action}"
+        );
+    }
+    for kind in ["validation", "conflict"] {
+        assert!(
+            operations
+                .iter()
+                .any(|event| event["fields"]["error_kind"] == kind
+                    && event["fields"]["outcome"] == "failure"),
+            "missing failure {kind}"
+        );
+    }
+
+    // The same listener owns UI routes and LLM requests. No real provider is called.
+    for path in [
+        "/uix",
+        "/ui-other",
+        "/assets/runtime.js",
+        "/_topcoat/runtime/procedures/nope",
+        "/providers/save",
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{origin}{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let (upstream, received) = support::Mock::http(|_, stream| {
+        support::respond(
+            stream,
+            200,
+            "Content-Type: application/json\r\n",
+            br#"{"provider":"ui-configured"}"#,
+        );
+    });
+    let mut input = provider_form(&csrf, "Unified Mock", "openai_chat");
+    set(
+        &mut input,
+        "upstream_url",
+        &format!("http://{}", upstream.address),
+    );
+    let response = post(&client, &base, "/providers/save", &input).await;
+    success_notice(&client, &base, response, "create", "Unified Mock", "已创建").await;
+    let provider = store
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|provider| provider.name == "Unified Mock")
+        .unwrap();
+    let response = post(
+        &client,
+        &base,
+        "/providers/action",
+        &action_form(&csrf, provider.id, provider.version, "activate"),
+    )
+    .await;
+    success_notice(
+        &client,
+        &base,
+        response,
+        "activate",
+        "Unified Mock",
+        "已设为当前服务",
+    )
+    .await;
+    let mut forwarded = false;
+    for _ in 0..60 {
+        let response = client
+            .post(format!("{origin}/v1/chat/completions"))
+            .body(r#"{"model":"mock","messages":[]}"#)
+            .send()
+            .await
+            .unwrap();
+        if response.status() == StatusCode::OK {
+            assert_eq!(
+                response.text().await.unwrap(),
+                r#"{"provider":"ui-configured"}"#
+            );
+            forwarded = true;
+            break;
+        }
+        // The preceding CRUD cases may still be in the one-second snapshot.
+        // An old placeholder upstream returns 502; an unbound snapshot returns 503.
+        assert!(matches!(
+            response.status(),
+            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        forwarded,
+        "UI activation must update the same process's gateway snapshot"
+    );
+    let request = received.recv_timeout(support::DEADLINE).unwrap();
+    assert_eq!(
+        support::values(&request.headers, "authorization"),
+        [format!("Bearer {PROVIDER_KEY}")]
+    );
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    let events: Vec<serde_json::Value> = logs
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["fields"]["message"] == "telemetry initialized")
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["fields"]["component"] == "gateway"
+                && event["fields"]["route"] == "/v1/chat/completions"
+                && event["fields"]["status"] == 200)
+    );
+    assert!(!logs.contains(PROVIDER_KEY));
 }
 
 async fn success_notice(
@@ -612,7 +853,7 @@ async fn success_notice(
         .append_pair("provider_name", provider_name)
         .finish();
     // Both a plain refresh and an old success URL must start without feedback.
-    for suffix in [String::new(), format!("/?{query}"), format!("/?{query}")] {
+    for suffix in [String::new(), format!("?{query}"), format!("?{query}")] {
         let html = client
             .get(format!("{base}{suffix}"))
             .send()
@@ -627,8 +868,7 @@ async fn success_notice(
         )));
         assert!(!html.contains("data-state=\"open\""));
     }
-    let html = client.get(base).send().await.unwrap().text().await.unwrap();
-    html
+    client.get(base).send().await.unwrap().text().await.unwrap()
 }
 
 fn confirmation_without_description(html: &str, id: &str, title: &str) {
@@ -731,7 +971,7 @@ async fn procedure_request(
     fields: &[(String, String)],
 ) -> reqwest::RequestBuilder {
     let html = client.get(base).send().await.unwrap().text().await.unwrap();
-    let form = element(&html, "form", &format!("action=\"{path}\""));
+    let form = element(&html, "form", &format!("action=\"/ui{path}\""));
     let decoded = form.replace("&quot;", "\"");
     let id = decoded
         .split_once("\"t\":\"Procedure\",\"id\":\"")

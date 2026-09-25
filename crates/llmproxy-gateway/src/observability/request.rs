@@ -85,11 +85,13 @@ impl RequestTelemetry {
             _ => "unmatched",
         };
         let path: String = path.chars().take(512).collect();
-        self.span = Some(tracing::info_span!(parent: None, "llmproxy.request",
+        self.span = Some(
+            tracing::info_span!(parent: None, "llmproxy.request", component = "gateway",
             request_id = self.id, http.method = method, http.route = self.route, http.path = path,
             llm.protocol = tracing::field::Empty, upstream = tracing::field::Empty,
             http.status_code = tracing::field::Empty, otel.kind = "server",
-            otel.status_code = tracing::field::Empty));
+            otel.status_code = tracing::field::Empty),
+        );
     }
 
     pub fn selected(&mut self, protocol: Protocol, upstream: Option<String>) {
@@ -252,6 +254,7 @@ impl GatewayTelemetry {
         let error_stage = error.map(|e| request.failure_stage(e));
         let (io_kind, os_code) = error.map(io_details).unwrap_or_default();
         let mut attributes = vec![
+            KeyValue::new("component", "gateway"),
             KeyValue::new("protocol", request.protocol),
             KeyValue::new("route", request.route),
         ];
@@ -282,6 +285,7 @@ impl GatewayTelemetry {
         ] {
             if let Some(elapsed) = elapsed {
                 let mut labels = vec![
+                    KeyValue::new("component", "gateway"),
                     KeyValue::new("protocol", request.protocol),
                     KeyValue::new("phase", phase),
                 ];
@@ -313,6 +317,7 @@ impl GatewayTelemetry {
         let otel_span = context.span();
         let correlation = otel_span.span_context();
         tracing::info!(
+            component = "gateway",
             event_kind = "request",
             request_id = request.id,
             trace_id = correlation

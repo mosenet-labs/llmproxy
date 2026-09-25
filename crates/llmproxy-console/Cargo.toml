@@ -8,11 +8,12 @@ license.workspace = true
 [dependencies]
 llmproxy-core = { path = "../llmproxy-core" }
 llmproxy-store = { path = "../llmproxy-store" }
+tracing.workspace = true
+tracing-opentelemetry = "0.34.0"
+opentelemetry = { version = "0.33.0", features = ["metrics", "trace"] }
 serde.workspace = true
-dotenvy = "0.15.7"
 getrandom = "0.4.3"
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
-topcoat = { version = "0.8.1", default-features = false, features = ["asset", "icon", "router", "runtime", "serve", "view"] }
+topcoat = { version = "0.8.1", default-features = false, features = ["asset", "icon", "router", "runtime", "view"] }
 topcoat-ant-design = { version = "0.1.2", path = "../../../topcoat-ant-design", features = ["router"] }
 url = "2.5.8"
 
@@ -21,8 +22,3 @@ sha2 = "0.11.0"
 topcoat = { version = "0.8.1", default-features = false, features = ["tailwind"] }
 topcoat-asset = "0.8.1"
 topcoat-runtime = "0.8.1"
-
-[dev-dependencies]
-serde_json.workspace = true
-reqwest = { version = "0.13.5", default-features = false, features = ["form"] }
-toasty = { version = "0.10.0", default-features = false, features = ["postgresql"] }

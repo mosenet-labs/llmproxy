@@ -24,19 +24,22 @@ use crate::{
 pub struct Gateway {
     providers: ProviderSnapshots,
     telemetry: GatewayTelemetry,
+    console: Option<llmproxy_console::Console>,
 }
 
 pub struct RequestContext {
     telemetry: RequestTelemetry,
     protocol: Option<Protocol>,
     provider: Option<Arc<ResolvedProvider>>,
+    console: bool,
 }
 
 impl Gateway {
-    pub fn new(providers: ProviderSnapshots) -> Self {
+    pub fn new(providers: ProviderSnapshots, console: Option<llmproxy_console::Console>) -> Self {
         Self {
             providers,
             telemetry: GatewayTelemetry::new(),
+            console,
         }
     }
 }
@@ -50,10 +53,18 @@ impl ProxyHttp for Gateway {
             telemetry: RequestTelemetry::new(),
             protocol: None,
             provider: None,
+            console: false,
         }
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        if crate::console::matches(session.req_header().uri.path())
+            && let Some(console) = &self.console
+        {
+            ctx.console = true;
+            crate::console::serve(console, session).await?;
+            return Ok(true);
+        }
         let request = session.req_header();
         let method = request.method.as_str();
         let path = request.uri.path();
@@ -308,6 +319,16 @@ impl ProxyHttp for Gateway {
         error: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
+        if ctx.console {
+            if error.is_some() {
+                llmproxy_console::observability::transport_failure(
+                    session
+                        .response_written()
+                        .map(|header| header.status.as_u16()),
+                );
+            }
+            return;
+        }
         let status = session
             .response_written()
             .map(|header| header.status.as_u16());

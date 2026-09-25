@@ -28,7 +28,7 @@ flowchart LR
 | `llmproxy-console` | Topcoat SSR 页面、表单处理、搜索筛选、操作反馈，复用 Ant Design 组件 |
 | `llmproxy-gateway` | 加载已启用且被选中的 Provider，原子替换配置快照，继续承担流式代理 |
 
-控制台与网关分进程运行，网关请求路径不访问数据库。数据库配置变化通过周期性轮询加载，默认约一秒对后续请求生效。每个请求固定使用开始时选定的 Provider，正在进行的 SSE 不随配置更新切换目标或凭据。
+控制台与网关同进程、同端口运行（见[统一服务设计](11-unified-service.md)），网关请求路径不访问数据库。数据库配置变化通过周期性轮询加载，默认约一秒对后续请求生效。每个请求固定使用开始时选定的 Provider，正在进行的 SSE 不随配置更新切换目标或凭据。
 
 未配置 `LLMPROXY_DATABASE_URL` 时，网关继续使用原 TOML 模式。数据库模式下，未选择当前 Provider 的协议入口返回 503；自动入口的协议识别任务独立推进。
 
@@ -49,7 +49,7 @@ Provider 管理包含名称、协议、上游地址、API Key、Anthropic 版本
 ## 表单交互
 
 - 控制台字体与 gitlab-reviewer 一致，使用 JetBrains Mono，中文按 Noto Sans SC、PingFang SC、Microsoft YaHei 回退。
-- Provider 管理（`/`）与路由概览（`/routes`）使用独立页面，导航选中项、标题与面包屑同步；共用内容区宽度和边距。协议路由卡片集中在路由概览，点击卡片返回对应协议的 Provider 列表。
+- Provider 管理（`/ui`）与路由概览（`/ui/routes`）使用独立页面，导航选中项、标题与面包屑同步；共用内容区宽度和边距。协议路由卡片集中在路由概览，点击卡片返回对应协议的 Provider 列表。
 - 新建、编辑在列表上方打开模态对话框，复用组件库 Dialog；打开时保留当前列表和筛选，支持关闭按钮、取消和 Escape。
 - 连接信息只需填写一个“上游地址”，例如 `https://api.deepseek.com` 或 `http://127.0.0.1:11434`。自动识别 HTTP/HTTPS 和端口，未指定端口时分别使用 80/443，允许末尾 `/`；列表与编辑表单省略默认端口。
 - 上游地址填写服务根地址，请求路径由所选协议决定；不接受自定义路径、查询参数、片段或 URL 内嵌凭据。当前支持域名和 IPv4。服务端解析后沿用数据库的 `host / port / tls` 字段，已有 Provider 无需迁移即可编辑。
@@ -73,19 +73,19 @@ Provider 管理和路由概览共用浅色导航、页头和内容区；移除�
 - 布局、响应式断点和状态样式写在 Rust `view!` 的 Tailwind 类中，重复的按钮、导航、表单网格样式使用常量配合 `class!` 组合。类名必须完整出现，避免运行时拼接导致 Tailwind 无法识别。
 - `crates/llmproxy-console/styles.css` 只保留 Tailwind 入口、Ant Design 风格的主题色和页面基础样式；原手写 `src/console.css` 已移除。保留 JetBrains Mono 字体和中文回退字体。
 - Dialog、通知、确认气泡、表格和标签继续复用 `topcoat-ant-design`。控制台与组件库共享 `theme / components / utilities` 层级，控制台样式后加载，确保页面响应式规则生效；不引入 Preflight，保留组件库的控件默认行为。
-- `build.rs` 监听 Rust 源码和样式入口变化；修改后重新运行 `bash scripts/dev.sh console` 即可生成新样式。首次构建可能由 Topcoat 下载 Tailwind CLI，与组件库使用同一套集成。
+- `build.rs` 监听 Rust 源码和样式入口变化；修改后重新运行 `cargo run` 即可生成新样式。首次构建可能由 Topcoat 下载 Tailwind CLI，与组件库使用同一套集成。
 
 视觉调整已在 1280px 桌面与 390px 窄屏检查：空状态、Provider 列表、路由卡片、创建弹窗和停用确认气泡正常；窄屏页面无横向溢出，表格保留容器内横向滚动。异步创建和设为当前服务验证通过；`cargo fmt --all -- --check`、`cargo check --workspace --offline`、`cargo test --workspace --offline` 均通过，完整测试 33 项。
 
 ## 凭据与控制台边界
 
-API Key 由 UI 输入，使用带认证的加密保存到数据库，主密钥从 `LLMPROXY_MASTER_KEY` 注入。主密钥为 Base64 编码的 32 个随机字节，两项服务使用同一值；重启时保持一致。
+API Key 由 UI 输入，使用带认证的加密保存到数据库，主密钥从 `LLMPROXY_MASTER_KEY` 注入。主密钥为 Base64 编码的 32 个随机字节，控制台与代理模块使用同一值；重启时保持一致。
 
 首次迁移使用加密校验记录将数据库绑定到主密钥，后续读写和网关加载都会校验；主密钥错误时拒绝操作，避免不同服务写入彼此无法解密的凭据。请备份主密钥，当前尚未实现主密钥轮换。
 
 列表和编辑页面只显示密钥是否已配置，不向浏览器返回明文或密文。新建必须填写密钥，编辑留空保留已有密钥；校验失败时也不回显密钥。
 
-本轮控制台面向本机开发，默认监听 `127.0.0.1:3200`，校验 Host 并为写操作验证 CSRF token。多用户登录、权限和审计是后续管理能力，不能将当前开发控制台直接暴露到公共网络。
+本轮控制台面向本机开发，通过统一监听地址 `127.0.0.1:3200` 的 `/ui` 访问，校验 Host 并为写操作验证 CSRF token。多用户登录、权限和审计是后续管理能力，不能将当前开发控制台直接暴露到公共网络。
 
 ## 启动
 
@@ -103,13 +103,12 @@ API Key 由 UI 输入，使用带认证的加密保存到数据库，主密钥�
 # 编译、执行数据库迁移，并同时启动控制台和网关
 bash scripts/dev.sh up
 
-# 或分别启动
+# 或先执行迁移，再直接运行
 bash scripts/dev.sh migrate
-bash scripts/dev.sh console
-bash scripts/dev.sh gateway
+cargo run
 ```
 
-控制台地址：`http://127.0.0.1:3200`（`/providers` 会跳转到首页）。网关默认地址：`http://127.0.0.1:8080`。前台运行脚本时按 Ctrl+C 同时停止两个服务。
+控制台地址：`http://127.0.0.1:3200/ui`（`/ui/providers` 会跳转到控制台首页）。代理入口共用 `http://127.0.0.1:3200/v1/*`。前台运行时按 Ctrl+C 停止统一服务。
 
 本地连接信息不写入原始需求或公开示例。数据库模式无需在进程环境中预先配置三个 Provider 的 API Key，可在空数据库启动后从 UI 新增。
 

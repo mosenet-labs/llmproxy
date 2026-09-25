@@ -14,9 +14,11 @@
   -> 基础设施（Toasty/PostgreSQL、凭据加密、配置文件、OTLP、日志和指标）
 ```
 
-`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是独立的 Topcoat 服务，复用 `topcoat-ant-design` 构建 Provider 管理页面；`llmproxy-store` 封装 Toasty 模型、PostgreSQL 迁移、事务和密钥加密。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
+`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是进程内的 Topcoat 路由库，复用 `topcoat-ant-design` 构建 Provider 管理页面；`llmproxy-store` 封装 Toasty 模型、PostgreSQL 迁移、事务和密钥加密。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
 
 设置 `LLMPROXY_DATABASE_URL` 启用数据库模式；未设置时保留启动时读取 TOML 的模式。每种协议允许多个 Provider，但只有一个当前绑定；在途请求持有原 Provider 快照。具体设计见 [Provider 管理控制台](07-provider-console.md)。
+
+统一入口由 `llmproxy-gateway` 的 `llmproxy` 二进制承载，Pingora 在请求过滤阶段将 `/ui` 交给 Topcoat，其余按代理路径分发。默认 `127.0.0.1:3200`，见[单端口设计](11-unified-service.md)。
 
 ## 路由约定
 
@@ -37,6 +39,8 @@ Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_f
 
 ## 可观测性
 
+`llmproxy-telemetry` 负责网关和控制台的公共初始化、服务名、OTLP 三类出口与退出刷新；两侧各自的 `observability` 模块集中记录业务事件。统一通过 `OTEL_SERVICE_NAME` 配置应用服务名，固定的 `component` 字段区分控制台与网关，详见[统一可观测性](10-shared-telemetry.md)。
+
 统一使用 OpenTelemetry：每次请求一个 trace span，结构化日志携带 route/protocol/upstream/status/latency，指标至少包含请求量、失败量和耗时直方图。只用固定的低基数字段做指标标签；不记录完整提示词、响应体、API key 或任意模型名。默认输出本地 JSON 日志。设置 OTLP 环境变量后经 OTLP/HTTP 导出 traces、logs、metrics。OpenObserve 的服务端地址为 `https://<host>/api/<org>`，三类信号分别写到 `/v1/traces`、`/v1/logs`、`/v1/metrics`；认证头由运行环境注入。参见 [OpenObserve OTLP 文档](https://openobserve.ai/docs/ingestion/logs/otlp/)。
 
 类 Nginx/Envoy 的逐请求访问日志采用独立事件和过滤规则，详见[访问日志设计](04-access-logging.md)。
@@ -52,6 +56,6 @@ Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_f
 
 ## Topcoat 控制台与后续演进
 
-管理服务与网关分进程运行，控制台当前绑定回环地址，提供 Provider 新增、编辑、启停、删除及当前协议绑定。采用 PostgreSQL 持久化、Toasty ORM、AES-256-GCM 凭据加密和乐观版本检查；本机表单使用 Host/Origin 校验和 CSRF token。
+管理页面与网关运行于同一进程、同一端口，控制台挂载 `/ui` 并限制回环客户端访问，提供 Provider 新增、编辑、启停、删除及当前协议绑定。采用 PostgreSQL 持久化、Toasty ORM、AES-256-GCM 凭据加密和乐观版本检查；本机表单使用 Host/Origin 校验和 CSRF token。
 
 登录权限、操作审计、健康检查和聚合指标视图是后续任务。需要多实例配置快速同步时，可在当前轮询基础上增加通知；数据库继续作为配置来源。Topcoat 项目资料见[官方仓库](https://github.com/tokio-rs/topcoat)。

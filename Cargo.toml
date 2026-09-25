@@ -4,8 +4,10 @@ members = [
     "crates/llmproxy-store",
     "crates/llmproxy-gateway",
     "crates/llmproxy-console",
+    "crates/llmproxy-telemetry",
 ]
 resolver = "3"
+default-members = ["crates/llmproxy-gateway"]
 
 [workspace.package]
 edition = "2024"

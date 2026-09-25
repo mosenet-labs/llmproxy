@@ -6,12 +6,14 @@
 - [架构设计](docs/01-architecture.md)
 - [实施任务](docs/02-tasks.md)
 - [本地运行与可观测性](docs/03-development.md)
+- [控制台与网关统一可观测性](docs/10-shared-telemetry.md)
+- [单进程、单端口与 /ui 控制台](docs/11-unified-service.md)
 - [访问日志设计](docs/04-access-logging.md)
 - [三个明确入口的阶段分工与联调验收](docs/05-explicit-routes-validation.md)
 - [Pingora 请求生命周期与阶段串联](docs/06-pingora-request-lifecycle.md)
 - [Provider 管理控制台与 PostgreSQL](docs/07-provider-console.md)
 
-当前 workspace 包含 `llmproxy-core`（领域模型）、`llmproxy-store`（Toasty/PostgreSQL）、`llmproxy-gateway`（Pingora）和 `llmproxy-console`（Topcoat 控制台）。
+当前 workspace 包含 `llmproxy-core`（领域模型）、`llmproxy-store`（Toasty/PostgreSQL）、`llmproxy-gateway`（Pingora）和 `llmproxy-console`（Topcoat 控制台库），以及 `llmproxy-telemetry`（统一遥测）。运行入口为 `llmproxy`，由 Pingora 提供唯一监听端口。
 
 ## 本地启动控制台与网关
 
@@ -21,4 +23,6 @@
 bash scripts/dev.sh up
 ```
 
-控制台：`http://127.0.0.1:3200`；网关：`http://127.0.0.1:8080`。在控制台新增 Provider 并“设为当前”后，对应入口约一秒生效。
+控制台：`http://127.0.0.1:3200/ui`；代理：`http://127.0.0.1:3200/v1/*`。在控制台新增 Provider 并“设为当前”后，对应入口约一秒生效。
+
+数据库迁移完成后，也可直接在项目根目录运行 `cargo run`。统一读取 `.env` 中的 `LLMPROXY_LISTEN` 和 `OTEL_SERVICE_NAME`。

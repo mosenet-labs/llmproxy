@@ -22,6 +22,12 @@
 
 ## 关联文档
 
+最新确认：单进程、单端口集成控制台与网关；控制台使用 `/ui`，统一服务名和日志流，执行实现。见[统一服务设计与任务](11-unified-service.md)。
+
+> 不用/admin改用/ui 其他的按你的建议来，执行吧
+
+此前确认（服务名划分已由上述单进程方案替代）：控制台补齐 tracing 日志，与网关共享可观测性初始化；一份 `.env` 分别配置两个进程的 `service.name`。当前实现见[控制台与网关统一可观测性](10-shared-telemetry.md)。
+
 补充确认：Provider 写操作采用异步提交、局部更新列表和本次操作通知，避免通过 URL 参数反复弹出成功提示。用户要求“确定后写入文档并拆分任务后进行修复”。详见[异步操作与一次性通知](09-console-async-actions.md)。
 
 补充需求：沿用 Pingora 原生 `HttpPeer`，整合 `PeerOptions::tracer` 与 Rust `tracing`，观测 DNS、TCP 建连、TLS 握手、连接复用和错误。用户进一步要求：
@@ -41,3 +47,5 @@
 - [Provider 管理控制台与 PostgreSQL](07-provider-console.md)
 - [网关可观测性收口与连接诊断](08-gateway-observability.md)
 - [Provider 异步操作与一次性通知](09-console-async-actions.md)
+- [控制台与网关统一可观测性](10-shared-telemetry.md)
+- [单进程、单端口与 /ui 控制台](11-unified-service.md)

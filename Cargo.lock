@@ -1431,11 +1431,9 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
- "h2",
  "http",
  "http-body",
  "httparse",
- "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -1793,20 +1791,18 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 name = "llmproxy-console"
 version = "0.1.0"
 dependencies = [
- "dotenvy",
  "getrandom 0.4.3",
  "llmproxy-core",
  "llmproxy-store",
- "reqwest",
+ "opentelemetry",
  "serde",
- "serde_json",
  "sha2 0.11.0",
- "toasty",
- "tokio",
  "topcoat",
  "topcoat-ant-design",
  "topcoat-asset",
  "topcoat-runtime",
+ "tracing",
+ "tracing-opentelemetry",
  "url",
 ]
 
@@ -1824,14 +1820,18 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "dotenvy",
+ "http-body-util",
+ "llmproxy-console",
  "llmproxy-core",
  "llmproxy-store",
+ "llmproxy-telemetry",
  "opentelemetry",
  "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pingora",
  "pingora-http",
+ "reqwest",
  "serde",
  "serde_json",
  "toasty",
@@ -1840,6 +1840,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -1851,6 +1852,21 @@ dependencies = [
  "llmproxy-core",
  "toasty",
  "tokio",
+]
+
+[[package]]
+name = "llmproxy-telemetry"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry-proto",
+ "opentelemetry_sdk",
+ "prost",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3321,17 +3337,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha1"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3882,18 +3887,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3967,10 +3960,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd3bdf6ae1c68d292def9962b04fa319ae97f5b4600b4012fc9ae7fce07f23ae"
 dependencies = [
- "futures-util",
  "serde",
- "tokio",
- "tokio-tungstenite",
  "topcoat-asset",
  "topcoat-cookie",
  "topcoat-core",
@@ -4009,7 +3999,6 @@ dependencies = [
  "serde",
  "sha2 0.11.0",
  "thiserror 2.0.21",
- "tokio",
  "toml",
  "topcoat-core",
  "topcoat-router",
@@ -4180,8 +4169,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
  "matchit",
  "percent-encoding",
  "pin-project-lite",
@@ -4190,7 +4177,6 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "tokio",
  "topcoat-core",
  "topcoat-view",
 ]
@@ -4471,22 +4457,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "sha1",
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "typenum"

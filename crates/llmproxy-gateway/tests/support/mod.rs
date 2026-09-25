@@ -127,11 +127,15 @@ impl Gateway {
 
     fn command(directory: &std::path::Path) -> Command {
         let log = File::create(directory.join("gateway.log")).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_llmproxy-gateway"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_llmproxy"));
         // Do not inherit real credentials, exporters, proxy settings, or log filters.
         command
             .env_clear()
-            .env("RUST_LOG", "llmproxy_gateway=info,pingora=warn")
+            .current_dir(directory)
+            .env(
+                "RUST_LOG",
+                "llmproxy=info,llmproxy_gateway=info,pingora=warn",
+            )
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log);

@@ -93,8 +93,13 @@ fn completion_correlates_signals_once_and_does_not_retain_request_span() {
         for point in sum.data_points() {
             assert!(point.attributes().all(|a| matches!(
                 a.key.as_str(),
-                "protocol" | "route" | "status" | "error_type" | "error_stage"
+                "component" | "protocol" | "route" | "status" | "error_type" | "error_stage"
             )));
+            assert!(
+                point
+                    .attributes()
+                    .any(|a| { a.key.as_str() == "component" && a.value.as_str() == "gateway" })
+            );
         }
     }
 }

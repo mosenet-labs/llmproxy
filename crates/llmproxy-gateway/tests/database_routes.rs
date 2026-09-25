@@ -134,6 +134,15 @@ async fn exercise_gateway(url: &str) {
         ["Bearer old-dummy-key"]
     );
 
+    // A pending SSE must not block the console sharing this listener/runtime.
+    let response = reqwest::Client::new()
+        .get(format!("http://{}/ui/routes", gateway.address))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(response.text().await.unwrap().contains("路由概览"));
+
     let new = store
         .create(input(
             "New provider",

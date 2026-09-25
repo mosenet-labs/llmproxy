@@ -1,5 +1,8 @@
+// Topcoat's procedure and shard handlers receive native form and signal fields separately.
+#![expect(clippy::too_many_arguments)]
+
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderStore, ProviderView};
+use llmproxy_store::{ProviderInput, ProviderStore, ProviderView, StoreError};
 use serde::Deserialize;
 use topcoat::{
     Result,
@@ -10,7 +13,7 @@ use topcoat::{
         content::{Form, Json},
         error::{forbidden, see_other},
         layer, layout, page,
-        request::{headers, original_uri},
+        request::{headers, uri},
         response::Response,
         route,
     },
@@ -32,6 +35,7 @@ pub struct AppState {
     pub store: ProviderStore,
     pub csrf: String,
     pub port: u16,
+    pub telemetry: crate::observability::ConsoleTelemetry,
 }
 
 // Complete class names let Tailwind discover styles in Rust at build time.
@@ -49,9 +53,9 @@ const PROTOCOLS: [Protocol; 3] = [
     Protocol::AnthropicMessages,
 ];
 
-#[route(GET "/providers")]
+#[route(GET "/ui/providers")]
 pub async fn providers_redirect() -> Result<topcoat::router::error::SeeOther> {
-    Ok(see_other("/"))
+    Ok(see_other("/ui"))
 }
 
 fn protocol_label(protocol: Protocol) -> &'static str {
@@ -171,7 +175,7 @@ fn check_csrf(cx: &Cx, supplied: &str) -> Result<()> {
 
 #[layout("/")]
 pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
-    let routes_page = original_uri(cx).path() == "/routes";
+    let routes_page = uri(cx).path() == "/ui/routes";
     let page_title = if routes_page {
         "路由概览"
     } else {
@@ -186,16 +190,16 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                 <meta name="color-scheme" content="light">
                 <title>(format!("{page_title} · LLMProxy"))</title>
                 head_assets()
-                <link rel="stylesheet" href="/assets/console.css">
+                <link rel="stylesheet" href="/ui/assets/console.css">
                 topcoat::runtime::script()
             </head>
             <body>
                 <div class="grid min-h-screen grid-cols-[216px_minmax(0,1fr)] max-[900px]:grid-cols-[176px_minmax(0,1fr)] max-[640px]:block">
                     <aside class="sticky top-0 flex h-screen flex-col border-r border-border bg-white px-3 max-[640px]:static max-[640px]:h-auto max-[640px]:border-r-0 max-[640px]:border-b max-[640px]:px-4 max-[640px]:pb-2">
-                        <a class="flex h-16 shrink-0 items-center gap-3 px-3 text-lg font-semibold max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-base max-[640px]:h-14 max-[640px]:px-0" href="/"><span class="grid size-8 place-items-center rounded-lg bg-primary text-xl font-bold text-white" aria-hidden="true">"L"</span><strong>"LLMProxy"</strong></a>
+                        <a class="flex h-16 shrink-0 items-center gap-3 px-3 text-lg font-semibold max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-base max-[640px]:h-14 max-[640px]:px-0" href="/ui"><span class="grid size-8 place-items-center rounded-lg bg-primary text-xl font-bold text-white" aria-hidden="true">"L"</span><strong>"LLMProxy"</strong></a>
                         <nav class="mt-4 grid gap-1 max-[640px]:mt-0 max-[640px]:grid-cols-2" aria-label="主导航">
-                            <a class=(NAV_ITEM) href="/" aria-current=(if routes_page { None } else { Some("page") })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Provider 管理"</a>
-                            <a class=(NAV_ITEM) href="/routes" aria-current=(if routes_page { Some("page") } else { None })>icon(data: APARTMENT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"路由概览"</a>
+                            <a class=(NAV_ITEM) href="/ui" aria-current=(if routes_page { None } else { Some("page") })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Provider 管理"</a>
+                            <a class=(NAV_ITEM) href="/ui/routes" aria-current=(if routes_page { Some("page") } else { None })>icon(data: APARTMENT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"路由概览"</a>
                         </nav>
                         <div class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden">"本地开发环境"</div>
                     </aside>
@@ -219,7 +223,7 @@ pub struct ListQuery {
     state: String,
 }
 
-#[page("/")]
+#[page("/ui")]
 pub async fn list(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> {
     let _ = cx;
     Ok(view! { provider_workspace(query: &query, edit_id: "", editor_open: false) })
@@ -245,17 +249,17 @@ async fn provider_workspace(
     })
 }
 
-#[page("/routes")]
+#[page("/ui/routes")]
 pub async fn routes(cx: &Cx) -> Result<impl View> {
     let all = app_context::<AppState>(cx).store.list().await?;
     Ok(view! {
         <section class=(PAGE_HEADING)>
             <div><h1>"路由概览"</h1><p>"查看各协议入口与当前使用的 Provider。"</p></div>
-            <a class=(BUTTON) href="/">"管理 Provider"</a>
+            <a class=(BUTTON) href="/ui">"管理 Provider"</a>
         </section>
         <section class="grid grid-cols-3 gap-5 max-[1180px]:grid-cols-1" id="routes" aria-label="三个协议的当前 Provider">
             for protocol in PROTOCOLS {
-                <a class="group min-w-0 rounded-lg border border-border bg-white p-6 shadow-xs hover:border-[#91caff] max-[640px]:p-5" href=(format!("/?protocol={}", protocol.as_str()))>
+                <a class="group min-w-0 rounded-lg border border-border bg-white p-6 shadow-xs hover:border-[#91caff] max-[640px]:p-5" href=(format!("/ui?protocol={}", protocol.as_str()))>
                     <div class="flex items-center gap-3"><span class="grid size-8 shrink-0 place-items-center rounded-md bg-primary-soft text-sm font-semibold text-primary" aria-hidden="true">(match protocol { Protocol::OpenAiChat => "C", Protocol::OpenAiResponses => "R", Protocol::AnthropicMessages => "A" })</span><span class="text-sm font-medium text-heading">(protocol_label(protocol))</span></div>
                     if let Some(provider) = all.iter().find(|provider| provider.protocol == protocol && provider.active) {
                         <strong class="mt-6 block truncate text-xl font-semibold leading-7">(provider.name.as_str())</strong><span class="mt-2 flex items-center gap-2 text-[13px] text-secondary">icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-3.5 text-[#389e0d]" aria-hidden="true" })"当前 Provider"</span>
@@ -329,15 +333,15 @@ pub async fn provider_list(
         </section>
         <section class="providers-panel overflow-visible rounded-lg border border-border bg-white shadow-xs" aria-labelledby="providers-heading">
             <div class="flex items-center justify-between gap-4 px-6 pt-5 max-[640px]:px-4 [&_h2]:m-0 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:text-base [&_h2]:font-semibold"><h2 id="providers-heading">"Provider 列表"<span class="rounded bg-surface px-2 text-[13px] font-normal leading-6 text-secondary">(total)</span></h2><span class="text-[13px] text-secondary">(enabled)" 个已启用"</span></div>
-            <form class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/" role="search">
+            <form class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/ui" role="search">
                 <div class="flex h-9 w-[300px] items-center gap-2 rounded-md border border-control-border pl-3 focus-within:border-primary-hover focus-within:ring-2 focus-within:ring-primary/10 max-[640px]:w-full [&_input]:h-8 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:pl-0 [&_input]:text-sm [&_input]:shadow-none">icon(data: SEARCH_OUTLINED, attrs: attributes! { class="size-4 shrink-0 text-muted" aria-hidden="true" })<input aria-label="搜索名称或主机" name="q" value=(query.q.as_str()) placeholder="搜索名称或主机地址"></div>
                 <select name="protocol" aria-label="筛选协议"><option value="">"全部协议"</option>for protocol in PROTOCOLS { <option value=(protocol.as_str()) selected=(query.protocol == protocol.as_str())>(protocol_label(protocol))</option> }</select>
                 <select name="state" aria-label="筛选状态"><option value="">"全部状态"</option><option value="enabled" selected=(query.state == "enabled")>"已启用"</option><option value="disabled" selected=(query.state == "disabled")>"已停用"</option><option value="active" selected=(query.state == "active")>"当前使用"</option></select>
                 <button class=(BUTTON) type="submit">"查询"</button>
-                if !query.q.is_empty() || !query.protocol.is_empty() || !query.state.is_empty() { <a class=(class!(TEXT_LINK, "px-1")) href="/">"重置"</a> }
+                if !query.q.is_empty() || !query.protocol.is_empty() || !query.state.is_empty() { <a class=(class!(TEXT_LINK, "px-1")) href="/ui">"重置"</a> }
             </form>
             if providers.is_empty() {
-                <div class="border-t border-border px-6 py-12 text-center [&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-heading [&_p]:mt-0 [&_p]:mb-6 [&_p]:text-sm [&_p]:text-secondary">icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="mx-auto block size-10 text-[#bfbfbf]" aria-hidden="true" })<h3>(if all.is_empty() { "连接第一个模型服务" } else { "没有找到匹配的 Provider" })</h3><p>(if all.is_empty() { "添加上游地址与 API Key，即可开始管理你的模型连接。" } else { "尝试调整搜索关键词，或清除筛选条件。" })</p>if all.is_empty() { <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())>"新建 Provider"</button> } else { <a class=(class!(BUTTON, PRIMARY_BUTTON)) href="/">"清除筛选"</a> }</div>
+                <div class="border-t border-border px-6 py-12 text-center [&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-heading [&_p]:mt-0 [&_p]:mb-6 [&_p]:text-sm [&_p]:text-secondary">icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="mx-auto block size-10 text-[#bfbfbf]" aria-hidden="true" })<h3>(if all.is_empty() { "连接第一个模型服务" } else { "没有找到匹配的 Provider" })</h3><p>(if all.is_empty() { "添加上游地址与 API Key，即可开始管理你的模型连接。" } else { "尝试调整搜索关键词，或清除筛选条件。" })</p>if all.is_empty() { <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())>"新建 Provider"</button> } else { <a class=(class!(BUTTON, PRIMARY_BUTTON)) href="/ui">"清除筛选"</a> }</div>
             } else {
                 data_table(label: "Provider 列表", attrs: attributes! { class="min-w-[900px] [&_th]:px-6! [&_th]:text-[13px]! [&_td]:px-6! [&_td]:py-4! [&_td]:text-sm! [&_.gr-tag]:text-[13px]" },
                     <thead><tr><th>"名称 / 协议"</th><th>"上游地址"</th><th>"状态"</th><th>"凭据"</th><th class="text-right!">"操作"</th></tr></thead>
@@ -393,7 +397,7 @@ async fn provider_action_confirmation(
         <button class=(class!(TEXT_LINK, "text-[#cf1322]! hover:text-[#ff4d4f]!" if delete)) type="button" (trigger) :disabled=$(busy.get())>(label)</button>
         popconfirm(id: id.as_str(), title: title.as_str(), language: UiLanguage::ChineseSimplified,
             attrs: attributes! { class="[&_footer]:items-center [&_footer_.gr-button]:h-8! [&_footer_.gr-button]:w-[88px]! [&_footer_.gr-button]:px-3! [&_footer_.gr-button]:py-1! [&_footer_.gr-button]:text-sm! [&_footer_.gr-button]:leading-[22px]!" },
-            <form class="m-0 inline-flex" action="/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class="gr-button gr-button-danger" type="submit" :disabled=$(busy.get())>(format!("确认{label}"))</button></form>
+            <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class="gr-button gr-button-danger" type="submit" :disabled=$(busy.get())>(format!("确认{label}"))</button></form>
         )
     })
 }
@@ -410,7 +414,7 @@ async fn action_form(
     let submit = action_submit(cx, controls, csrf, provider, action);
     let busy = &controls.busy;
     Ok(
-        view! { <form class="m-0 inline-flex" action="/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
+        view! { <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
     )
 }
 
@@ -507,7 +511,7 @@ impl ProviderForm {
     }
 }
 
-#[page("/providers/form")]
+#[page("/ui/providers/form")]
 pub async fn form(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
     let _ = cx;
     let filters = ListQuery::default();
@@ -563,35 +567,50 @@ pub async fn save_provider(
     .await
 }
 
-#[route(POST "/providers/save")]
+#[route(POST "/ui/providers/save")]
 pub async fn save(cx: &Cx, Form(input): Form<ProviderForm>) -> Result<Json<Outcome>> {
     Ok(Json(save_input(cx, input).await?))
 }
 
 async fn save_input(cx: &Cx, mut input: ProviderForm) -> Result<Outcome> {
     check_csrf(cx, &input.csrf)?;
-    let store = &app_context::<AppState>(cx).store;
+    let state = app_context::<AppState>(cx);
+    let store = &state.store;
     let result = match input.input() {
-        Err(error) => Err(error),
+        Err(error) => Err(StoreError::Validation(error)),
         Ok(provider) => match input.id {
             Some(id) => match input.version {
-                Some(version) => store
-                    .update(id, version, provider)
-                    .await
-                    .map(|provider| provider.name)
-                    .map_err(|error| error.to_string()),
-                None => Err("表单版本缺失，请重新打开编辑页".to_owned()),
+                Some(version) => store.update(id, version, provider).await,
+                None => Err(StoreError::Validation(
+                    "表单版本缺失，请重新打开编辑页".to_owned(),
+                )),
             },
-            None => store
-                .create(provider)
-                .await
-                .map(|provider| provider.name)
-                .map_err(|error| error.to_string()),
+            None => store.create(provider).await,
         },
     };
     input.api_key.clear();
+    state.telemetry.provider_operation(
+        if input.id.is_some() {
+            "update"
+        } else {
+            "create"
+        },
+        result
+            .as_ref()
+            .ok()
+            .map(|provider| provider.id)
+            .or(input.id),
+        Some(
+            result
+                .as_ref()
+                .map(|provider| provider.name.as_str())
+                .unwrap_or(&input.name),
+        ),
+        result.as_ref().err(),
+    );
     Ok(result
-        .map(|name| {
+        .map(|provider| {
+            let name = provider.name;
             format!(
                 "「{name}」{}",
                 if input.id.is_some() {
@@ -633,22 +652,31 @@ pub async fn provider_action(
     .await
 }
 
-#[route(POST "/providers/action")]
+#[route(POST "/ui/providers/action")]
 pub async fn perform_action(cx: &Cx, Form(input): Form<ActionForm>) -> Result<Json<Outcome>> {
     Ok(Json(action_input(cx, input).await?))
 }
 
 async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
     check_csrf(cx, &input.csrf)?;
-    let store = &app_context::<AppState>(cx).store;
-    let (label, completed) = match input.action.as_str() {
-        "activate" => ("设为当前服务", "已设为当前服务"),
-        "enable" => ("启用", "已启用"),
-        "disable" => ("停用", "已停用"),
-        "delete" => ("删除", "已删除"),
+    let state = app_context::<AppState>(cx);
+    let store = &state.store;
+    let (action, label, completed) = match input.action.as_str() {
+        "activate" => ("activate", "设为当前服务", "已设为当前服务"),
+        "enable" => ("enable", "启用", "已启用"),
+        "disable" => ("disable", "停用", "已停用"),
+        "delete" => ("delete", "删除", "已删除"),
         _ => return Err(topcoat::router::error::bad_request("无效的操作").into()),
     };
-    let name = store.get(input.id).await?.name;
+    let name = match store.get(input.id).await {
+        Ok(provider) => provider.name,
+        Err(error) => {
+            state
+                .telemetry
+                .provider_operation(action, Some(input.id), None, Some(&error));
+            return Err(error.into());
+        }
+    };
     let result = match input.action.as_str() {
         "activate" => store.activate(input.id, input.version).await.map(|_| ()),
         "enable" => store
@@ -662,6 +690,9 @@ async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
         "delete" => store.delete(input.id, input.version).await.map(|_| ()),
         _ => unreachable!(),
     };
+    state
+        .telemetry
+        .provider_operation(action, Some(input.id), Some(&name), result.as_ref().err());
     Ok(result
         .map(|_| format!("「{name}」{completed}"))
         .map_err(|error| format!("「{name}」{label}失败：{error}")))
@@ -861,7 +892,7 @@ async fn provider_editor(
         dialog(config: DialogConfig::new("provider-dialog", "Provider 配置"),
             open: Some(open), title: Some(title), busy: busy, language: UiLanguage::ChineseSimplified,
             attrs: attributes! { cx => class="w-[min(720px,calc(100%_-_32px))]! max-[640px]:w-[calc(100%_-_24px)]! max-[640px]:max-h-[calc(100dvh_-_24px)]! [&_.gr-dialog-header]:px-6 [&_.gr-dialog-header]:py-4 [&_h2]:m-0 [&_h2]:text-lg max-[640px]:[&_.gr-dialog-header]:px-4 max-[640px]:[&_.gr-dialog-header]:py-4" @close=$(|_event: Event| api_key.set("".to_owned())) },
-            <form class="m-0 flex min-h-0 flex-col" action="/providers/save" method="post" autocomplete="off"
+            <form class="m-0 flex min-h-0 flex-col" action="/ui/providers/save" method="post" autocomplete="off"
                 @submit=$(async |event: Event| {
                     event.prevent_default();
                     if busy.get() { return; }

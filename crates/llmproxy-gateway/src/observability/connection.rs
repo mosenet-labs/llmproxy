@@ -84,11 +84,14 @@ impl ConnectionProbe {
 impl Tracing for ConnectionProbe {
     fn on_connected(&self) {
         let _ = self.0.connected_at.set(Instant::now());
-        self.0
-            .connections
-            .events
-            .add(1, &[KeyValue::new("event", "connected")]);
-        tracing::debug!(parent: None, event_kind = "connection", connection_id = self.0.id,
+        self.0.connections.events.add(
+            1,
+            &[
+                KeyValue::new("component", "gateway"),
+                KeyValue::new("event", "connected"),
+            ],
+        );
+        tracing::debug!(parent: None, component = "gateway", event_kind = "connection", connection_id = self.0.id,
             upstream_address = %self.0.address, "upstream TCP connected");
     }
 
@@ -105,11 +108,14 @@ impl Tracing for ConnectionProbe {
                 active.remove(handle);
             }
         }
-        self.0
-            .connections
-            .events
-            .add(1, &[KeyValue::new("event", "released")]);
-        tracing::debug!(parent: None, event_kind = "connection", connection_id = self.0.id,
+        self.0.connections.events.add(
+            1,
+            &[
+                KeyValue::new("component", "gateway"),
+                KeyValue::new("event", "released"),
+            ],
+        );
+        tracing::debug!(parent: None, component = "gateway", event_kind = "connection", connection_id = self.0.id,
             upstream_address = %self.0.address,
             lifetime_seconds = self.0.connected_at.get().map(|start| start.elapsed().as_secs_f64()),
             "upstream connection released");

@@ -32,9 +32,9 @@
 - [x] 增加 `llmproxy-store`，使用 Toasty 0.10 / PostgreSQL，提交版本化 SQL 迁移，开发和测试库分离。
 - [x] 实现 Provider 新增、查询、编辑、启停、删除，以及每种协议的当前绑定；事务保证切换与解绑一致，版本检查防止陈旧表单覆盖。
 - [x] API Key 加密落库，主密钥由环境变量注入，数据库校验记录阻止错误主密钥读写；页面不回显凭据，编辑留空保留原值。
-- [x] 增加独立 Topcoat 控制台，复用本地 `topcoat-ant-design` 的表格、表单、状态标签和确认组件，支持搜索、协议/状态筛选和中文反馈。
+- [x] 增加 Topcoat 控制台模块，复用本地 `topcoat-ant-design` 的表格、表单、状态标签和确认组件，支持搜索、协议/状态筛选和中文反馈。
 - [x] Provider 编辑采用 Topcoat Signal 和原生表单交互，扩展组件库的受控 Dialog；按协议显示字段、连接项同行对齐、超时默认折叠。
-- [x] 控制台绑定回环地址，验证 Host / Origin / CSRF，限制表单体积。
+- [x] 控制台仅接受回环客户端，验证 Host / Origin / CSRF，限制表单体积。
 - [x] 网关读取 PostgreSQL 的不可变 Provider 快照，每秒刷新，加载失败保留上一版；请求持有原配置，热更新不打断已有 SSE。
 - [x] 提供 `.env.example`、本地启动/迁移脚本及分层和运行文档，保留 TOML 模式。
 - [x] 验证真实 PG CRUD、迁移重复执行、错误主密钥拒绝、版本冲突与凭据加密。
@@ -68,6 +68,29 @@
 - [x] C5：完成 HTTP、浏览器回归和 workspace 验证。
 
 本轮验证：`cargo fmt --all -- --check`、`cargo check --workspace --offline`、`cargo test --workspace --offline` 均通过，完整测试 33 项。浏览器验证记录见[异步操作文档](09-console-async-actions.md#验证记录)。
+
+## T：控制台与公共可观测性
+
+详见[统一可观测性设计与配置](10-shared-telemetry.md)。
+
+- [x] T1：提取公共初始化、服务名解析和三类 exporter；网关与控制台统一加载 `.env`。
+- [x] T2：控制台集中记录运行、HTTP 请求和 Provider 操作，补齐 span 与指标。
+- [x] T3：验证服务名、OTLP 三类载荷、真实 HTTP 日志及脱敏；服务名配置现按 U3 统一。
+- [x] T4：同步配置说明并完成 workspace 验证。
+
+本轮验证：格式检查、workspace 编译与 36 项测试通过，包含隔离 PostgreSQL、控制台 HTTP 日志和本地 OTLP 三类载荷验证；未向真实 OpenObserve 发送测试数据。
+
+## U：单进程与 /ui 单端口集成
+
+详细任务与验收见[统一服务](11-unified-service.md)。
+
+- [x] U1：统一入口、控制台库化与进程内请求桥接。
+- [x] U2：控制台所有页面、资源与异步接口迁到 `/ui`。
+- [x] U3：统一 telemetry 服务名、日志流和 component 字段，更新配置与启动脚本。
+- [x] U4：同端口 HTTP/PG、代理、SSE 与路由边界回归。
+- [x] U5：浏览器回归、文档更新与 workspace 验证。
+
+本轮验证：格式检查、workspace 编译与 36 项测试全部通过，包含真实 PostgreSQL、同端口 UI 到代理生效及本地 OTLP 接收端；浏览器验证创建、激活、导航和刷新无重复通知，并确认测试进程只监听一个 TCP 端口。详见[验收记录](11-unified-service.md#验收记录)。
 
 ## 完整验收
 

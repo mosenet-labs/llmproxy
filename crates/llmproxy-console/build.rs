@@ -19,14 +19,21 @@ fn main() {
         .find(|asset| asset.id() == id)
         .expect("Topcoat runtime asset");
     let source = runtime.resolved_path();
-    let script = fs::read(&source).expect("read Topcoat runtime script");
+    let script = fs::read_to_string(&source).expect("read Topcoat runtime script");
+    for endpoint in ["procedures", "shards", "pages"] {
+        assert!(
+            script.contains(&format!("/_topcoat/runtime/{endpoint}")),
+            "Topcoat runtime endpoint changed: {endpoint}"
+        );
+    }
+    let script = script.replace("/_topcoat/", "/ui/_topcoat/");
     fs::write(out.join("topcoat-runtime.js"), &script).expect("embed runtime");
     Manifest {
         version: MANIFEST_VERSION,
         assets: vec![ManifestEntry {
             id,
             file: "runtime.js".to_owned(),
-            hash: Sha256::digest(script)
+            hash: Sha256::digest(script.as_bytes())
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect(),

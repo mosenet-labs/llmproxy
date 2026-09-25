@@ -1,5 +1,7 @@
 # Provider 异步操作与一次性通知
 
+当前控制台已迁移到 `/ui`，包括静态资源和原生 runtime 接口；下文的异步交互约定继续有效。启动与路径见[统一服务](11-unified-service.md)。
+
 关联：[原始需求](00-original-requirements.md)、[控制台设计](07-provider-console.md)、[实施任务](02-tasks.md)。
 
 ## 已确认的问题与方案
