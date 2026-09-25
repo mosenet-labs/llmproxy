@@ -8,7 +8,7 @@ use std::{
 };
 
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderStore};
+use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore};
 use reqwest::{Client, Response, StatusCode, redirect::Policy};
 
 const MASTER_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
@@ -285,6 +285,21 @@ async fn exercise_http(database_url: &str) {
         assert!(!invalid_html.contains(PROVIDER_KEY));
         assert!(store.list().await.unwrap().is_empty());
     }
+    let mut unsupported_probe = provider_form(&csrf, "Invalid Probe", "openai_chat");
+    set(
+        &mut unsupported_probe,
+        "models_protocol",
+        "anthropic_messages",
+    );
+    assert!(
+        post(&client, &base, "/providers/save", &unsupported_probe)
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("模型探测协议必须是已选择的接口协议")
+    );
+    assert!(store.list().await.unwrap().is_empty());
 
     for (name, protocol, upstream_url, host, port, tls) in [
         (
@@ -339,12 +354,14 @@ async fn exercise_http(database_url: &str) {
         let legacy = store
             .create(ProviderInput {
                 name: "Legacy Provider".into(),
-                protocol: Protocol::OpenAiChat,
+                paths: ProviderPaths::single(Protocol::OpenAiChat),
                 host: "legacy.example.com".into(),
                 port,
                 tls,
                 api_key: PROVIDER_KEY.into(),
                 enabled: true,
+                models_path: "/models".into(),
+                models_protocol: Protocol::OpenAiChat,
                 anthropic_version: None,
                 connect_timeout_ms: 10000,
                 read_timeout_ms: 60000,
@@ -374,7 +391,7 @@ async fn exercise_http(database_url: &str) {
     assert!(
         providers
             .iter()
-            .filter(|provider| provider.protocol != Protocol::AnthropicMessages)
+            .filter(|provider| provider.paths.anthropic_messages.is_none())
             .all(|provider| provider.anthropic_version.is_none()),
         "non-Anthropic forms must ignore an unrelated version field"
     );
@@ -480,7 +497,7 @@ async fn exercise_http(database_url: &str) {
         response,
         "activate",
         "Chat Renamed",
-        "已设为当前服务",
+        "OpenAI Chat 已设为当前服务",
     )
     .await;
     let active = store.get(chat.id).await.unwrap();
@@ -509,7 +526,7 @@ async fn exercise_http(database_url: &str) {
         .text()
         .await
         .unwrap();
-    assert!(list_html.contains("当前使用"));
+    assert!(list_html.contains("当前 OpenAI Chat"));
     assert!(list_html.contains(&format!("id=\"disable-{}\"", active.id)));
     assert!(!list_html.contains(&format!("id=\"delete-{}\"", active.id)));
     assert!(list_html.contains("确认停用「Chat Renamed」？"));
@@ -721,13 +738,14 @@ async fn exercise_http(database_url: &str) {
             StatusCode::NOT_FOUND
         );
     }
-    let (upstream, received) = support::Mock::http(|_, stream| {
-        support::respond(
-            stream,
-            200,
-            "Content-Type: application/json\r\n",
-            br#"{"provider":"ui-configured"}"#,
-        );
+    let (upstream, received) = support::Mock::http(|request, stream| {
+        let body: &[u8] =
+            if request.target == "/custom/models" || request.target == "/preview/models" {
+                br#"{"data":[{"id":"mock-model"}]}"#
+            } else {
+                br#"{"provider":"ui-configured"}"#
+            };
+        support::respond(stream, 200, "Content-Type: application/json\r\n", body);
     });
     let mut input = provider_form(&csrf, "Unified Mock", "openai_chat");
     set(
@@ -735,15 +753,88 @@ async fn exercise_http(database_url: &str) {
         "upstream_url",
         &format!("http://{}", upstream.address),
     );
+    set(&mut input, "openai_responses", "true");
+    set(&mut input, "openai_responses_path", "/custom/responses");
+    set(&mut input, "models_path", "/custom/models");
+    let preview = post(&client, &base, "/providers/preview", &input).await;
+    assert!(preview.text().await.unwrap().contains("mock-model"));
+    let preview_request = received.recv_timeout(support::DEADLINE).unwrap();
+    assert_eq!(preview_request.target, "/custom/models");
+    assert_eq!(
+        support::values(&preview_request.headers, "authorization"),
+        [format!("Bearer {PROVIDER_KEY}")]
+    );
+    assert!(
+        store
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .all(|provider| provider.name != "Unified Mock")
+    );
     let response = post(&client, &base, "/providers/save", &input).await;
     success_notice(&client, &base, response, "create", "Unified Mock", "已创建").await;
-    let provider = store
+    let mut provider = store
         .list()
         .await
         .unwrap()
         .into_iter()
         .find(|provider| provider.name == "Unified Mock")
         .unwrap();
+    assert_eq!(
+        provider.paths.openai_responses.as_deref(),
+        Some("/custom/responses")
+    );
+    assert_eq!(provider.models_path, "/custom/models");
+    assert_eq!(provider.models_probe_status.as_str(), "unprobed");
+    let mut preview = input.clone();
+    set(&mut preview, "id", &provider.id.to_string());
+    set(&mut preview, "version", &provider.version.to_string());
+    set(&mut preview, "api_key", "");
+    set(&mut preview, "models_path", "/preview/models");
+    let response = post(&client, &base, "/providers/preview", &preview).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("mock-model"));
+    let request = received.recv_timeout(support::DEADLINE).unwrap();
+    assert_eq!(request.target, "/preview/models");
+    assert_eq!(
+        support::values(&request.headers, "authorization"),
+        [format!("Bearer {PROVIDER_KEY}")]
+    );
+    assert_eq!(
+        store.get(provider.id).await.unwrap().models_path,
+        "/custom/models"
+    );
+    assert_eq!(
+        store
+            .get(provider.id)
+            .await
+            .unwrap()
+            .models_probe_status
+            .as_str(),
+        "unprobed"
+    );
+    set(&mut preview, "models_path", "/custom/models");
+    let response = post(&client, &base, "/providers/preview", &preview).await;
+    assert!(response.text().await.unwrap().contains("mock-model"));
+    assert_eq!(
+        received.recv_timeout(support::DEADLINE).unwrap().target,
+        "/custom/models"
+    );
+    set(&mut preview, "models_probe_status", "success");
+    let response = post(&client, &base, "/providers/save", &preview).await;
+    success_notice(&client, &base, response, "update", "Unified Mock", "已保存").await;
+    provider = store.get(provider.id).await.unwrap();
+    assert_eq!(provider.models_probe_status.as_str(), "success");
+    let editor = client
+        .get(format!("{base}/providers/form?id={}", provider.id))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(hidden(&editor, "models_probe_status"), "success");
     let response = post(
         &client,
         &base,
@@ -757,7 +848,7 @@ async fn exercise_http(database_url: &str) {
         response,
         "activate",
         "Unified Mock",
-        "已设为当前服务",
+        "OpenAI Chat 已设为当前服务",
     )
     .await;
     let mut forwarded = false;
@@ -793,6 +884,121 @@ async fn exercise_http(database_url: &str) {
         support::values(&request.headers, "authorization"),
         [format!("Bearer {PROVIDER_KEY}")]
     );
+    let list = client
+        .get(&base)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(list.contains("Chat / Responses"));
+    assert!(!list.contains("探测模型"));
+    let current = store.get(provider.id).await.unwrap();
+    let mut edit = provider_form(&csrf, "Unified Mock", "openai_chat");
+    set(&mut edit, "id", &current.id.to_string());
+    set(&mut edit, "version", &current.version.to_string());
+    set(
+        &mut edit,
+        "upstream_url",
+        &format!("http://{}", upstream.address),
+    );
+    set(&mut edit, "api_key", "");
+    set(&mut edit, "openai_responses", "true");
+    set(&mut edit, "openai_responses_path", "/custom/responses");
+    set(&mut edit, "models_path", "/custom/models");
+    set(&mut edit, "anthropic_messages", "true");
+    set(&mut edit, "models_protocol", "anthropic_messages");
+    let response = post(&client, &base, "/providers/save", &edit).await;
+    success_notice(&client, &base, response, "update", "Unified Mock", "已保存").await;
+    assert_eq!(
+        store
+            .get(provider.id)
+            .await
+            .unwrap()
+            .models_probe_status
+            .as_str(),
+        "unprobed"
+    );
+    let current = store.get(provider.id).await.unwrap();
+    set(&mut edit, "version", &current.version.to_string());
+    let response = post(&client, &base, "/providers/preview", &edit).await;
+    assert!(response.text().await.unwrap().contains("mock-model"));
+    let request = received.recv_timeout(support::DEADLINE).unwrap();
+    assert_eq!(request.target, "/custom/models");
+    assert_eq!(
+        support::values(&request.headers, "x-api-key"),
+        [PROVIDER_KEY]
+    );
+    assert_eq!(
+        support::values(&request.headers, "anthropic-version"),
+        ["2023-06-01"]
+    );
+    assert_eq!(current.models_probe_status.as_str(), "unprobed");
+    set(&mut edit, "models_probe_status", "success");
+    let response = post(&client, &base, "/providers/save", &edit).await;
+    success_notice(&client, &base, response, "update", "Unified Mock", "已保存").await;
+    assert_eq!(
+        store
+            .get(provider.id)
+            .await
+            .unwrap()
+            .models_probe_status
+            .as_str(),
+        "success"
+    );
+    let current = store.get(provider.id).await.unwrap();
+    let mut edit = provider_form(&csrf, "Unified Mock", "openai_chat");
+    set(&mut edit, "id", &current.id.to_string());
+    set(&mut edit, "version", &current.version.to_string());
+    set(
+        &mut edit,
+        "upstream_url",
+        &format!("http://{}", upstream.address),
+    );
+    set(&mut edit, "api_key", "");
+    set(&mut edit, "openai_responses", "true");
+    set(&mut edit, "anthropic_messages", "true");
+    set(&mut edit, "models_protocol", "anthropic_messages");
+    set(&mut edit, "models_path", "/missing/models");
+    let response = post(&client, &base, "/providers/save", &edit).await;
+    success_notice(&client, &base, response, "update", "Unified Mock", "已保存").await;
+    let current = store.get(provider.id).await.unwrap();
+    set(&mut edit, "version", &current.version.to_string());
+    let probe = post(&client, &base, "/providers/preview", &edit).await;
+    assert!(
+        probe
+            .text()
+            .await
+            .unwrap()
+            .contains("上游响应缺少 data 模型列表")
+    );
+    assert_eq!(
+        received.recv_timeout(support::DEADLINE).unwrap().target,
+        "/missing/models"
+    );
+    assert_eq!(current.models_probe_status.as_str(), "unprobed");
+    set(&mut edit, "models_probe_status", "failure");
+    let response = post(&client, &base, "/providers/save", &edit).await;
+    success_notice(&client, &base, response, "update", "Unified Mock", "已保存").await;
+    assert_eq!(
+        store
+            .get(provider.id)
+            .await
+            .unwrap()
+            .models_probe_status
+            .as_str(),
+        "failure"
+    );
+    let editor = client
+        .get(format!("{base}/providers/form?id={}", provider.id))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(hidden(&editor, "models_probe_status"), "failure");
     let logs = std::fs::read_to_string(&log_path).unwrap();
     let events: Vec<serde_json::Value> = logs
         .lines()
@@ -905,13 +1111,15 @@ fn hidden(html: &str, name: &str) -> String {
 }
 
 fn provider_form(csrf: &str, name: &str, protocol: &str) -> Vec<(String, String)> {
-    [
+    let mut fields: Vec<(String, String)> = [
         ("csrf", csrf),
         ("name", name),
-        ("protocol", protocol),
         ("upstream_url", "https://api.example.com"),
         ("enabled", "true"),
         ("api_key", PROVIDER_KEY),
+        ("models_path", "/models"),
+        ("models_protocol", protocol),
+        ("models_probe_status", "unprobed"),
         ("anthropic_version", "2023-06-01"),
         ("connect_timeout_ms", "10000"),
         ("read_timeout_ms", "60000"),
@@ -919,7 +1127,16 @@ fn provider_form(csrf: &str, name: &str, protocol: &str) -> Vec<(String, String)
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value.to_owned()))
-    .collect()
+    .collect();
+    for (name, path) in [
+        ("openai_chat", "/v1/chat/completions"),
+        ("openai_responses", "/v1/responses"),
+        ("anthropic_messages", "/v1/messages"),
+    ] {
+        fields.push((name.to_owned(), (name == protocol).to_string()));
+        fields.push((format!("{name}_path"), path.to_owned()));
+    }
+    fields
 }
 
 fn action_form(csrf: &str, id: i64, version: u64, action: &str) -> Vec<(String, String)> {
@@ -928,6 +1145,14 @@ fn action_form(csrf: &str, id: i64, version: u64, action: &str) -> Vec<(String, 
         ("id".into(), id.to_string()),
         ("version".into(), version.to_string()),
         ("action".into(), action.into()),
+        (
+            "protocol".into(),
+            if action == "activate" {
+                "openai_chat".into()
+            } else {
+                String::new()
+            },
+        ),
     ]
 }
 
@@ -954,7 +1179,11 @@ async fn procedure_request(
     fields: &[(String, String)],
 ) -> reqwest::RequestBuilder {
     let html = client.get(base).send().await.unwrap().text().await.unwrap();
-    let form = element(&html, "form", &format!("action=\"/ui{path}\""));
+    let form = if path == "/providers/preview" {
+        element(&html, "button", ">探测")
+    } else {
+        element(&html, "form", &format!("action=\"/ui{path}\""))
+    };
     let decoded = form.replace("&quot;", "\"");
     let id = decoded
         .split_once("\"t\":\"Procedure\",\"id\":\"")
@@ -963,23 +1192,31 @@ async fn procedure_request(
         .split('"')
         .next()
         .unwrap();
-    let keys: &[&str] = if path == "/providers/save" {
+    let keys: &[&str] = if path == "/providers/save" || path == "/providers/preview" {
         &[
             "csrf",
             "id",
             "version",
             "name",
-            "protocol",
+            "openai_chat",
+            "openai_chat_path",
+            "openai_responses",
+            "openai_responses_path",
+            "anthropic_messages",
+            "anthropic_messages_path",
             "upstream_url",
             "enabled",
             "api_key",
+            "models_path",
+            "models_protocol",
+            "models_probe_status",
             "anthropic_version",
             "connect_timeout_ms",
             "read_timeout_ms",
             "write_timeout_ms",
         ]
     } else {
-        &["csrf", "id", "version", "action"]
+        &["csrf", "id", "version", "action", "protocol"]
     };
     let args: Vec<serde_json::Value> = keys
         .iter()
@@ -989,13 +1226,41 @@ async fn procedure_request(
                 .find(|(name, _)| name == key)
                 .map(|(_, value)| value.as_str())
                 .unwrap_or("");
-            if *key == "enabled" {
+            if [
+                "enabled",
+                "openai_chat",
+                "openai_responses",
+                "anthropic_messages",
+            ]
+            .contains(key)
+            {
                 serde_json::Value::Bool(value == "true")
             } else {
                 serde_json::Value::String(value.to_owned())
             }
         })
         .collect();
+    let args = if path == "/providers/save" || path == "/providers/preview" {
+        let object = keys
+            .iter()
+            .zip(args)
+            .map(|(key, value)| {
+                (
+                    (*key).to_owned(),
+                    if (*key == "id" || *key == "version") && value == "" {
+                        serde_json::Value::Null
+                    } else {
+                        value
+                    },
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        vec![serde_json::Value::String(
+            serde_json::Value::Object(object).to_string(),
+        )]
+    } else {
+        args
+    };
     client
         .post(format!("{base}/_topcoat/runtime/procedures/{id}"))
         .header("content-type", "application/json")

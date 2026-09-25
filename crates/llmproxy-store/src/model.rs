@@ -1,6 +1,6 @@
 use llmproxy_core::protocol::Protocol;
 
-use crate::{ProviderView, StoreError, StoreResult};
+use crate::{ProbeStatus, ProviderPaths, ProviderView, StoreError, StoreResult};
 
 #[derive(toasty::Model)]
 #[table = "providers"]
@@ -10,12 +10,17 @@ pub(crate) struct Provider {
     pub id: i64,
     #[unique]
     pub name: String,
-    pub protocol: String,
+    pub openai_chat_path: Option<String>,
+    pub openai_responses_path: Option<String>,
+    pub anthropic_messages_path: Option<String>,
     pub host: String,
     pub port: u16,
     pub tls: bool,
     pub encrypted_key: String,
     pub enabled: bool,
+    pub models_path: String,
+    pub models_protocol: String,
+    pub models_probe_status: String,
     pub anthropic_version: Option<String>,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
@@ -53,20 +58,32 @@ pub(crate) fn protocol(value: &str) -> StoreResult<Protocol> {
 }
 
 impl Provider {
-    pub fn view(&self, active: bool) -> StoreResult<ProviderView> {
+    pub fn paths(&self) -> ProviderPaths {
+        ProviderPaths {
+            openai_chat: self.openai_chat_path.clone(),
+            openai_responses: self.openai_responses_path.clone(),
+            anthropic_messages: self.anthropic_messages_path.clone(),
+        }
+    }
+
+    pub fn view(&self, active_protocols: Vec<Protocol>) -> StoreResult<ProviderView> {
         Ok(ProviderView {
             id: self.id,
             name: self.name.clone(),
-            protocol: protocol(&self.protocol)?,
+            paths: self.paths(),
             host: self.host.clone(),
             port: self.port,
             tls: self.tls,
             enabled: self.enabled,
+            models_path: self.models_path.clone(),
+            models_protocol: protocol(&self.models_protocol)?,
+            models_probe_status: ProbeStatus::parse(&self.models_probe_status)?,
             anthropic_version: self.anthropic_version.clone(),
             connect_timeout_ms: self.connect_timeout_ms,
             read_timeout_ms: self.read_timeout_ms,
             write_timeout_ms: self.write_timeout_ms,
-            active,
+            active: !active_protocols.is_empty(),
+            active_protocols,
             version: self.version,
             key_configured: !self.encrypted_key.is_empty(),
             updated_at: self.updated_at,

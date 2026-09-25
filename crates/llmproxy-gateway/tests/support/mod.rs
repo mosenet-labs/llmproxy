@@ -17,7 +17,7 @@ use std::{
 };
 
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderStore};
+use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore};
 
 pub const DEADLINE: Duration = Duration::from_secs(8);
 pub const PATHS: [&str; 3] = ["/v1/chat/completions", "/v1/responses", "/v1/messages"];
@@ -80,12 +80,14 @@ impl TestDatabase {
                 let record = store
                     .create(ProviderInput {
                         name: format!("Test {}", PROTOCOLS[index].as_str()),
-                        protocol: PROTOCOLS[index],
+                        paths: ProviderPaths::single(PROTOCOLS[index]),
                         host: host.to_owned(),
                         port: provider.address.port(),
                         tls: provider.tls,
                         api_key: SECRETS[index].to_owned(),
                         enabled: true,
+                        models_path: "/models".into(),
+                        models_protocol: PROTOCOLS[index],
                         anthropic_version: provider.version.map(str::to_owned),
                         connect_timeout_ms: provider.connect_ms,
                         read_timeout_ms: provider.read_ms,
@@ -94,7 +96,7 @@ impl TestDatabase {
                     .await
                     .map_err(|_| "create test provider")?;
                 store
-                    .activate(record.id, record.version)
+                    .activate(record.id, record.version, PROTOCOLS[index])
                     .await
                     .map_err(|_| "activate test provider")?;
             }

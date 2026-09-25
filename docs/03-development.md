@@ -2,11 +2,11 @@
 
 ## 控制台与网关启动
 
-运行 `bash scripts/dev.sh up` 会编译、迁移数据库，并启动单一 `llmproxy` 进程（3200），`/ui` 为控制台、`/v1/*` 为代理。新增 Provider 后选择“设为当前”；没有绑定的协议入口返回 `503`。从其他机器克隆时按 [Provider 控制台启动说明](07-provider-console.md#启动) 准备组件库。本机现有 `.env` 包含 PostgreSQL URL 时，仍会选择 PostgreSQL。
+运行 `bash scripts/dev.sh up` 会编译并启动单一 `llmproxy` 进程（3200）；进程启动时检查并执行待应用的数据库迁移，完成后才加载 Provider、开放端口。`/ui` 为控制台、`/v1/*` 为代理。新增 Provider 后选择“设为当前”；没有绑定的协议入口返回 `503`。从其他机器克隆时按 [Provider 控制台启动说明](07-provider-console.md#启动) 准备组件库。本机现有 `.env` 包含 PostgreSQL URL 时，仍会选择 PostgreSQL。
 
 不设置 `LLMPROXY_DATABASE_URL` 或设置为空白时，默认使用工作目录下的 `./data/llmproxy.sqlite3`。首次启动自动建目录、生成 `llmproxy.sqlite3.key` 并执行 SQLite 迁移；后续启动沿用同一密钥。请将数据库文件和密钥文件一起备份。已有数据库缺少密钥文件会拒绝启动；显式 `LLMPROXY_MASTER_KEY` 优先于密钥文件。`sqlite::memory:` 不适用于统一服务。
 
-使用 PostgreSQL 时显式设置 `LLMPROXY_DATABASE_URL=postgresql://...` 和固定的 `LLMPROXY_MASTER_KEY`，先运行 `bash scripts/dev.sh migrate`。显式地址连接失败不会回退到 SQLite。两种数据库数据彼此独立，不提供跨后端迁移。数据库准备完成后可在项目根目录运行 `cargo run`；默认监听 `127.0.0.1:3200`。当前自动入口尚未实现完整代理，返回 `501`；具体任务见[实施任务](02-tasks.md)。
+使用 PostgreSQL 时显式设置 `LLMPROXY_DATABASE_URL=postgresql://...` 和固定的 `LLMPROXY_MASTER_KEY`；直接运行 `cargo run` 也会在启动时执行待应用的迁移。迁移或主密钥校验失败时不会开始监听。`bash scripts/dev.sh migrate` 仍可用于单独执行迁移。显式地址连接失败不会回退到 SQLite。两种数据库数据彼此独立，不提供跨后端迁移。默认监听 `127.0.0.1:3200`。当前自动入口尚未实现完整代理，返回 `501`；具体任务见[实施任务](02-tasks.md)。
 
 ## Provider 超时
 

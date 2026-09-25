@@ -2,7 +2,10 @@
 #![expect(clippy::too_many_arguments)]
 
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderStore, ProviderView, StoreError};
+use llmproxy_store::{
+    ModelProbeTarget, ProbeStatus, ProviderInput, ProviderPaths, ProviderStore, ProviderView,
+    StoreError,
+};
 use serde::Deserialize;
 use topcoat::{
     Result,
@@ -22,7 +25,7 @@ use topcoat::{
 };
 use topcoat_ant_design::icons::{
     APARTMENT_OUTLINED, APPSTORE_OUTLINED, ARROW_RIGHT_OUTLINED, CHECK_CIRCLE_FILLED,
-    DOWN_OUTLINED, INFO_CIRCLE_FILLED, PLUS_OUTLINED, SEARCH_OUTLINED,
+    CLOSE_CIRCLE_FILLED, DOWN_OUTLINED, INFO_CIRCLE_FILLED, PLUS_OUTLINED, SEARCH_OUTLINED,
 };
 use topcoat_ant_design::{
     DialogConfig, FormFieldConfig, NotificationTone, TagTone, UiLanguage, data_table, dialog,
@@ -46,6 +49,9 @@ const TEXT_LINK: &str = "border-0 bg-transparent p-0 text-sm leading-[22px] whit
 const NAV_ITEM: &str = "flex min-h-11 items-center gap-3 whitespace-nowrap rounded-md px-3 py-2.5 text-sm text-secondary hover:bg-surface hover:text-primary aria-[current=page]:bg-primary-soft aria-[current=page]:font-medium aria-[current=page]:text-[#0958d9] max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-[13px]";
 const FIELDS_GRID: &str = "grid grid-cols-2 items-start gap-5 max-[640px]:grid-cols-1 [&>div]:content-start [&_input:not([type=checkbox])]:w-full [&_select]:w-full [&_label]:text-sm [&_.text-xs]:text-[13px] [&_.text-xs]:leading-relaxed [&_.text-xs]:text-secondary";
 const FIELD_HINT: &str = "mt-2 mb-0 text-[13px] leading-relaxed text-secondary";
+const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+const CHECKBOX: &str = "group inline-flex cursor-pointer items-center gap-2 whitespace-nowrap border-0 bg-transparent p-0 text-sm text-heading";
+const CHECKBOX_MARK: &str = "grid size-4 shrink-0 place-items-center rounded-[3px] border border-control-border bg-white text-[11px] leading-none text-white group-aria-[checked=true]:border-primary group-aria-[checked=true]:bg-primary";
 
 const PROTOCOLS: [Protocol; 3] = [
     Protocol::OpenAiChat,
@@ -63,6 +69,14 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::OpenAiChat => "OpenAI Chat",
         Protocol::OpenAiResponses => "OpenAI Responses",
         Protocol::AnthropicMessages => "Anthropic Messages",
+    }
+}
+
+fn protocol_short_label(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::OpenAiChat => "Chat",
+        Protocol::OpenAiResponses => "Responses",
+        Protocol::AnthropicMessages => "Messages",
     }
 }
 
@@ -261,7 +275,7 @@ pub async fn routes(cx: &Cx) -> Result<impl View> {
             for protocol in PROTOCOLS {
                 <a class="group min-w-0 rounded-lg border border-border bg-white p-6 shadow-xs hover:border-[#91caff] max-[640px]:p-5" href=(format!("/ui?protocol={}", protocol.as_str()))>
                     <div class="flex items-center gap-3"><span class="grid size-8 shrink-0 place-items-center rounded-md bg-primary-soft text-sm font-semibold text-primary" aria-hidden="true">(match protocol { Protocol::OpenAiChat => "C", Protocol::OpenAiResponses => "R", Protocol::AnthropicMessages => "A" })</span><span class="text-sm font-medium text-heading">(protocol_label(protocol))</span></div>
-                    if let Some(provider) = all.iter().find(|provider| provider.protocol == protocol && provider.active) {
+                    if let Some(provider) = all.iter().find(|provider| provider.active_protocols.contains(&protocol)) {
                         <strong class="mt-6 block truncate text-xl font-semibold leading-7">(provider.name.as_str())</strong><span class="mt-2 flex items-center gap-2 text-[13px] text-secondary">icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-3.5 text-[#389e0d]" aria-hidden="true" })"当前 Provider"</span>
                     } else {
                         <strong class="mt-6 block text-xl font-medium leading-7 text-secondary">"尚未分配"</strong><span class="mt-2 block text-[13px] text-secondary">"启用 Provider 后设为当前服务"</span>
@@ -300,7 +314,12 @@ pub async fn provider_list(
             (search.is_empty()
                 || provider.name.to_lowercase().contains(&search)
                 || provider.host.to_lowercase().contains(&search))
-                && (query.protocol.is_empty() || provider.protocol.as_str() == query.protocol)
+                && (query.protocol.is_empty()
+                    || provider
+                        .paths
+                        .supported()
+                        .iter()
+                        .any(|protocol| protocol.as_str() == query.protocol))
                 && match query.state.as_str() {
                     "enabled" => provider.enabled,
                     "disabled" => !provider.enabled,
@@ -348,19 +367,19 @@ pub async fn provider_list(
                     <tbody>
                         for provider in &providers {
                             <tr id=(format!("provider-{}", provider.id))>
-                                <td><button class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-1 block text-[13px] leading-5 text-secondary">(protocol_label(provider.protocol))</span></td>
+                                <td><button class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-1 block text-[13px] leading-5 text-secondary">(provider.paths.supported().into_iter().map(protocol_short_label).collect::<Vec<_>>().join(" / "))</span></td>
                                 <td><span class="whitespace-nowrap text-sm text-heading">(provider_url(provider))</span><span class="mt-1 block text-[13px] leading-5 text-secondary">"读取超时 "(provider.read_timeout_ms / 1000)" 秒"</span></td>
-                                <td><div class="flex max-w-[155px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" })) if provider.active { tag(tone: TagTone::Processing, "当前使用") }</div></td>
+                                <td><div class="flex max-w-[185px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" })) for active in &provider.active_protocols { tag(tone: TagTone::Processing, (format!("当前 {}", protocol_label(*active)))) }</div></td>
                                 <td><span class="inline-flex items-center gap-1.5 whitespace-nowrap text-[13px] text-secondary">if provider.key_configured { icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-3.5 text-muted" aria-hidden="true" }) }(if provider.key_configured { "已配置" } else { "未配置" })</span></td>
-                                <td><div class="flex min-w-[125px] items-center justify-end gap-3">
+                                <td><div class="flex min-w-[125px] flex-wrap items-center justify-end gap-3">
                                     <button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, provider.clone().into()))>"编辑"</button>
-                                    if provider.enabled && !provider.active {
-                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "activate", label: "设为当前服务")
-                                    }
+                                    if provider.enabled { for protocol in provider.paths.supported() { if !provider.active_protocols.contains(&protocol) {
+                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "activate", protocol: protocol.as_str(), label: format!("设为当前 {}", protocol_label(protocol)))
+                                    } } }
                                     if provider.enabled {
                                         provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: false)
                                     } else {
-                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "enable", label: "启用")
+                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "enable", protocol: "", label: "启用".to_owned())
                                         provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: true)
                                     }
                                 </div></td>
@@ -391,7 +410,7 @@ async fn provider_action_confirmation(
     let id = format!("{action}-{}", provider.id);
     let title = format!("确认{label}「{}」？", provider.name);
     let trigger = popconfirm_trigger_attributes(cx, &id);
-    let submit = action_submit(cx, controls, csrf, provider, action);
+    let submit = action_submit(cx, controls, csrf, provider, action, "");
     let busy = &controls.busy;
     Ok(view! {
         <button class=(class!(TEXT_LINK, "text-[#cf1322]! hover:text-[#ff4d4f]!" if delete)) type="button" (trigger) :disabled=$(busy.get())>(label)</button>
@@ -409,13 +428,114 @@ async fn action_form(
     csrf: &str,
     provider: &ProviderView,
     action: &str,
-    label: &str,
+    protocol: &str,
+    label: String,
 ) -> Result<impl View> {
-    let submit = action_submit(cx, controls, csrf, provider, action);
+    let submit = action_submit(cx, controls, csrf, provider, action, protocol);
     let busy = &controls.busy;
     Ok(
-        view! { <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
+        view! { <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><input type="hidden" name="protocol" value=(protocol)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
     )
+}
+
+#[procedure]
+pub async fn preview_models(cx: &Cx, payload: String) -> Result<Outcome> {
+    let input: ProviderForm = serde_json::from_str(&payload)
+        .map_err(|_| topcoat::router::error::bad_request("无效的 Provider 表单"))?;
+    check_csrf(cx, &input.csrf)?;
+    let state = app_context::<AppState>(cx);
+    let name = if input.name.trim().is_empty() {
+        "当前配置".to_owned()
+    } else {
+        input.name.clone()
+    };
+    let id = input
+        .id
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok());
+    let result = match input.preview_input() {
+        Ok(candidate) => match state.store.preview_target(id, candidate).await {
+            Ok(target) => query_models(target).await,
+            Err(error) => Err(error.to_string()),
+        },
+        Err(error) => Err(error),
+    };
+    state.telemetry.provider_operation(
+        "preview_models",
+        id,
+        Some(&name),
+        result.as_ref().err().map(|_| &StoreError::Internal),
+    );
+    Ok(probe_message(&name, result))
+}
+
+fn probe_message(name: &str, result: std::result::Result<Vec<String>, String>) -> Outcome {
+    result
+        .map(|models| {
+            if models.is_empty() {
+                format!("「{name}」模型探测成功，上游未返回模型 ID")
+            } else {
+                format!(
+                    "「{name}」探测到 {} 个模型：{}",
+                    models.len(),
+                    models.join("、")
+                )
+            }
+        })
+        .map_err(|error| format!("「{name}」模型探测失败：{error}"))
+}
+
+async fn query_models(target: ModelProbeTarget) -> std::result::Result<Vec<String>, String> {
+    let scheme = if target.tls { "https" } else { "http" };
+    let url = format!("{scheme}://{}:{}{}", target.host, target.port, target.path);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "无法创建模型探测客户端".to_owned())?;
+    let request = client.get(url).header("accept", "application/json");
+    let request = match target.protocol {
+        Protocol::OpenAiChat | Protocol::OpenAiResponses => request.bearer_auth(&target.secret),
+        Protocol::AnthropicMessages => request.header("x-api-key", &target.secret).header(
+            "anthropic-version",
+            target
+                .anthropic_version
+                .as_deref()
+                .unwrap_or(DEFAULT_ANTHROPIC_VERSION),
+        ),
+    };
+    let mut response = request
+        .send()
+        .await
+        .map_err(|_| "无法连接上游模型列表接口".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!("上游返回 HTTP {}", response.status().as_u16()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "读取上游响应失败".to_owned())?
+    {
+        if body.len() + chunk.len() > 1024 * 1024 {
+            return Err("模型列表响应超过 1 MiB".to_owned());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| "上游没有返回有效 JSON".to_owned())?;
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "上游响应缺少 data 模型列表".to_owned())?;
+    Ok(data
+        .iter()
+        .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+        .filter(|id| !id.is_empty() && id.len() <= 200)
+        .take(100)
+        .map(str::to_owned)
+        .collect())
 }
 
 #[derive(Default, Deserialize)]
@@ -427,20 +547,39 @@ pub struct EditQuery {
 pub struct ProviderForm {
     #[serde(default)]
     csrf: String,
-    id: Option<i64>,
-    version: Option<u64>,
+    id: Option<String>,
+    version: Option<String>,
     name: String,
-    protocol: String,
+    #[serde(default)]
+    openai_chat: bool,
+    #[serde(default)]
+    openai_chat_path: String,
+    #[serde(default)]
+    openai_responses: bool,
+    #[serde(default)]
+    openai_responses_path: String,
+    #[serde(default)]
+    anthropic_messages: bool,
+    #[serde(default)]
+    anthropic_messages_path: String,
     upstream_url: String,
     #[serde(default)]
     enabled: bool,
     #[serde(default)]
     api_key: String,
+    models_path: String,
+    models_protocol: String,
+    #[serde(default = "default_probe_status")]
+    models_probe_status: String,
     #[serde(default)]
     anthropic_version: String,
     connect_timeout_ms: String,
     read_timeout_ms: String,
     write_timeout_ms: String,
+}
+
+fn default_probe_status() -> String {
+    ProbeStatus::Unprobed.as_str().to_owned()
 }
 
 impl Default for ProviderForm {
@@ -450,11 +589,19 @@ impl Default for ProviderForm {
             id: None,
             version: None,
             name: String::new(),
-            protocol: "openai_chat".to_owned(),
+            openai_chat: true,
+            openai_chat_path: Protocol::OpenAiChat.upstream_path().to_owned(),
+            openai_responses: false,
+            openai_responses_path: Protocol::OpenAiResponses.upstream_path().to_owned(),
+            anthropic_messages: false,
+            anthropic_messages_path: Protocol::AnthropicMessages.upstream_path().to_owned(),
             upstream_url: String::new(),
             enabled: true,
             api_key: String::new(),
-            anthropic_version: "2023-06-01".to_owned(),
+            models_path: "/models".to_owned(),
+            models_protocol: Protocol::OpenAiChat.as_str().to_owned(),
+            models_probe_status: ProbeStatus::Unprobed.as_str().to_owned(),
+            anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
             connect_timeout_ms: "10000".to_owned(),
             read_timeout_ms: "60000".to_owned(),
             write_timeout_ms: "30000".to_owned(),
@@ -464,16 +611,40 @@ impl Default for ProviderForm {
 
 impl From<ProviderView> for ProviderForm {
     fn from(provider: ProviderView) -> Self {
+        let supports_anthropic = provider.paths.anthropic_messages.is_some();
         Self {
             upstream_url: provider_url(&provider),
             csrf: String::new(),
-            id: Some(provider.id),
-            version: Some(provider.version),
+            id: Some(provider.id.to_string()),
+            version: Some(provider.version.to_string()),
             name: provider.name,
-            protocol: provider.protocol.as_str().to_owned(),
+            openai_chat: provider.paths.openai_chat.is_some(),
+            openai_chat_path: provider
+                .paths
+                .openai_chat
+                .unwrap_or_else(|| Protocol::OpenAiChat.upstream_path().to_owned()),
+            openai_responses: provider.paths.openai_responses.is_some(),
+            openai_responses_path: provider
+                .paths
+                .openai_responses
+                .unwrap_or_else(|| Protocol::OpenAiResponses.upstream_path().to_owned()),
+            anthropic_messages: provider.paths.anthropic_messages.is_some(),
+            anthropic_messages_path: provider
+                .paths
+                .anthropic_messages
+                .unwrap_or_else(|| Protocol::AnthropicMessages.upstream_path().to_owned()),
             enabled: provider.enabled,
             api_key: String::new(),
-            anthropic_version: provider.anthropic_version.unwrap_or_default(),
+            models_path: provider.models_path,
+            models_protocol: provider.models_protocol.as_str().to_owned(),
+            models_probe_status: provider.models_probe_status.as_str().to_owned(),
+            anthropic_version: provider.anthropic_version.unwrap_or_else(|| {
+                if supports_anthropic {
+                    String::new()
+                } else {
+                    DEFAULT_ANTHROPIC_VERSION.to_owned()
+                }
+            }),
             connect_timeout_ms: provider.connect_timeout_ms.to_string(),
             read_timeout_ms: provider.read_timeout_ms.to_string(),
             write_timeout_ms: provider.write_timeout_ms.to_string(),
@@ -482,6 +653,40 @@ impl From<ProviderView> for ProviderForm {
 }
 
 impl ProviderForm {
+    fn preview_input(&self) -> std::result::Result<ProviderInput, String> {
+        let protocol = parse_protocol(&self.models_protocol)?;
+        let selected = match protocol {
+            Protocol::OpenAiChat => self.openai_chat,
+            Protocol::OpenAiResponses => self.openai_responses,
+            Protocol::AnthropicMessages => self.anthropic_messages,
+        };
+        if !selected {
+            return Err("模型探测协议必须是已选择的接口协议".to_owned());
+        }
+        let (host, port, tls) = parse_upstream_url(&self.upstream_url)?;
+        Ok(ProviderInput {
+            name: "探测预览".to_owned(),
+            paths: ProviderPaths::single(protocol),
+            host,
+            port,
+            tls,
+            api_key: self.api_key.clone(),
+            enabled: true,
+            models_path: self.models_path.clone(),
+            models_protocol: protocol,
+            anthropic_version: if protocol == Protocol::AnthropicMessages
+                && !self.anthropic_version.trim().is_empty()
+            {
+                Some(self.anthropic_version.trim().to_owned())
+            } else {
+                None
+            },
+            connect_timeout_ms: 10_000,
+            read_timeout_ms: 60_000,
+            write_timeout_ms: 30_000,
+        })
+    }
+
     fn input(&self) -> std::result::Result<ProviderInput, String> {
         let (host, port, tls) = parse_upstream_url(&self.upstream_url)?;
         let timeout = |value: &str| {
@@ -491,13 +696,23 @@ impl ProviderForm {
         };
         Ok(ProviderInput {
             name: self.name.clone(),
-            protocol: parse_protocol(&self.protocol)?,
+            paths: ProviderPaths {
+                openai_chat: self.openai_chat.then(|| self.openai_chat_path.clone()),
+                openai_responses: self
+                    .openai_responses
+                    .then(|| self.openai_responses_path.clone()),
+                anthropic_messages: self
+                    .anthropic_messages
+                    .then(|| self.anthropic_messages_path.clone()),
+            },
             host,
             port,
             tls,
             enabled: self.enabled,
             api_key: self.api_key.clone(),
-            anthropic_version: if self.protocol != "anthropic_messages"
+            models_path: self.models_path.clone(),
+            models_protocol: parse_protocol(&self.models_protocol)?,
+            anthropic_version: if !self.anthropic_messages
                 || self.anthropic_version.trim().is_empty()
             {
                 None
@@ -522,49 +737,10 @@ pub async fn form(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
 type Outcome = std::result::Result<String, String>;
 
 #[procedure]
-pub async fn save_provider(
-    cx: &Cx,
-    csrf: String,
-    id: String,
-    version: String,
-    name: String,
-    protocol: String,
-    upstream_url: String,
-    enabled: bool,
-    api_key: String,
-    anthropic_version: String,
-    connect_timeout_ms: String,
-    read_timeout_ms: String,
-    write_timeout_ms: String,
-) -> Result<Outcome> {
-    let id = if id.is_empty() {
-        None
-    } else {
-        Some(id.parse::<i64>()?)
-    };
-    let version = if version.is_empty() {
-        None
-    } else {
-        Some(version.parse::<u64>()?)
-    };
-    save_input(
-        cx,
-        ProviderForm {
-            csrf,
-            id,
-            version,
-            name,
-            protocol,
-            upstream_url,
-            enabled,
-            api_key,
-            anthropic_version,
-            connect_timeout_ms,
-            read_timeout_ms,
-            write_timeout_ms,
-        },
-    )
-    .await
+pub async fn save_provider(cx: &Cx, payload: String) -> Result<Outcome> {
+    let input: ProviderForm = serde_json::from_str(&payload)
+        .map_err(|_| topcoat::router::error::bad_request("无效的 Provider 表单"))?;
+    save_input(cx, input).await
 }
 
 #[route(POST "/ui/providers/save")]
@@ -576,18 +752,29 @@ async fn save_input(cx: &Cx, mut input: ProviderForm) -> Result<Outcome> {
     check_csrf(cx, &input.csrf)?;
     let state = app_context::<AppState>(cx);
     let store = &state.store;
-    let result = match input.input() {
-        Err(error) => Err(StoreError::Validation(error)),
-        Ok(provider) => match input.id {
-            Some(id) => match input.version {
-                Some(version) => store.update(id, version, provider).await,
-                None => Err(StoreError::Validation(
-                    "表单版本缺失，请重新打开编辑页".to_owned(),
+    let record_id = input.id.as_deref().and_then(|id| id.parse::<i64>().ok());
+    let result: std::result::Result<ProviderView, StoreError> = async {
+        let status = ProbeStatus::parse(&input.models_probe_status)?;
+        let provider = input.input().map_err(StoreError::Validation)?;
+        let saved = match input.id.as_deref() {
+            Some(id) => match (
+                id.parse::<i64>(),
+                input.version.as_deref().unwrap_or("").parse::<u64>(),
+            ) {
+                (Ok(id), Ok(version)) => {
+                    store
+                        .update_with_probe_status(id, version, provider, Some(status))
+                        .await
+                }
+                _ => Err(StoreError::Validation(
+                    "表单版本无效，请重新打开编辑页".to_owned(),
                 )),
             },
-            None => store.create(provider).await,
-        },
-    };
+            None => store.create_with_probe_status(provider, status).await,
+        }?;
+        Ok(saved)
+    }
+    .await;
     input.api_key.clear();
     state.telemetry.provider_operation(
         if input.id.is_some() {
@@ -599,7 +786,7 @@ async fn save_input(cx: &Cx, mut input: ProviderForm) -> Result<Outcome> {
             .as_ref()
             .ok()
             .map(|provider| provider.id)
-            .or(input.id),
+            .or(record_id),
         Some(
             result
                 .as_ref()
@@ -630,6 +817,8 @@ pub struct ActionForm {
     id: i64,
     version: u64,
     action: String,
+    #[serde(default)]
+    protocol: String,
 }
 
 #[procedure]
@@ -639,6 +828,7 @@ pub async fn provider_action(
     id: String,
     version: String,
     action: String,
+    protocol: String,
 ) -> Result<Outcome> {
     action_input(
         cx,
@@ -647,6 +837,7 @@ pub async fn provider_action(
             id: id.parse()?,
             version: version.parse()?,
             action,
+            protocol,
         },
     )
     .await
@@ -678,7 +869,10 @@ async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
         }
     };
     let result = match input.action.as_str() {
-        "activate" => store.activate(input.id, input.version).await.map(|_| ()),
+        "activate" => match parse_protocol(&input.protocol) {
+            Ok(protocol) => store.activate(input.id, input.version, protocol).await,
+            Err(error) => Err(StoreError::Validation(error)),
+        },
         "enable" => store
             .set_enabled(input.id, input.version, true)
             .await
@@ -693,8 +887,21 @@ async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
     state
         .telemetry
         .provider_operation(action, Some(input.id), Some(&name), result.as_ref().err());
+    let protocol_name = if input.action == "activate" {
+        parse_protocol(&input.protocol)
+            .map(protocol_label)
+            .unwrap_or("")
+    } else {
+        ""
+    };
     Ok(result
-        .map(|_| format!("「{name}」{completed}"))
+        .map(|_| {
+            if protocol_name.is_empty() {
+                format!("「{name}」{completed}")
+            } else {
+                format!("「{name}」{protocol_name} {completed}")
+            }
+        })
         .map_err(|error| format!("「{name}」{label}失败：{error}")))
 }
 
@@ -711,6 +918,7 @@ fn action_submit(
     csrf: &str,
     provider: &ProviderView,
     action: &str,
+    protocol: &str,
 ) -> Attributes {
     let ListSignals {
         refresh,
@@ -731,7 +939,7 @@ fn action_submit(
         success.set("".to_owned());
         failure.set("".to_owned());
         // Native procedures have no Rust expression API for transport rejections in 0.8.
-        let result = raw!("await Promise.resolve(${provider_action}.call(${csrf}, ${id}, ${version}, ${action})).catch(() => ${unavailable})", unavailable.clone());
+        let result = raw!("await Promise.resolve(${provider_action}.call(${csrf}, ${id}, ${version}, ${action}, ${protocol})).catch(() => ${unavailable})", unavailable.clone());
         busy.set(false);
         if result.is_ok() {
             success.set(result.unwrap());
@@ -751,10 +959,19 @@ struct EditorSignals {
     id: Signal<String>,
     version: Signal<String>,
     name: Signal<String>,
-    protocol: Signal<String>,
+    openai_chat: Signal<bool>,
+    openai_chat_path: Signal<String>,
+    openai_responses: Signal<bool>,
+    openai_responses_path: Signal<String>,
+    anthropic_messages: Signal<bool>,
+    anthropic_messages_path: Signal<String>,
     upstream_url: Signal<String>,
     enabled: Signal<bool>,
     api_key: Signal<String>,
+    models_path: Signal<String>,
+    models_protocol: Signal<String>,
+    models_probe_status: Signal<String>,
+    models_probe_message: Signal<String>,
     anthropic_version: Signal<String>,
     connect_timeout: Signal<String>,
     read_timeout: Signal<String>,
@@ -776,19 +993,23 @@ impl EditorSignals {
             busy: signal(cx, || false),
             advanced: signal(cx, || error.is_some()),
             error: signal(cx, || error.unwrap_or_default().to_owned()),
-            id: signal(cx, || input.id.map(|id| id.to_string()).unwrap_or_default()),
-            version: signal(cx, || {
-                input
-                    .version
-                    .map(|version| version.to_string())
-                    .unwrap_or_default()
-            }),
+            id: signal(cx, || input.id.clone().unwrap_or_default()),
+            version: signal(cx, || input.version.clone().unwrap_or_default()),
             name: signal(cx, || input.name.clone()),
-            protocol: signal(cx, || input.protocol.clone()),
+            openai_chat: signal(cx, || input.openai_chat),
+            openai_chat_path: signal(cx, || input.openai_chat_path.clone()),
+            openai_responses: signal(cx, || input.openai_responses),
+            openai_responses_path: signal(cx, || input.openai_responses_path.clone()),
+            anthropic_messages: signal(cx, || input.anthropic_messages),
+            anthropic_messages_path: signal(cx, || input.anthropic_messages_path.clone()),
             upstream_url: signal(cx, || input.upstream_url.clone()),
             enabled: signal(cx, || input.enabled),
             // Never initialize browser state from a submitted or stored secret.
             api_key: signal(cx, String::new),
+            models_path: signal(cx, || input.models_path.clone()),
+            models_protocol: signal(cx, || input.models_protocol.clone()),
+            models_probe_status: signal(cx, || input.models_probe_status.clone()),
+            models_probe_message: signal(cx, String::new),
             anthropic_version: signal(cx, || input.anthropic_version.clone()),
             connect_timeout: signal(cx, || input.connect_timeout_ms.clone()),
             read_timeout: signal(cx, || input.read_timeout_ms.clone()),
@@ -807,10 +1028,19 @@ fn editor_trigger(cx: &Cx, editor: &EditorSignals, input: ProviderForm) -> Attri
         id,
         version,
         name,
-        protocol,
+        openai_chat,
+        openai_chat_path,
+        openai_responses,
+        openai_responses_path,
+        anthropic_messages,
+        anthropic_messages_path,
         upstream_url,
         enabled,
         api_key,
+        models_path,
+        models_protocol,
+        models_probe_status,
+        models_probe_message,
         anthropic_version,
         connect_timeout,
         read_timeout,
@@ -822,16 +1052,21 @@ fn editor_trigger(cx: &Cx, editor: &EditorSignals, input: ProviderForm) -> Attri
         "新建 Provider"
     }
     .to_owned();
-    let initial_id = input.id.map(|id| id.to_string()).unwrap_or_default();
-    let initial_version = input
-        .version
-        .map(|version| version.to_string())
-        .unwrap_or_default();
+    let initial_id = input.id.unwrap_or_default();
+    let initial_version = input.version.unwrap_or_default();
     let initial_name = input.name;
-    let initial_protocol = input.protocol;
+    let initial_openai_chat = input.openai_chat;
+    let initial_openai_chat_path = input.openai_chat_path;
+    let initial_openai_responses = input.openai_responses;
+    let initial_openai_responses_path = input.openai_responses_path;
+    let initial_anthropic_messages = input.anthropic_messages;
+    let initial_anthropic_messages_path = input.anthropic_messages_path;
     let initial_upstream_url = input.upstream_url;
     let initial_enabled = input.enabled;
     let initial_anthropic = input.anthropic_version;
+    let initial_models_path = input.models_path;
+    let initial_models_protocol = input.models_protocol;
+    let initial_models_probe_status = input.models_probe_status;
     let initial_connect = input.connect_timeout_ms;
     let initial_read = input.read_timeout_ms;
     let initial_write = input.write_timeout_ms;
@@ -842,10 +1077,19 @@ fn editor_trigger(cx: &Cx, editor: &EditorSignals, input: ProviderForm) -> Attri
             version.set(initial_version.to_owned());
             title.set(initial_title.to_owned());
             name.set(initial_name.to_owned());
-            protocol.set(initial_protocol.to_owned());
+            openai_chat.set(initial_openai_chat);
+            openai_chat_path.set(initial_openai_chat_path.to_owned());
+            openai_responses.set(initial_openai_responses);
+            openai_responses_path.set(initial_openai_responses_path.to_owned());
+            anthropic_messages.set(initial_anthropic_messages);
+            anthropic_messages_path.set(initial_anthropic_messages_path.to_owned());
             upstream_url.set(initial_upstream_url.to_owned());
             enabled.set(initial_enabled);
             anthropic_version.set(initial_anthropic.to_owned());
+            models_path.set(initial_models_path.to_owned());
+            models_protocol.set(initial_models_protocol.to_owned());
+            models_probe_status.set(initial_models_probe_status.to_owned());
+            models_probe_message.set("".to_owned());
             connect_timeout.set(initial_connect.to_owned());
             read_timeout.set(initial_read.to_owned());
             write_timeout.set(initial_write.to_owned());
@@ -874,10 +1118,19 @@ async fn provider_editor(
         id,
         version,
         name,
-        protocol,
+        openai_chat,
+        openai_chat_path,
+        openai_responses,
+        openai_responses_path,
+        anthropic_messages,
+        anthropic_messages_path,
         upstream_url,
         enabled,
         api_key,
+        models_path,
+        models_protocol,
+        models_probe_status,
+        models_probe_message,
         anthropic_version,
         connect_timeout,
         read_timeout,
@@ -888,6 +1141,7 @@ async fn provider_editor(
     let failure = &controls.failure;
     let refresh = &controls.refresh;
     let unavailable: Outcome = Err("保存请求失败或结果未确认，请检查列表状态后重试".to_owned());
+    let probe_unavailable: Outcome = Err("模型探测请求失败，请稍后重试".to_owned());
     Ok(view! {
         dialog(config: DialogConfig::new("provider-dialog", "Provider 配置"),
             open: Some(open), title: Some(title), busy: busy, language: UiLanguage::ChineseSimplified,
@@ -900,7 +1154,7 @@ async fn provider_editor(
                     error.set("".to_owned());
                     success.set("".to_owned());
                     failure.set("".to_owned());
-                    let result = raw!("await Promise.resolve(${save_provider}.call(${csrf}, ${id}.get(), ${version}.get(), ${name}.get(), ${protocol}.get(), ${upstream_url}.get(), ${enabled}.get(), ${api_key}.get(), ${anthropic_version}.get(), ${connect_timeout}.get(), ${read_timeout}.get(), ${write_timeout}.get())).catch(() => ${unavailable})", unavailable.clone());
+                    let result = raw!("await Promise.resolve(${save_provider}.call(cx.hydrate(JSON.stringify({csrf:${csrf}.dehydrate(),id:${id}.get().dehydrate()||null,version:${version}.get().dehydrate()||null,name:${name}.get().dehydrate(),openai_chat:${openai_chat}.get().dehydrate(),openai_chat_path:${openai_chat_path}.get().dehydrate(),openai_responses:${openai_responses}.get().dehydrate(),openai_responses_path:${openai_responses_path}.get().dehydrate(),anthropic_messages:${anthropic_messages}.get().dehydrate(),anthropic_messages_path:${anthropic_messages_path}.get().dehydrate(),upstream_url:${upstream_url}.get().dehydrate(),enabled:${enabled}.get().dehydrate(),api_key:${api_key}.get().dehydrate(),models_path:${models_path}.get().dehydrate(),models_protocol:${models_protocol}.get().dehydrate(),models_probe_status:${models_probe_status}.get().dehydrate(),anthropic_version:${anthropic_version}.get().dehydrate(),connect_timeout_ms:${connect_timeout}.get().dehydrate(),read_timeout_ms:${read_timeout}.get().dehydrate(),write_timeout_ms:${write_timeout}.get().dehydrate()})))).catch(() => ${unavailable})", unavailable.clone());
                     api_key.set("".to_owned());
                     busy.set(false);
                     if result.is_ok() {
@@ -921,23 +1175,50 @@ async fn provider_editor(
                         <h3>"基本信息"</h3>
                         <div class=(FIELDS_GRID)>
                             form_field(config: FormFieldConfig::new("name", "Provider 名称").required(), <input id="name" name="name" :value=$(name.get()) @input=$(|event: Event| name.set(event.target.value)) placeholder="例如：OpenAI · Production" maxlength="80" required="" autofocus="">)
-                            form_field(config: FormFieldConfig::new("protocol", "接口协议").required(), <select id="protocol" name="protocol" :value=$(protocol.get()) @change=$(|event: Event| protocol.set(event.target.value))>for choice in PROTOCOLS { <option value=(choice.as_str())>(protocol_label(choice))</option> }</select>)
                         </div>
-                        <label class="mt-5 flex cursor-pointer items-start gap-2 text-sm leading-[22px] text-heading [&_small]:ml-3 [&_small]:inline [&_small]:text-[13px] [&_small]:text-muted max-[640px]:[&_small]:ml-0 max-[640px]:[&_small]:block"><input type="checkbox" name="enabled" value="true" :checked=$(enabled.get()) @change=$(|event: Event| enabled.set(event.target.checked))><span>"启用此 Provider"<small>"保存后可在列表中设为当前服务。"</small></span></label>
+                        <div class="mt-5 flex items-start gap-2 text-sm leading-[22px] text-heading [&_small]:ml-3 [&_small]:inline [&_small]:text-[13px] [&_small]:text-muted max-[640px]:[&_small]:ml-0 max-[640px]:[&_small]:block"><input type="hidden" name="enabled" :value=$(if enabled.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if enabled.get() { "true" } else { "false" }) @click=$(|_event: Event| enabled.toggle())><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span><span>"启用此 Provider"</span></button><small>"保存后可在列表中设为当前服务。"</small></div>
+                    </section>
+                    <section class="[&+section]:mt-6 [&+section]:border-t [&+section]:border-border [&+section]:pt-6 [&_h3]:mt-0 [&_h3]:mb-4 [&_h3]:text-sm [&_h3]:font-semibold">
+                        <h3>"接口协议与上游路径"</h3>
+                        <p class=(FIELD_HINT)>"至少选择一个协议。路径只填写上游接口路径。"</p>
+                        <div class="mt-4 grid gap-4">
+                            <div class="grid grid-cols-[190px_1fr] items-center gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="openai_chat" :value=$(if openai_chat.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if openai_chat.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !openai_chat.get(); openai_chat.set(selected); if !selected { if models_protocol.get() == "openai_chat" { models_protocol.set(if openai_responses.get() { "openai_responses" } else if anthropic_messages.get() { "anthropic_messages" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("openai_chat".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"OpenAI Chat"</button><input class="w-full" name="openai_chat_path" aria-label="OpenAI Chat 上游路径" :value=$(openai_chat_path.get()) @input=$(|event: Event| openai_chat_path.set(event.target.value)) :disabled=$(!openai_chat.get()) :required=$(openai_chat.get())></div>
+                            <div class="grid grid-cols-[190px_1fr] items-center gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="openai_responses" :value=$(if openai_responses.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if openai_responses.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !openai_responses.get(); openai_responses.set(selected); if !selected { if models_protocol.get() == "openai_responses" { models_protocol.set(if openai_chat.get() { "openai_chat" } else if anthropic_messages.get() { "anthropic_messages" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("openai_responses".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"OpenAI Responses"</button><input class="w-full" name="openai_responses_path" aria-label="OpenAI Responses 上游路径" :value=$(openai_responses_path.get()) @input=$(|event: Event| openai_responses_path.set(event.target.value)) :disabled=$(!openai_responses.get()) :required=$(openai_responses.get())></div>
+                            <div class="grid grid-cols-[190px_minmax(0,1fr)] items-end gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="anthropic_messages" :value=$(if anthropic_messages.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if anthropic_messages.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !anthropic_messages.get(); anthropic_messages.set(selected); if !selected { if models_protocol.get() == "anthropic_messages" { models_protocol.set(if openai_chat.get() { "openai_chat" } else if openai_responses.get() { "openai_responses" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("anthropic_messages".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"Anthropic Messages"</button><div class="flex min-w-0 items-end gap-3 max-[640px]:flex-col max-[640px]:items-stretch"><input class="min-w-0 flex-1 max-[640px]:w-full" name="anthropic_messages_path" aria-label="Anthropic Messages 上游路径" :value=$(anthropic_messages_path.get()) @input=$(|event: Event| anthropic_messages_path.set(event.target.value)) :disabled=$(!anthropic_messages.get()) :required=$(anthropic_messages.get())><div class="w-[160px] shrink-0 max-[640px]:w-full" :hidden=$(!anthropic_messages.get())>form_field(config: FormFieldConfig::new("anthropic-version", "API 版本"), <input class="w-full" id="anthropic-version" name="anthropic_version" :value=$(anthropic_version.get()) @input=$(|event: Event| { anthropic_version.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) placeholder="2023-06-01" :disabled=$(!anthropic_messages.get())>)</div></div></div>
+                        </div>
                     </section>
                     <section class="[&+section]:mt-6 [&+section]:border-t [&+section]:border-border [&+section]:pt-6 [&_h3]:mt-0 [&_h3]:mb-4 [&_h3]:text-sm [&_h3]:font-semibold">
                         <h3>"连接与凭据"</h3>
                         <div class=(FIELDS_GRID)>
-                            <div class="col-span-full">form_field(config: FormFieldConfig::new("upstream-url", "上游地址").required(), <input id="upstream-url" name="upstream_url" type="url" :value=$(upstream_url.get()) @input=$(|event: Event| upstream_url.set(event.target.value)) placeholder="https://api.deepseek.com" required="" aria-describedby="connection-help">)</div>
+                            <div class="col-span-full">form_field(config: FormFieldConfig::new("upstream-url", "上游地址").required(), <input id="upstream-url" name="upstream_url" type="url" :value=$(upstream_url.get()) @input=$(|event: Event| { upstream_url.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) placeholder="https://api.deepseek.com" required="" aria-describedby="connection-help">)</div>
                         </div>
                         <p class=(FIELD_HINT) id="connection-help">"例如 https://api.deepseek.com；本地服务可填写 http://127.0.0.1:11434。"</p>
                         <div class=(class!(FIELDS_GRID, "mt-5"))>
                             <div class="col-span-full">form_field(config: FormFieldConfig::new("api-key", "API Key"),
-                                <input id="api-key" name="api_key" type="password" autocomplete="new-password" :value=$(if open.get() { api_key.get() } else { "".to_owned() }) @input=$(|event: Event| api_key.set(event.target.value)) :placeholder=$(if id.get().is_empty() { "输入 Provider API Key" } else { "留空以保留现有 API Key" }) :required=$(id.get().is_empty()) aria-describedby="api-key-help">
+                                <input id="api-key" name="api_key" type="password" autocomplete="new-password" :value=$(api_key.get()) @input=$(|event: Event| { api_key.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) :placeholder=$(if id.get().is_empty() { "输入 Provider API Key" } else { "留空以保留现有 API Key" }) :required=$(id.get().is_empty()) aria-describedby="api-key-help">
                                 <p class=(FIELD_HINT) id="api-key-help">$(if id.get().is_empty() { "必填，凭据加密保存且不会回显。" } else { "留空保留现有凭据，输入新值即可更换。" })</p>
                             )</div>
-                            <div class="col-span-full" :hidden=$(protocol.get() != "anthropic_messages")>form_field(config: FormFieldConfig::new("anthropic-version", "Anthropic API 版本").with_hint("请求上游时使用的 anthropic-version。"), <input id="anthropic-version" name="anthropic_version" :value=$(anthropic_version.get()) @input=$(|event: Event| anthropic_version.set(event.target.value)) placeholder="2023-06-01" :disabled=$(protocol.get() != "anthropic_messages") aria-describedby="anthropic-version-help">)</div>
                         </div>
+                    </section>
+                    <section class="[&+section]:mt-6 [&+section]:border-t [&+section]:border-border [&+section]:pt-6 [&_h3]:mt-0 [&_h3]:mb-4 [&_h3]:text-sm [&_h3]:font-semibold">
+                        <h3>"模型探测"</h3>
+                        <input type="hidden" name="models_probe_status" :value=$(models_probe_status.get())>
+                        <div class="grid grid-cols-[minmax(0,1fr)_210px_auto_28px] items-end gap-3 max-[640px]:grid-cols-[minmax(0,1fr)_auto_28px] [&_input]:w-full [&_select]:w-full">
+                            form_field(config: FormFieldConfig::new("models-path", "模型列表路径").required(), <input id="models-path" name="models_path" :value=$(models_path.get()) @input=$(|event: Event| { models_path.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) placeholder="/models" required="">)
+                            <div class="max-[640px]:col-span-full max-[640px]:row-start-2">form_field(config: FormFieldConfig::new("models-protocol", "探测协议").required(), <select id="models-protocol" name="models_protocol" :value=$(models_protocol.get()) @change=$(|event: Event| { models_protocol.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) required=""><option value="" disabled="">"请选择协议"</option><option value="openai_chat" :disabled=$(!openai_chat.get())>"OpenAI Chat"</option><option value="openai_responses" :disabled=$(!openai_responses.get())>"OpenAI Responses"</option><option value="anthropic_messages" :disabled=$(!anthropic_messages.get())>"Anthropic Messages"</option></select>)</div>
+                            <button class=(BUTTON) type="button" :disabled=$(busy.get()) @click=$(async |_event: Event| {
+                                if busy.get() { return; }
+                                busy.set(true);
+                                models_probe_message.set("".to_owned());
+                                let result = raw!("await Promise.resolve(${preview_models}.call(cx.hydrate(JSON.stringify({csrf:${csrf}.dehydrate(),id:${id}.get().dehydrate()||null,version:${version}.get().dehydrate()||null,name:${name}.get().dehydrate(),openai_chat:${openai_chat}.get().dehydrate(),openai_chat_path:${openai_chat_path}.get().dehydrate(),openai_responses:${openai_responses}.get().dehydrate(),openai_responses_path:${openai_responses_path}.get().dehydrate(),anthropic_messages:${anthropic_messages}.get().dehydrate(),anthropic_messages_path:${anthropic_messages_path}.get().dehydrate(),upstream_url:${upstream_url}.get().dehydrate(),enabled:${enabled}.get().dehydrate(),api_key:${api_key}.get().dehydrate(),models_path:${models_path}.get().dehydrate(),models_protocol:${models_protocol}.get().dehydrate(),models_probe_status:${models_probe_status}.get().dehydrate(),anthropic_version:${anthropic_version}.get().dehydrate(),connect_timeout_ms:${connect_timeout}.get().dehydrate(),read_timeout_ms:${read_timeout}.get().dehydrate(),write_timeout_ms:${write_timeout}.get().dehydrate()})))).catch(() => ${probe_unavailable})", probe_unavailable.clone());
+                                busy.set(false);
+                                if result.is_ok() { models_probe_status.set("success".to_owned()); models_probe_message.set(result.unwrap()); }
+                                else { models_probe_status.set("failure".to_owned()); models_probe_message.set(result.unwrap_err()); }
+                            })>"探测"</button>
+                            <span class="group flex h-9 items-center justify-center" role="status" :data-status=$(models_probe_status.get()) :aria-label=$(if models_probe_status.get() == "success" { "探测成功" } else if models_probe_status.get() == "failure" { "探测失败" } else { "尚未探测" })><span class="hidden group-data-[status=unprobed]:inline-flex">icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-[18px] text-muted" aria-hidden="true" })</span><span class="hidden group-data-[status=success]:inline-flex">icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-[18px] text-[#52c41a]" aria-hidden="true" })</span><span class="hidden group-data-[status=failure]:inline-flex">icon(data: CLOSE_CIRCLE_FILLED, attrs: attributes! { class="size-[18px] text-[#ff4d4f]" aria-hidden="true" })</span></span>
+                        </div>
+                        <p class=(FIELD_HINT)>"使用当前表单配置预览探测；保存 Provider 后记录结果。鉴权方式由探测协议决定。"</p>
+                        <p class="mt-2 mb-0 text-[13px] leading-relaxed text-secondary" role="status" :hidden=$(models_probe_message.get().is_empty())>$(models_probe_message.get())</p>
                     </section>
                     <details class="group mt-6 rounded-md border border-border" :open=$(advanced.get())>
                         <summary class="flex cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#91caff] [&::-webkit-details-marker]:hidden max-[640px]:flex-wrap max-[640px]:gap-1.5" @click=$(|event: Event| { event.prevent_default(); advanced.toggle(); })><span>"超时设置"</span><span class="ml-auto text-[13px] text-secondary max-[640px]:order-2 max-[640px]:w-full">"连接 "$(connect_timeout.get())" / 读取 "$(read_timeout.get())" / 写入 "$(write_timeout.get())" ms"</span>icon(data: DOWN_OUTLINED, attrs: attributes! { class="size-3.5 shrink-0 text-muted transition-transform duration-150 group-open:rotate-180 max-[640px]:ml-auto" aria-hidden="true" })</summary>

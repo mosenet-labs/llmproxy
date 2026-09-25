@@ -10,9 +10,9 @@
 bash scripts/dev.sh up
 ```
 
-默认监听 `127.0.0.1:3200`。打开 `http://127.0.0.1:3200/ui` 新增 Provider，并设为当前服务；对应协议的新请求约一秒后使用该配置。
+默认监听 `127.0.0.1:3200`。打开 `http://127.0.0.1:3200/ui` 新增 Provider，勾选其支持的协议并按需调整上游路径，再分别设为当前服务；对应协议的新请求约一秒后使用该配置。新建或编辑表单可用当前填写的配置探测模型，保存后记录结果，默认请求上游 `/models`。
 
-缺省使用 `./data/llmproxy.sqlite3`，首次启动自动迁移并生成相邻的 `.key` 文件；备份时须保存这两个文件。已有 `.env` 若设置 `LLMPROXY_DATABASE_URL`，将优先使用该地址。使用 PostgreSQL 时，还须设置 `LLMPROXY_MASTER_KEY` 并执行 `bash scripts/dev.sh migrate`。运行方式和遥测配置见[本地运行](docs/03-development.md)。
+缺省使用 `./data/llmproxy.sqlite3`，首次启动生成相邻的 `.key` 文件；备份时须保存这两个文件。已有 `.env` 若设置 `LLMPROXY_DATABASE_URL`，将优先使用该地址。SQLite 和 PostgreSQL 均在启动时检查并执行待应用的迁移；使用 PostgreSQL 时还须设置固定的 `LLMPROXY_MASTER_KEY`。运行方式和遥测配置见[本地运行](docs/03-development.md)。
 
 | 入口 | 状态 |
 | --- | --- |
@@ -31,5 +31,5 @@ bash scripts/dev.sh up
 | 需求与计划 | [原始需求](docs/00-original-requirements.md) · [架构设计](docs/01-architecture.md) · [实施任务](docs/02-tasks.md) |
 | 启动与部署 | [本地运行与遥测](docs/03-development.md) · [单进程、单端口与 `/ui`](docs/11-unified-service.md) · [SQLite 与 PostgreSQL](docs/12-sqlite-compatibility-plan.md) |
 | 代理实现 | [明确入口联调](docs/05-explicit-routes-validation.md) · [Pingora 请求阶段](docs/06-pingora-request-lifecycle.md) |
-| Provider 控制台 | [Provider 管理](docs/07-provider-console.md) · [异步操作与一次性通知](docs/09-console-async-actions.md) |
+| Provider 控制台 | [Provider 管理](docs/07-provider-console.md) · [多协议 Provider 与模型探测](docs/13-provider-interfaces-and-model-discovery.md) · [异步操作与一次性通知](docs/09-console-async-actions.md) |
 | 可观测性 | [访问日志](docs/04-access-logging.md) · [网关连接诊断](docs/08-gateway-observability.md) · [统一遥测](docs/10-shared-telemetry.md) |

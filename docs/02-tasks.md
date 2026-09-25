@@ -115,6 +115,24 @@
 - [x] S4：统一网关、数据库工具和开发脚本的启动行为，更新运行文档。
 - [x] S5：增加默认 SQLite 的端到端测试，保留 PostgreSQL 回归并完成 workspace 验证。
 
+## W：多协议 Provider 与模型探测
+
+设计与验收见[多协议 Provider 与模型探测](13-provider-interfaces-and-model-discovery.md)。
+
+- [x] W1：增加双数据库追加迁移，保留旧记录的协议路径、凭据和绑定。
+- [x] W2：Provider 支持多个协议及独立上游路径，绑定改为按协议操作；快照加载和 Pingora 转发按协议改写路径。
+- [x] W3：控制台可配置各协议路径、模型列表路径和探测协议；列表按协议显示当前绑定及激活操作。
+- [x] W4：通过服务端探测模型，编辑时可使用已保存的凭据并限制响应大小，反馈中显示 Provider 名称。
+- [x] W5：完成 SQLite、PostgreSQL、网关和控制台回归，确认请求路径、探测结果及凭据脱敏。
+- [x] W6：修复编辑表单协议开关的受控状态；探测协议仅从已配置协议选择，鉴权方式由协议确定。
+- [x] W7：表单支持未保存配置的预览探测；保存后持久化成功/失败/未探测状态并在重新打开时回显，配置变更清除旧状态。
+- [x] W8：将 Anthropic API 版本移到 Messages 协议行；列表协议使用简称，并移除列表探测操作。
+- [ ] W9：后续建立模型 ID 与 Provider 的映射关系，并明确它与现有按协议绑定的关系。
+
+本轮验证：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace` 通过。测试覆盖双数据库旧记录升级与 Provider 生命周期、同一 Provider 多协议转发路径、模型探测 Bearer/Anthropic 鉴权及凭据脱敏；临时 SQLite 控制台的浏览器实测覆盖协议简称、列表移除探测入口、Messages 协议行 API 版本默认值与编辑回显。
+
+W6/W7 追加验证：隔离 PostgreSQL schema 与 SQLite 的完整 workspace 测试通过；控制台 HTTP 测试覆盖未保存配置预览、保存后状态回显、两种鉴权头、失败状态以及不支持协议的拒绝。独立端口浏览器检查编辑回显、协议取消与切换、探测失败状态及修改配置后恢复未探测。
+
 ## 完整验收
 
 P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --workspace`。P1 应通过本地模拟上游的实际 HTTP/SSE 请求；P2 应验证管理变更无须重启代理即可生效。

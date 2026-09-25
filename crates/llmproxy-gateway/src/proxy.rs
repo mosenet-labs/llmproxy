@@ -182,6 +182,15 @@ impl ProxyHttp for Gateway {
             .provider
             .as_ref()
             .expect("request_filter selected provider");
+        let path = match request.uri.query() {
+            Some(query) => format!("{}?{query}", provider.upstream_path),
+            None => provider.upstream_path.clone(),
+        };
+        request.set_uri(
+            path.parse().map_err(|_| {
+                Error::explain(ErrorType::InvalidHTTPHeader, "invalid upstream path")
+            })?,
+        );
         request.remove_header("authorization");
         request.remove_header("x-api-key");
         request.insert_header("host", provider.authority())?;

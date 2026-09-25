@@ -7,8 +7,63 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderStore};
+use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore};
 use support::*;
+
+#[tokio::test]
+async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
+    let directory = std::env::temp_dir().join(format!(
+        "llmproxy-paths-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+    let master_key = STANDARD.encode([19; 32]);
+    let store = ProviderStore::connect(&url, &master_key).await.unwrap();
+    store.migrate().await.unwrap();
+    let (upstream, requests) = Mock::http(|_, stream| respond(stream, 200, "", b"routed"));
+    let mut provider = input("Mixed", upstream.address.port(), "shared-test-key");
+    provider.paths = ProviderPaths {
+        openai_chat: Some("/custom/chat".into()),
+        openai_responses: Some("/custom/responses".into()),
+        anthropic_messages: Some("/custom/messages".into()),
+    };
+    provider.anthropic_version = Some("2023-06-01".into());
+    let mut record = store.create(provider).await.unwrap();
+    for protocol in [
+        Protocol::OpenAiChat,
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+    ] {
+        store
+            .activate(record.id, record.version, protocol)
+            .await
+            .unwrap();
+        record = store.get(record.id).await.unwrap();
+    }
+    let gateway = Gateway::database(&url, &master_key);
+    for (downstream, upstream_path, auth) in [
+        (
+            "/v1/chat/completions?stream=1",
+            "/custom/chat?stream=1",
+            "authorization",
+        ),
+        ("/v1/responses", "/custom/responses", "authorization"),
+        ("/v1/messages", "/custom/messages", "x-api-key"),
+    ] {
+        assert_eq!(gateway.request("POST", downstream, "", b"{}").status, 200);
+        let request = requests.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(request.target, upstream_path);
+        assert!(values(&request.headers, auth)[0].contains("shared-test-key"));
+    }
+    drop(gateway);
+    drop(store);
+    std::fs::remove_dir_all(directory).unwrap();
+}
 
 #[tokio::test]
 async fn database_updates_new_requests_without_interrupting_existing_sse() {
@@ -48,12 +103,14 @@ async fn database_updates_new_requests_without_interrupting_existing_sse() {
 fn input(name: &str, port: u16, secret: &str) -> ProviderInput {
     ProviderInput {
         name: name.to_owned(),
-        protocol: Protocol::OpenAiChat,
+        paths: ProviderPaths::single(Protocol::OpenAiChat),
         host: "127.0.0.1".to_owned(),
         port,
         tls: false,
         api_key: secret.to_owned(),
         enabled: true,
+        models_path: "/models".into(),
+        models_protocol: Protocol::OpenAiChat,
         anthropic_version: None,
         connect_timeout_ms: 2000,
         read_timeout_ms: 15_000,
@@ -105,7 +162,10 @@ async fn exercise_gateway(url: &str) {
         ))
         .await
         .unwrap();
-    store.activate(old.id, old.version).await.unwrap();
+    store
+        .activate(old.id, old.version, Protocol::OpenAiChat)
+        .await
+        .unwrap();
     wait_for_route(&gateway, 200, Some(b"old-provider"), None).await;
     let first = old_requests.recv_timeout(DEADLINE).unwrap();
     assert_eq!(
@@ -151,7 +211,10 @@ async fn exercise_gateway(url: &str) {
         ))
         .await
         .unwrap();
-    store.activate(new.id, new.version).await.unwrap();
+    store
+        .activate(new.id, new.version, Protocol::OpenAiChat)
+        .await
+        .unwrap();
     wait_for_route(
         &gateway,
         200,

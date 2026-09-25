@@ -6,7 +6,7 @@ use std::{
 };
 
 use llmproxy_core::{protocol::Protocol, provider::validate_upstream};
-use llmproxy_store::{ActiveProvider, DatabaseConfig, ProviderStore};
+use llmproxy_store::{ActiveProvider, DatabaseConfig, ProviderStore, StoreError};
 use tokio::{runtime::Builder, sync::oneshot, time};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -16,6 +16,7 @@ const MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 // Resolved credentials deliberately have no Debug or Serialize implementation.
 #[derive(Clone)]
 pub struct ResolvedProvider {
+    pub upstream_path: String,
     pub host: String,
     pub port: u16,
     pub tls: bool,
@@ -75,9 +76,16 @@ impl ProviderSnapshot {
             if provider.secret.trim().is_empty() || provider.secret.contains(['\r', '\n']) {
                 return Err("invalid active provider credential");
             }
+            if !provider.upstream_path.starts_with('/')
+                || provider.upstream_path.starts_with("//")
+                || provider.upstream_path.contains(['?', '#', '\\'])
+            {
+                return Err("invalid active provider path");
+            }
             resolved.push((
                 provider.protocol,
                 ResolvedProvider {
+                    upstream_path: provider.upstream_path,
                     host: provider.host,
                     port: provider.port,
                     tls: provider.tls,
@@ -135,18 +143,22 @@ impl ProviderSnapshots {
             .await
             .map_err(|_| "provider database connection timed out")?
             .map_err(|_| "cannot connect to provider database; check configuration")?;
-            if config.backend().is_sqlite() {
-                time::timeout(MIGRATION_TIMEOUT, store.migrate())
-                    .await
-                    .map_err(|_| "provider database migration timed out")?
-                    .map_err(|_| "cannot migrate SQLite provider database")?;
-            }
+            time::timeout(MIGRATION_TIMEOUT, store.migrate())
+                .await
+                .map_err(|_| "provider database migration timed out")?
+                .map_err(|error| match error {
+                    StoreError::Configuration(message) => message,
+                    _ => "cannot migrate provider database; check schema and permissions",
+                })?;
+            tracing::info!(
+                component = "gateway",
+                event_kind = "runtime",
+                "provider database schema ready"
+            );
             let providers = time::timeout(DATABASE_TIMEOUT, store.load_active())
                 .await
                 .map_err(|_| "initial provider snapshot timed out")?
-                .map_err(
-                    |_| "cannot load provider snapshot; check database migrations and master key",
-                )?;
+                .map_err(|_| "cannot load provider snapshot; check provider records")?;
             let initial = ProviderSnapshot::from_database(providers)
                 .map_err(|_| "initial provider snapshot is invalid")?;
             Ok::<_, &'static str>((store, initial))
@@ -232,6 +244,7 @@ mod tests {
 
     fn provider(host: &str, secret: &str) -> ResolvedProvider {
         ResolvedProvider {
+            upstream_path: "/v1/chat/completions".to_owned(),
             host: host.to_owned(),
             port: 443,
             tls: true,

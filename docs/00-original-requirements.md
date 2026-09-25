@@ -24,6 +24,16 @@
 
 最新补充：
 
+> 新增provider表单
+> 1. 也一并新增模型探测接口，默认使用/models接口，可以修改
+> 2. 有的Provider多个接口同时支持，只是不同的path，也需要支持
+>
+> 不同协议转发到provider的路径可以有默认的，但必须支持可修改
+
+实现方案与验收见[多协议 Provider 与模型探测](13-provider-interfaces-and-model-discovery.md)，任务见[W：多协议 Provider 与模型探测](02-tasks.md#w多协议-provider-与模型探测)。
+
+此前补充：
+
 > 数据库需要兼容sqlite，默认如果没有指定将直接使用sqlite，说说你的方案
 >
 > 好的，做一个sqlite兼容的计划，不需要考虑数据在两种类似的数据中相互迁移
@@ -60,3 +70,4 @@
 - [控制台与网关统一可观测性](10-shared-telemetry.md)
 - [单进程、单端口与 /ui 控制台](11-unified-service.md)
 - [SQLite 兼容与默认数据库计划](12-sqlite-compatibility-plan.md)
+- [多协议 Provider、可配置路径与模型探测](13-provider-interfaces-and-model-discovery.md)

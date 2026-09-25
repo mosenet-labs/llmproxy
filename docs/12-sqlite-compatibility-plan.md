@@ -12,7 +12,7 @@ S1–S5 已实施。以下配置约定适用于当前程序。
 | --- | --- |
 | `LLMPROXY_DATABASE_URL` 缺失或空白 | 使用 `sqlite:./data/llmproxy.sqlite3`；相对路径以进程工作目录为准，启动日志输出解析后的绝对文件路径。 |
 | `sqlite:<文件路径>` | 使用指定的持久化 SQLite 文件，首次启动创建父目录并应用 SQLite 迁移。 |
-| `postgresql://...` 或 `postgres://...` | 保持现有 PostgreSQL 路径和显式迁移流程。 |
+| `postgresql://...` 或 `postgres://...` | 使用 PostgreSQL，并在启动时执行待应用的迁移。 |
 | 显式地址格式错误或数据库不可用 | 启动失败；不得悄悄切换到另一种数据库。 |
 
 默认路径使用文件数据库，不使用 `sqlite::memory:`。当前网关快照与控制台各自建立连接，内存数据库无法作为它们共享的持久化 Provider 来源；统一服务入口应明确拒绝此 URL。`scripts/dev.sh` 已切换到项目根目录，因此默认相对路径在本地开发时稳定。部署在其他工作目录时应显式设置绝对 SQLite 路径。现有 `.env` 如果写了 PostgreSQL URL，仍会选择 PostgreSQL；要使用默认 SQLite，须移除该项。
@@ -26,7 +26,7 @@ SQLite 数据库文件与密钥文件都要备份；恢复时需要配对。这�
 ## 存储层改造
 
 1. `llmproxy-store` 为 Toasty 0.10 启用 `sqlite` feature，在一处解析数据库 URL 并确定后端；网关入口和 `llmproxy-db` 复用该解析结果。Provider 模型、加密、控制台操作和网关快照 API 保持共用。
-2. 保留已有 PostgreSQL 迁移内容、编号与校验历史，迁移文件放在 `crates/llmproxy-store/migrations/postgresql/`；SQLite 文件放在相邻的 `sqlite/` 目录。SQLite 建表使用兼容的自增主键、长度检查和整数/布尔存储；包括 `providers`、三条 `route_bindings` 和 `store_keys`。Toasty SQLite 驱动每个迁移文件执行一条语句，因此 SQLite 的建表和种子数据分成四个版本。首次 SQLite 启动自动应用版本化迁移，后续启动幂等；`llmproxy-db migrate` 对两种后端使用同一选择规则。PostgreSQL 保持现有显式迁移方式。
+2. 保留已有 PostgreSQL 迁移内容、编号与校验历史，迁移文件放在 `crates/llmproxy-store/migrations/postgresql/`；SQLite 文件放在相邻的 `sqlite/` 目录。SQLite 建表使用兼容的自增主键、长度检查和整数/布尔存储；包括 `providers`、三条 `route_bindings` 和 `store_keys`。Toasty SQLite 驱动每个迁移文件执行一条语句，因此 SQLite 的建表和种子数据分成四个版本。两种后端均在启动时应用待执行的版本化迁移，后续启动幂等；`llmproxy-db migrate` 可单独执行迁移。
 3. 把后端差异限制在迁移和事务辅助函数。PostgreSQL 保留 advisory lock、`FOR UPDATE/SHARE`；SQLite 写事务在开始时取得写锁（`BEGIN IMMEDIATE`），读事务提供一致快照，不生成 PostgreSQL 的行锁 SQL。Provider 启停、设为当前、删除、版本冲突和快照读取的业务规则保持一致。
 4. SQLite 每次从池中取连接时设置 `foreign_keys=ON` 与 5 秒 `busy_timeout`，连接文件时设置 WAL；测试同时持有两个池连接验证外键约束、等待配置和 WAL。Toasty 0.10 驱动没有连接初始化 hook，因此这些 PRAGMA 集中在存储层的连接辅助函数。SQLite 用于本机单实例部署，多实例共享数据库仍以 PostgreSQL 为主。
 
@@ -34,7 +34,7 @@ Toasty 0.10 提供 [SQLite 驱动](https://docs.rs/toasty/0.10.0/toasty/)；其[
 
 ## 启动、测试与文档
 
-- 网关启动时先解析后端和主密钥；SQLite 完成文件准备与迁移后，再加载初始 Provider 快照并启动 `/ui` 和 `/v1/*`。初始化失败不监听端口。`scripts/dev.sh up` 不依赖本机 PostgreSQL 即可启动默认 SQLite。
+- 网关启动时先解析后端和主密钥；所选数据库完成准备与迁移后，再加载初始 Provider 快照并启动 `/ui` 和 `/v1/*`。初始化失败不监听端口。`scripts/dev.sh up` 不依赖本机 PostgreSQL 即可启动默认 SQLite。
 - 测试使用临时 SQLite 文件及配套密钥文件，完整跑 Provider CRUD、当前绑定、版本冲突、错误密钥、控制台操作、代理热更新和 SSE；保留现有隔离 PostgreSQL 回归测试。工作区测试在没有 PostgreSQL 服务与测试 URL 的环境中也应执行 SQLite 路径，而不是跳过所有数据库验证。
 - 验证缺省地址首次启动、重启后记录和凭据可用、数据库存在但密钥文件缺失时拒绝启动、显式 PostgreSQL 地址连接失败时不回退，以及两种后端的迁移重复执行。
 - 更新 `.env.example`、README、运行文档和 `.gitignore`：默认 SQLite 不填写数据库 URL；将默认数据库目录及密钥文件排除版本控制。文档说明当前 `.env` 的 PostgreSQL URL 仍会优先生效。

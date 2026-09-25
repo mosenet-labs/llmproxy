@@ -51,6 +51,7 @@ impl Console {
             .route(app::perform_action)
             .procedure(app::save_provider)
             .procedure(app::provider_action)
+            .procedure(app::preview_models)
             .shard(app::provider_list)
             .route(assets::component_css)
             .route(assets::console_css)

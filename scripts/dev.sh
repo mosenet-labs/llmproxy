@@ -17,7 +17,6 @@ case "$action" in
     up)
         cargo build -p llmproxy-gateway -p llmproxy-store
         binary_dir="${CARGO_TARGET_DIR:-target}/debug"
-        "$binary_dir/llmproxy-db" migrate
         exec "$binary_dir/llmproxy"
         ;;
     *)

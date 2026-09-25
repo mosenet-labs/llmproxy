@@ -2,17 +2,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderStore, StoreError};
+use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore, StoreError};
 
 fn input(name: &str, protocol: Protocol) -> ProviderInput {
     ProviderInput {
         name: name.into(),
-        protocol,
+        paths: ProviderPaths::single(protocol),
         host: "api.example.com".into(),
         port: 443,
         tls: true,
         api_key: "test-key-do-not-return".into(),
         enabled: true,
+        models_path: "/models".into(),
+        models_protocol: protocol,
         anthropic_version: (protocol == Protocol::AnthropicMessages).then(|| "2023-06-01".into()),
         connect_timeout_ms: 10_000,
         read_timeout_ms: 60_000,
@@ -146,7 +148,10 @@ async fn exercise_store(url: &str, sqlite: bool) {
     ));
 
     for view in [&chat, &responses, &messages] {
-        store.activate(view.id, view.version).await.unwrap();
+        store
+            .activate(view.id, view.version, view.paths.supported()[0])
+            .await
+            .unwrap();
     }
     let active = store.load_active().await.unwrap();
     assert_eq!(active.len(), 3);
@@ -196,7 +201,9 @@ async fn exercise_store(url: &str, sqlite: bool) {
         Err(StoreError::Configuration(_))
     ));
     assert!(matches!(
-        wrong_key.activate(chat.id, current.version).await,
+        wrong_key
+            .activate(chat.id, current.version, Protocol::OpenAiChat)
+            .await,
         Err(StoreError::Configuration(_))
     ));
     assert!(matches!(
@@ -317,7 +324,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
     // Simultaneous actions use the same optimistic version: exactly one wins.
     let (disabled, activated) = tokio::join!(
         store.set_enabled(chat.id, rotated.version, false),
-        reopened.activate(chat.id, rotated.version),
+        reopened.activate(chat.id, rotated.version, Protocol::OpenAiChat),
     );
     assert_ne!(disabled.is_ok(), activated.is_ok());
     let loser = if disabled.is_err() {
@@ -345,7 +352,9 @@ async fn exercise_store(url: &str, sqlite: bool) {
             .any(|p| p.id == chat.id)
     );
     assert!(matches!(
-        store.activate(chat.id, disabled.version).await,
+        store
+            .activate(chat.id, disabled.version, Protocol::OpenAiChat)
+            .await,
         Err(StoreError::Conflict(_))
     ));
     store.delete(chat.id, disabled.version).await.unwrap();
@@ -360,7 +369,10 @@ async fn exercise_store(url: &str, sqlite: bool) {
         .await
         .unwrap();
     let old = store.get(responses.id).await.unwrap();
-    store.activate(backup.id, backup.version).await.unwrap();
+    store
+        .activate(backup.id, backup.version, Protocol::OpenAiResponses)
+        .await
+        .unwrap();
     assert!(!store.get(responses.id).await.unwrap().active);
     assert!(matches!(
         store.set_enabled(responses.id, old.version, false).await,
@@ -382,4 +394,55 @@ async fn exercise_store(url: &str, sqlite: bool) {
     assert!(stored.contains("v1:"));
     assert!(!stored.contains("test-key-do-not-return"));
     assert!(!stored.contains("rotated-provider-key"));
+
+    let mut mixed = input("Mixed interfaces", Protocol::OpenAiChat);
+    mixed.paths.openai_chat = Some("/custom/chat".into());
+    mixed.paths.openai_responses = Some("/custom/responses".into());
+    mixed.models_path = "/v1/models".into();
+    let mixed = store.create(mixed).await.unwrap();
+    assert_eq!(mixed.paths.supported().len(), 2);
+    assert_eq!(mixed.models_path, "/v1/models");
+    store
+        .activate(mixed.id, mixed.version, Protocol::OpenAiChat)
+        .await
+        .unwrap();
+    let mixed = store.get(mixed.id).await.unwrap();
+    store
+        .activate(mixed.id, mixed.version, Protocol::OpenAiResponses)
+        .await
+        .unwrap();
+    let mixed = store.get(mixed.id).await.unwrap();
+    assert_eq!(mixed.active_protocols.len(), 2);
+    let routes = store.load_active().await.unwrap();
+    assert_eq!(
+        routes
+            .iter()
+            .find(|route| route.protocol == Protocol::OpenAiChat)
+            .unwrap()
+            .upstream_path,
+        "/custom/chat"
+    );
+    assert_eq!(
+        routes
+            .iter()
+            .find(|route| route.protocol == Protocol::OpenAiResponses)
+            .unwrap()
+            .upstream_path,
+        "/custom/responses"
+    );
+    let probe = store.probe_target(mixed.id).await.unwrap();
+    assert_eq!(probe.path, "/v1/models");
+    assert_eq!(probe.secret, "test-key-do-not-return");
+    let mut remove_active = input("Mixed interfaces", Protocol::OpenAiResponses);
+    remove_active.api_key.clear();
+    assert!(matches!(
+        store.update(mixed.id, mixed.version, remove_active).await,
+        Err(StoreError::Conflict(_))
+    ));
+    let mut invalid_path = input("Invalid path", Protocol::OpenAiChat);
+    invalid_path.paths.openai_chat = Some("https://other.example/v1/chat".into());
+    assert!(matches!(
+        store.create(invalid_path).await,
+        Err(StoreError::Validation(_))
+    ));
 }
