@@ -12,7 +12,7 @@ serde.workspace = true
 dotenvy = "0.15.7"
 getrandom = "0.4.3"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
-topcoat = { version = "0.8.1", default-features = false, features = ["asset", "router", "runtime", "serve", "view"] }
+topcoat = { version = "0.8.1", default-features = false, features = ["asset", "icon", "router", "runtime", "serve", "view"] }
 topcoat-ant-design = { version = "0.1.2", path = "../../../topcoat-ant-design", features = ["router"] }
 url = "2.5.8"
 

@@ -65,11 +65,17 @@ Provider 管理包含名称、协议、上游地址、API Key、Anthropic 版本
 
 ## 样式与构建
 
+视觉尺度参照 GitLab Review：桌面页标题 28px，正文、输入框和操作 14px，辅助信息 13px；次级文字使用 `#595959`，弱提示使用 `#737373`。页面内边距统一为 28px，卡片和弹窗主体为 24px，普通控件高度 36px。窄屏以布局换行适配，正文不再缩小到 10–11px。
+
+Provider 管理和路由概览共用浅色导航、页头和内容区；移除重复的“模型服务”眉题及页脚标语。导航、搜索、新增、路由跳转、空状态和提示使用组件库提供的 Ant Design SVG 图标，由 Topcoat 原生 `icon` 渲染。
+
 - 使用 Topcoat 内置的 `topcoat::tailwind::BuildConfig`，在 Cargo 构建时扫描 `src/**/*.rs`，生成并嵌入控制台 CSS；不需要额外的 npm 构建流程。
 - 布局、响应式断点和状态样式写在 Rust `view!` 的 Tailwind 类中，重复的按钮、导航、表单网格样式使用常量配合 `class!` 组合。类名必须完整出现，避免运行时拼接导致 Tailwind 无法识别。
 - `crates/llmproxy-console/styles.css` 只保留 Tailwind 入口、Ant Design 风格的主题色和页面基础样式；原手写 `src/console.css` 已移除。保留 JetBrains Mono 字体和中文回退字体。
 - Dialog、通知、确认气泡、表格和标签继续复用 `topcoat-ant-design`。控制台与组件库共享 `theme / components / utilities` 层级，控制台样式后加载，确保页面响应式规则生效；不引入 Preflight，保留组件库的控件默认行为。
 - `build.rs` 监听 Rust 源码和样式入口变化；修改后重新运行 `bash scripts/dev.sh console` 即可生成新样式。首次构建可能由 Topcoat 下载 Tailwind CLI，与组件库使用同一套集成。
+
+视觉调整已在 1280px 桌面与 390px 窄屏检查：空状态、Provider 列表、路由卡片、创建弹窗和停用确认气泡正常；窄屏页面无横向溢出，表格保留容器内横向滚动。异步创建和设为当前服务验证通过；`cargo fmt --all -- --check`、`cargo check --workspace --offline`、`cargo test --workspace --offline` 均通过，完整测试 33 项。
 
 ## 凭据与控制台边界
 
