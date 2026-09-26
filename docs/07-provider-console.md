@@ -50,7 +50,7 @@ Provider 管理包含名称、支持的协议及各自上游路径、上游地�
 
 - 控制台字体与 gitlab-reviewer 一致，使用 JetBrains Mono，中文按 Noto Sans SC、PingFang SC、Microsoft YaHei 回退。
 - Provider 管理（`/ui`）与路由概览（`/ui/routes`）使用独立页面，导航选中项、标题与面包屑同步；共用内容区宽度和边距。协议路由卡片集中在路由概览，点击卡片返回对应协议的 Provider 列表。
-- 新建、编辑在列表上方打开模态对话框，复用组件库 Dialog；打开时保留当前列表和筛选，支持关闭按钮、取消和 Escape。
+- 新建、编辑在列表上方打开模态对话框，复用组件库 `native_dialog`；打开时保留当前列表和筛选，支持关闭按钮、取消和 Escape。
 - 连接信息只需填写一个“上游地址”，例如 `https://api.deepseek.com` 或 `http://127.0.0.1:11434`。自动识别 HTTP/HTTPS 和端口，未指定端口时分别使用 80/443，允许末尾 `/`；列表与编辑表单省略默认端口。
 - 上游地址填写服务根地址，不包含接口路径、查询参数、片段或 URL 内嵌凭据。各协议的接口路径在下方独立配置，有默认值并可修改。当前支持域名和 IPv4。服务端解析后沿用数据库的 `host / port / tls` 字段。
 - 选择 Anthropic Messages 时，在该协议行显示可编辑的 API 版本，默认 `2023-06-01`。
@@ -62,9 +62,9 @@ Provider 管理包含名称、支持的协议及各自上游路径、上游地�
 - 列表中的停用与删除均使用确认气泡，仅显示“确认停用/删除「Provider 名称」？”；取消和确认按钮使用相同尺寸。
 - 新建、保存、启用、停用、设为当前服务、删除成功后使用组件库 `notification` 显示包含记录名称的通知，例如“「deepseek」已停用”。列表操作失败也通过通知显示记录名称和失败原因。通知默认约 4.5 秒自动关闭，可手动关闭；表单校验错误保留在弹窗内。
 
-交互采用 Topcoat 原生 `Signal`、`@click / @input / @change / @invalid` 和 `:value / :hidden / :disabled` 绑定。页面只渲染一个 Dialog，列表中的非敏感 Provider 配置用于初始化编辑状态；保存和列表操作通过原生 `#[procedure]` 异步提交，由服务端校验并返回业务结果；成功后更新 `Signal`，由 `#[shard]` 局部重绘列表，notification 显示包含记录名称的本次操作结果。通知不再从 URL 或 Cookie 初始化，因此刷新不会重播。Topcoat 0.8.1 原生表达式不能捕获请求拒绝，提交处用少量 `raw!` 捕获原生 procedure 的异常，恢复提交状态；请求与 DOM 更新仍由框架完成。详见[异步操作方案](09-console-async-actions.md)。
+交互采用 Topcoat 原生 `Signal`、`@click / @input / @change / @invalid` 和 `:value / :hidden / :disabled` 绑定。页面只渲染一个模态弹窗，列表中的非敏感 Provider 配置用于初始化编辑状态；保存和列表操作通过原生 `#[procedure]` 异步提交，由服务端校验并返回业务结果；成功后更新 `Signal`，由 `#[shard]` 局部重绘列表，notification 显示包含记录名称的本次操作结果。通知不再从 URL 或 Cookie 初始化，因此刷新不会重播。提交处用少量 `raw!` 捕获 procedure 请求拒绝，恢复提交状态；请求与 DOM 更新仍由框架完成。详见[异步操作方案](09-console-async-actions.md)。
 
-`topcoat-ant-design` 的 Dialog 已补充可选 `open` 与 `title` Signal。浏览器原生 `showModal / close` 的必要适配封装在组件库内，业务只管理 Rust 状态。Topcoat 会把运行时表达式编译成浏览器 JavaScript，仍须加载框架自己的 runtime 资源。
+Topcoat 0.9.0 升级后，控制台使用组件库的 `native_dialog` 和 `anchored_menu`：前者保留浏览器模态弹窗的焦点与 Escape 行为，后者让表格内的操作菜单浮于滚动容器之上。浏览器原生 `showModal / close` 的必要适配封装在组件库内，业务只管理 Rust 状态。Provider 列表循环使用稳定的 `#[key(provider.id)]`，以便局部更新时保留对应 DOM 身份。Topcoat 会把运行时表达式编译成浏览器 JavaScript，仍须加载框架自己的 runtime 资源。
 
 ## 样式与构建
 
@@ -75,7 +75,7 @@ Provider 管理和路由概览共用浅色导航、页头和内容区；移除�
 - 使用 Topcoat 内置的 `topcoat::tailwind::BuildConfig`，在 Cargo 构建时扫描 `src/**/*.rs`，生成并嵌入控制台 CSS；不需要额外的 npm 构建流程。
 - 布局、响应式断点和状态样式写在 Rust `view!` 的 Tailwind 类中，重复的按钮、导航、表单网格样式使用常量配合 `class!` 组合。类名必须完整出现，避免运行时拼接导致 Tailwind 无法识别。
 - `crates/llmproxy-console/styles.css` 只保留 Tailwind 入口、Ant Design 风格的主题色和页面基础样式；原手写 `src/console.css` 已移除。保留 JetBrains Mono 字体和中文回退字体。
-- Dialog、通知、确认气泡、表格和标签继续复用 `topcoat-ant-design`。控制台与组件库共享 `theme / components / utilities` 层级，控制台样式后加载，确保页面响应式规则生效；不引入 Preflight，保留组件库的控件默认行为。
+- 模态弹窗、操作菜单、通知、确认气泡、表格和标签继续复用 `topcoat-ant-design`。控制台与组件库共享 `theme / components / utilities` 层级，控制台样式后加载，确保页面响应式规则生效；不引入 Preflight，保留组件库的控件默认行为。
 - `build.rs` 监听 Rust 源码和样式入口变化；修改后重新运行 `cargo run` 即可生成新样式。首次构建可能由 Topcoat 下载 Tailwind CLI，与组件库使用同一套集成。
 
 视觉调整已在 1280px 桌面与 390px 窄屏检查：空状态、Provider 列表、路由卡片、创建弹窗和停用确认气泡正常；窄屏页面无横向溢出，表格保留容器内横向滚动。异步创建和设为当前服务验证通过；`cargo fmt --all -- --check`、`cargo check --workspace --offline`、`cargo test --workspace --offline` 均通过，完整测试 33 项。
@@ -92,7 +92,7 @@ API Key 由 UI 输入，使用带认证的加密保存到数据库。主密钥�
 
 ## 启动
 
-组件库当前使用本地路径依赖 `../topcoat-ant-design`，依赖其中的中文标签以及本轮新增的受控 Dialog 支持。本机已经存在该目录；其他环境需要准备包含这些改动的组件库 checkout，已发布的同版本 crates.io 包尚不包含这些 API。组件库地址见 [topcoat-ant-design](https://github.com/mosenet-labs/topcoat-ant-design)。
+组件库当前使用本地路径依赖 `../topcoat-ant-design`，依赖其中的中文标签及 `native_dialog`、`anchored_menu` 组件。本机已经存在该目录；其他环境需要准备包含这些改动的组件库 checkout，已发布的同版本 crates.io 包尚不包含这些 API。组件库地址见 [topcoat-ant-design](https://github.com/mosenet-labs/topcoat-ant-design)。
 
 默认 SQLite 启动时：
 

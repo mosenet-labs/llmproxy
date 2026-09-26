@@ -8,7 +8,7 @@ use llmproxy_store::ProviderStore;
 use topcoat::{
     asset::RouterBuilderAssetExt,
     router::{BodyLimit, Router},
-    runtime::{RouterBuilderProcedureExt, RouterBuilderRuntimeExt, RouterBuilderShardExt},
+    runtime::RouterBuilderRuntimeExt,
 };
 use topcoat_ant_design::RouterBuilderUiExt;
 
@@ -49,10 +49,10 @@ impl Console {
             .page(app::form)
             .route(app::save)
             .route(app::perform_action)
-            .procedure(app::save_provider)
-            .procedure(app::provider_action)
-            .procedure(app::preview_models)
-            .shard(app::provider_list)
+            .route(app::save_provider)
+            .route(app::provider_action)
+            .route(app::preview_models)
+            .route(app::provider_list)
             .route(assets::component_css)
             .route(assets::console_css)
             .route(assets::runtime_js)
@@ -74,15 +74,15 @@ impl Console {
     }
 
     pub async fn handle(&self, mut request: Request) -> Response {
-        // Adapt only Topcoat's fixed internal endpoints. Page URLs already carry /ui.
+        // Topcoat's font route has a fixed internal path. Keep its public URL under /ui.
         if let Some(path) = request
             .uri()
             .path_and_query()
-            .and_then(|path| path.as_str().strip_prefix("/ui/_topcoat/"))
+            .and_then(|path| path.as_str().strip_prefix("/ui/_topcoat/fonts/"))
         {
-            *request.uri_mut() = format!("/_topcoat/{path}")
+            *request.uri_mut() = format!("/_topcoat/fonts/{path}")
                 .parse()
-                .expect("valid prefixed request URI");
+                .expect("valid prefixed font URI");
         }
         self.router.handle(request).await
     }

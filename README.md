@@ -4,7 +4,7 @@
 
 ## 快速开始
 
-准备项目相邻目录的 [`topcoat-ant-design`](https://github.com/mosenet-labs/topcoat-ant-design) 组件库（包含项目使用的中文组件和受控 Dialog），在项目根目录运行：
+准备项目相邻目录的 [`topcoat-ant-design`](https://github.com/mosenet-labs/topcoat-ant-design) 组件库（依赖 Topcoat 0.9.0，包含项目使用的中文组件、模态弹窗和表格操作菜单），在项目根目录运行：
 
 ```sh
 bash scripts/dev.sh up

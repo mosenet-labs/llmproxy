@@ -120,6 +120,7 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(response.headers()["cache-control"], "no-store");
     let html = response.text().await.unwrap();
     assert!(html.contains("连接第一个模型服务"));
+    assert!(html.contains("/ui/_topcoat/runtime/shards/provider-list"));
     assert_navigation(&html, "/ui", "Provider 管理");
     assert!(!html.contains("id=\"routes\""));
     let routes = client.get(format!("{base}/routes")).send().await.unwrap();
@@ -155,11 +156,6 @@ async fn exercise_http(database_url: &str) {
             assert!(!body.contains("@source"));
             assert!(!body.contains("@apply"));
         }
-        if asset == "runtime.js" {
-            for endpoint in ["procedures", "shards", "pages"] {
-                assert!(body.contains(&format!("/ui/_topcoat/runtime/{endpoint}")));
-            }
-        }
     }
     let font_href = html
         .split("href=\"")
@@ -183,8 +179,9 @@ async fn exercise_http(database_url: &str) {
 
     for (path, title) in [("/ui", "Provider 管理"), ("/ui/routes", "路由概览")] {
         let response = client
-            .post(format!("{base}/_topcoat/runtime/pages{path}"))
+            .post(format!("{origin}{path}"))
             .header("content-type", "application/json")
+            .header("x-topcoat-runtime", "true")
             .body(r#"{"signals":{}}"#)
             .send()
             .await
@@ -1180,20 +1177,12 @@ async fn procedure_request(
     path: &str,
     fields: &[(String, String)],
 ) -> reqwest::RequestBuilder {
-    let html = client.get(base).send().await.unwrap().text().await.unwrap();
-    let form = if path == "/providers/preview" {
-        element(&html, "button", ">探测")
-    } else {
-        element(&html, "form", &format!("action=\"/ui{path}\""))
+    let endpoint = match path {
+        "/providers/save" => "save-provider",
+        "/providers/preview" => "preview-models",
+        "/providers/action" => "provider-action",
+        _ => panic!("unknown procedure path: {path}"),
     };
-    let decoded = form.replace("&quot;", "\"");
-    let id = decoded
-        .split_once("\"t\":\"Procedure\",\"id\":\"")
-        .unwrap()
-        .1
-        .split('"')
-        .next()
-        .unwrap();
     let keys: &[&str] = if path == "/providers/save" || path == "/providers/preview" {
         &[
             "csrf",
@@ -1264,7 +1253,7 @@ async fn procedure_request(
         args
     };
     client
-        .post(format!("{base}/_topcoat/runtime/procedures/{id}"))
+        .post(format!("{base}/_topcoat/runtime/procedures/{endpoint}"))
         .header("content-type", "application/json")
         .body(serde_json::to_vec(&args).unwrap())
 }

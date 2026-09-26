@@ -22,10 +22,12 @@
 | `/ui/routes` | 路由概览 |
 | `/ui/providers/*` | 表单与兼容 POST 接口 |
 | `/ui/assets/*` | CSS 与 Topcoat runtime |
-| `/ui/_topcoat/*` | 字体、原生 procedure/shard/page 重渲染 |
+| `/ui/_topcoat/fonts/*` | Topcoat 字体 |
+| `/ui/_topcoat/runtime/procedures/*` | 原生 procedure |
+| `/ui/_topcoat/runtime/shards/*` | 原生 shard |
 | `/v1/*` | 现有明确代理入口与自动入口占位 |
 
-Topcoat 0.8.1 的 runtime 固定生成 `/_topcoat` URL，尚无应用挂载前缀配置。因此构建时只适配框架 bundle 的固定端点前缀，并更新资源 hash；服务端仅将 `/ui/_topcoat/` 还原为框架内部路径。字体通过原生 FontResolver 添加前缀。页面路由和链接直接声明 `/ui`，不做 HTML 内容替换，不改业务交互。构建与 HTTP/浏览器验收覆盖这项兼容逻辑。
+Topcoat 0.9.0 允许为 procedure 和 shard 指定路径；控制台将它们直接注册在 `/ui/_topcoat/runtime/*`，页面局部重渲染则向当前页面 URL 发起带 `X-Topcoat-Runtime` 的 POST。runtime 脚本原样嵌入，无需替换其中的 URL。框架字体路由仍固定在 `/_topcoat/fonts/*`，因此仅将对外的 `/ui/_topcoat/fonts/*` 请求映射到该内部路由；FontResolver 负责生成对外 URL。页面和资源都在 `/ui` 下。
 
 ## 配置收敛
 
@@ -61,4 +63,4 @@ OTEL_EXPORTER_OTLP_HEADERS="authorization=Basic%20<现有凭据>,stream-name=llm
 
 在项目根目录运行 `cargo run` 或 `bash scripts/dev.sh up`，进程会先迁移所选数据库，再加载 Provider 并监听端口。PostgreSQL 须设置固定的 `LLMPROXY_MASTER_KEY`；独立的 `bash scripts/dev.sh migrate` 仍可使用。访问 `http://127.0.0.1:3200/ui`，三个代理入口使用同一主机与端口。更新后需停止旧进程，再启动统一服务。
 
-技术依据：[Topcoat Router::handle](https://docs.rs/topcoat/0.8.1/topcoat/router/struct.Router.html#method.handle)；Pingora 0.9.0 `ProxyHttp::request_filter`、Session 读写接口；本地 Topcoat runtime/font 源码。
+技术依据：[Topcoat 0.9.0 发布说明](https://github.com/tokio-rs/topcoat/releases/tag/v0.9.0)；Pingora 0.9.0 `ProxyHttp::request_filter`、Session 读写接口；本地 Topcoat runtime/font 源码。

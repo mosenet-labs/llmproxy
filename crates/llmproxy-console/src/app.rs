@@ -28,9 +28,9 @@ use topcoat_ant_design::icons::{
     CLOSE_CIRCLE_FILLED, DOWN_OUTLINED, INFO_CIRCLE_FILLED, PLUS_OUTLINED, SEARCH_OUTLINED,
 };
 use topcoat_ant_design::{
-    DialogConfig, FormFieldConfig, NotificationTone, TagTone, UiLanguage, data_table, dialog,
-    dialog_close_attributes, dropdown_menu, dropdown_menu_trigger_attributes, form_field,
-    head_assets, notification, popconfirm, popconfirm_trigger_attributes, tag,
+    FormFieldConfig, NativeDialogConfig, NotificationTone, TagTone, UiLanguage, anchored_menu,
+    anchored_menu_trigger_attributes, data_table, form_field, head_assets, native_dialog,
+    native_dialog_close_attributes, notification, popconfirm, popconfirm_trigger_attributes, tag,
 };
 use url::{Host, Url};
 
@@ -295,7 +295,7 @@ pub async fn routes(cx: &Cx) -> Result<impl View> {
     })
 }
 
-#[shard]
+#[shard("/ui/_topcoat/runtime/shards/provider-list")]
 pub async fn provider_list(
     cx: &Cx,
     q: String,
@@ -399,6 +399,7 @@ pub async fn provider_list(
                 data_table(label: "Provider 列表", attrs: attributes! { class="min-w-[900px] [&_th]:px-6! [&_th]:text-[13px]! [&_td]:px-6! [&_td]:py-4! [&_td]:text-sm! [&_.gr-tag]:text-[13px]" },
                     <thead><tr><th>"名称 / 协议"</th><th>"上游地址"</th><th>"状态"</th><th>"凭据"</th><th class="text-right!">"操作"</th></tr></thead>
                     <tbody>
+                        #[key(provider.id)]
                         for provider in &providers {
                             <tr id=(format!("provider-{}", provider.id))>
                                 <td><button class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-1 block whitespace-nowrap text-[13px] leading-5 text-secondary" title=(provider.paths.supported().into_iter().map(protocol_label).collect::<Vec<_>>().join(" / "))>(provider.paths.supported().into_iter().map(protocol_compact_label).collect::<Vec<_>>().join(" · "))</span></td>
@@ -437,10 +438,10 @@ async fn provider_activation_menu(
 ) -> Result<impl View> {
     let id = format!("activate-menu-{}", provider.id);
     let label = format!("为「{}」选择当前协议", provider.name);
-    let trigger = dropdown_menu_trigger_attributes(cx, &id);
+    let trigger = anchored_menu_trigger_attributes(cx, &id);
     Ok(view! {
         <button class=(class!(TEXT_LINK, "inline-flex items-center gap-1")) type="button" (trigger)>"设为当前" icon(data: DOWN_OUTLINED, attrs: attributes! { class="size-3 text-muted" aria-hidden="true" })</button>
-        dropdown_menu(id: id.as_str(), label: label.as_str(),
+        anchored_menu(id: id.as_str(), label: label.as_str(),
             for protocol in provider.paths.supported() {
                 if provider.active_protocols.contains(&protocol) {
                     <button type="button" disabled="" aria-label=(format!("{}，当前使用", protocol_label(protocol)))><span>(protocol_short_label(protocol))</span><span aria-hidden="true">"✓"</span></button>
@@ -496,7 +497,7 @@ async fn action_form(
     )
 }
 
-#[procedure]
+#[procedure("/ui/_topcoat/runtime/procedures/preview-models")]
 pub async fn preview_models(cx: &Cx, payload: String) -> Result<Outcome> {
     let input: ProviderForm = serde_json::from_str(&payload)
         .map_err(|_| topcoat::router::error::bad_request("无效的 Provider 表单"))?;
@@ -794,7 +795,7 @@ pub async fn form(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
 
 type Outcome = std::result::Result<String, String>;
 
-#[procedure]
+#[procedure("/ui/_topcoat/runtime/procedures/save-provider")]
 pub async fn save_provider(cx: &Cx, payload: String) -> Result<Outcome> {
     let input: ProviderForm = serde_json::from_str(&payload)
         .map_err(|_| topcoat::router::error::bad_request("无效的 Provider 表单"))?;
@@ -879,7 +880,7 @@ pub struct ActionForm {
     protocol: String,
 }
 
-#[procedure]
+#[procedure("/ui/_topcoat/runtime/procedures/provider-action")]
 pub async fn provider_action(
     cx: &Cx,
     csrf: String,
@@ -1194,16 +1195,16 @@ async fn provider_editor(
         read_timeout,
         write_timeout,
     } = editor;
-    let close = dialog_close_attributes(cx, "provider-dialog");
+    let close = native_dialog_close_attributes(cx, "provider-dialog");
     let success = &controls.success;
     let failure = &controls.failure;
     let refresh = &controls.refresh;
     let unavailable: Outcome = Err("保存请求失败或结果未确认，请检查列表状态后重试".to_owned());
     let probe_unavailable: Outcome = Err("模型探测请求失败，请稍后重试".to_owned());
     Ok(view! {
-        dialog(config: DialogConfig::new("provider-dialog", "Provider 配置"),
+        native_dialog(config: NativeDialogConfig::new("provider-dialog", "Provider 配置"),
             open: Some(open), title: Some(title), busy: busy, language: UiLanguage::ChineseSimplified,
-            attrs: attributes! { cx => class="w-[min(720px,calc(100%_-_32px))]! max-[640px]:w-[calc(100%_-_24px)]! max-[640px]:max-h-[calc(100dvh_-_24px)]! [&_.gr-dialog-header]:px-6 [&_.gr-dialog-header]:py-4 [&_h2]:m-0 [&_h2]:text-lg max-[640px]:[&_.gr-dialog-header]:px-4 max-[640px]:[&_.gr-dialog-header]:py-4" @close=$(|_event: Event| api_key.set("".to_owned())) },
+            attrs: attributes! { cx => class="w-[min(720px,calc(100%_-_32px))]! max-[640px]:w-[calc(100%_-_24px)]! max-[640px]:max-h-[calc(100dvh_-_24px)]! [&_.gr-native-dialog-header]:px-6 [&_.gr-native-dialog-header]:py-4 [&_h2]:m-0 [&_h2]:text-lg max-[640px]:[&_.gr-native-dialog-header]:px-4 max-[640px]:[&_.gr-native-dialog-header]:py-4" @close=$(|_event: Event| api_key.set("".to_owned())) },
             <form class="m-0 flex min-h-0 flex-col" action="/ui/providers/save" method="post" autocomplete="off"
                 @submit=$(async |event: Event| {
                     event.prevent_default();

@@ -213,10 +213,10 @@ fn route_label(path: &str) -> &'static str {
         "/ui/providers/form" => "/ui/providers/form",
         "/ui/providers/save" => "/ui/providers/save",
         "/ui/providers/action" => "/ui/providers/action",
-        _ if path.starts_with("/_topcoat/runtime/procedures/") => {
+        _ if path.starts_with("/ui/_topcoat/runtime/procedures/") => {
             "/ui/_topcoat/runtime/procedures/:id"
         }
-        _ if path.starts_with("/_topcoat/runtime/shards/") => "/ui/_topcoat/runtime/shards/:id",
+        _ if path.starts_with("/ui/_topcoat/runtime/shards/") => "/ui/_topcoat/runtime/shards/:id",
         _ if path.starts_with("/ui/assets/") || path.starts_with("/_topcoat/") => "assets/runtime",
         _ => "unmatched",
     }
