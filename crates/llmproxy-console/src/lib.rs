@@ -69,6 +69,7 @@ impl Console {
             .route(app::ui::models::model_candidates)
             .route(app::ui::models::model_draft)
             .route(app::ui::models::load_model_candidates)
+            .route(app::ui::models::add_draft_model)
             .route(app::ui::models::remove_draft_model)
             .route(app::ui::models::save_model)
             .route(app::ui::models::save_models)

@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use llmproxy_core::{protocol::Protocol, provider::validate_upstream};
+use llmproxy_core::{
+    protocol::{MessagesAuth, Protocol},
+    provider::validate_upstream,
+};
 use llmproxy_store::{DatabaseConfig, ModelRoute, ProviderStore, StoreError};
 use tokio::{runtime::Builder, sync::oneshot, time};
 
@@ -22,6 +25,7 @@ pub struct ResolvedProvider {
     pub tls: bool,
     pub secret: String,
     pub anthropic_version: Option<String>,
+    pub messages_auth: MessagesAuth,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
@@ -110,6 +114,7 @@ impl ProviderSnapshot {
                         tls: provider.tls,
                         secret: provider.secret,
                         anthropic_version: provider.anthropic_version,
+                        messages_auth: provider.messages_auth,
                         connect_timeout_ms: provider.connect_timeout_ms,
                         read_timeout_ms: provider.read_timeout_ms,
                         write_timeout_ms: provider.write_timeout_ms,
@@ -262,7 +267,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{ProviderSnapshot, ProviderSnapshots, ResolvedModel, ResolvedProvider};
-    use llmproxy_core::protocol::Protocol;
+    use llmproxy_core::protocol::{MessagesAuth, Protocol};
 
     fn provider(host: &str, secret: &str) -> ResolvedProvider {
         ResolvedProvider {
@@ -272,6 +277,7 @@ mod tests {
             tls: true,
             secret: secret.to_owned(),
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             connect_timeout_ms: 1000,
             read_timeout_ms: 2000,
             write_timeout_ms: 3000,

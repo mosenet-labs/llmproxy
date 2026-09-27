@@ -98,6 +98,7 @@ impl TestDatabase {
                         models_path: "/models".into(),
                         models_protocol: PROTOCOLS[index],
                         anthropic_version: provider.version.map(str::to_owned),
+                        messages_auth: llmproxy_store::MessagesAuth::ApiKey,
                         connect_timeout_ms: provider.connect_ms,
                         read_timeout_ms: provider.read_ms,
                         write_timeout_ms: provider.write_ms,

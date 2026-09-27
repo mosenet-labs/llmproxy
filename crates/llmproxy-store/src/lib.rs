@@ -9,6 +9,8 @@ use std::fmt;
 
 use llmproxy_core::protocol::Protocol;
 
+pub use llmproxy_core::protocol::MessagesAuth;
+
 pub use database::{Backend, DatabaseConfig};
 pub use store::ProviderStore;
 
@@ -62,6 +64,7 @@ pub struct ProviderInput {
     pub models_path: String,
     pub models_protocol: Protocol,
     pub anthropic_version: Option<String>,
+    pub messages_auth: MessagesAuth,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
@@ -80,6 +83,7 @@ pub struct ProviderView {
     pub models_protocol: Protocol,
     pub models_probe_status: ProbeStatus,
     pub anthropic_version: Option<String>,
+    pub messages_auth: MessagesAuth,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
@@ -101,6 +105,7 @@ pub struct ActiveProvider {
     pub tls: bool,
     pub secret: String,
     pub anthropic_version: Option<String>,
+    pub messages_auth: MessagesAuth,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
@@ -184,6 +189,7 @@ pub struct ModelProbeTarget {
     pub protocol: Protocol,
     pub secret: String,
     pub anthropic_version: Option<String>,
+    pub messages_auth: MessagesAuth,
 }
 
 #[derive(Clone, Debug)]

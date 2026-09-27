@@ -25,6 +25,7 @@ pub(super) struct EditorSignals {
     models_probe_status: Signal<String>,
     models_probe_message: Signal<String>,
     anthropic_version: Signal<String>,
+    messages_auth: Signal<String>,
     connect_timeout: Signal<String>,
     read_timeout: Signal<String>,
     write_timeout: Signal<String>,
@@ -63,6 +64,7 @@ impl EditorSignals {
             models_probe_status: signal(cx, || input.models_probe_status.clone()),
             models_probe_message: signal(cx, String::new),
             anthropic_version: signal(cx, || input.anthropic_version.clone()),
+            messages_auth: signal(cx, || input.messages_auth.clone()),
             connect_timeout: signal(cx, || input.connect_timeout_ms.clone()),
             read_timeout: signal(cx, || input.read_timeout_ms.clone()),
             write_timeout: signal(cx, || input.write_timeout_ms.clone()),
@@ -94,6 +96,7 @@ pub(super) fn editor_trigger(cx: &Cx, editor: &EditorSignals, input: ProviderFor
         models_probe_status,
         models_probe_message,
         anthropic_version,
+        messages_auth,
         connect_timeout,
         read_timeout,
         write_timeout,
@@ -116,6 +119,7 @@ pub(super) fn editor_trigger(cx: &Cx, editor: &EditorSignals, input: ProviderFor
     let initial_upstream_url = input.upstream_url;
     let initial_enabled = input.enabled;
     let initial_anthropic = input.anthropic_version;
+    let initial_messages_auth = input.messages_auth;
     let initial_models_path = input.models_path;
     let initial_models_protocol = input.models_protocol;
     let initial_models_probe_status = input.models_probe_status;
@@ -138,6 +142,7 @@ pub(super) fn editor_trigger(cx: &Cx, editor: &EditorSignals, input: ProviderFor
             upstream_url.set(initial_upstream_url.to_owned());
             enabled.set(initial_enabled);
             anthropic_version.set(initial_anthropic.to_owned());
+            messages_auth.set(initial_messages_auth.to_owned());
             models_path.set(initial_models_path.to_owned());
             models_protocol.set(initial_models_protocol.to_owned());
             models_probe_status.set(initial_models_probe_status.to_owned());
@@ -184,6 +189,7 @@ pub(super) async fn provider_editor(
         models_probe_status,
         models_probe_message,
         anthropic_version,
+        messages_auth,
         connect_timeout,
         read_timeout,
         write_timeout,
@@ -197,7 +203,7 @@ pub(super) async fn provider_editor(
     Ok(view! {
         native_dialog(config: NativeDialogConfig::new("provider-dialog", "Provider 配置"),
             open: Some(open), title: Some(title), busy: busy, language: UiLanguage::ChineseSimplified,
-            attrs: attributes! { cx => class="w-[min(720px,calc(100%_-_32px))]! max-[640px]:w-[calc(100%_-_24px)]! max-[640px]:max-h-[calc(100dvh_-_24px)]! [&_.gr-native-dialog-header]:px-6 [&_.gr-native-dialog-header]:py-4 [&_h2]:m-0 [&_h2]:text-lg max-[640px]:[&_.gr-native-dialog-header]:px-4 max-[640px]:[&_.gr-native-dialog-header]:py-4" @close=$(|_event: Event| api_key.set("".to_owned())) },
+            attrs: attributes! { cx => class="w-[min(920px,calc(100%_-_32px))]! max-[640px]:w-[calc(100%_-_24px)]! max-[640px]:max-h-[calc(100dvh_-_24px)]! [&_.gr-native-dialog-header]:px-6 [&_.gr-native-dialog-header]:py-4 [&_h2]:m-0 [&_h2]:text-lg max-[640px]:[&_.gr-native-dialog-header]:px-4 max-[640px]:[&_.gr-native-dialog-header]:py-4" @close=$(|_event: Event| api_key.set("".to_owned())) },
             <form id="provider-editor-form" class="m-0 flex min-h-0 flex-col" action="/ui/providers/save" method="post" autocomplete="off"
                 @submit=$(async |event: Event| {
                     event.prevent_default();
@@ -237,9 +243,18 @@ pub(super) async fn provider_editor(
                         <h3>"接口协议与上游路径"</h3>
                         <p class=(FIELD_HINT)>"至少选择一个协议。路径只填写上游接口路径。"</p>
                         <div class="mt-4 grid gap-4">
-                            <div class="grid grid-cols-[190px_1fr] items-center gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="openai_chat" :value=$(if openai_chat.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if openai_chat.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !openai_chat.get(); openai_chat.set(selected); if !selected { if models_protocol.get() == "openai_chat" { models_protocol.set(if openai_responses.get() { "openai_responses" } else if anthropic_messages.get() { "anthropic_messages" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("openai_chat".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"OpenAI Chat"</button><input class="w-full" name="openai_chat_path" aria-label="OpenAI Chat 上游路径" :value=$(openai_chat_path.get()) @input=$(|event: Event| openai_chat_path.set(event.target.value)) :disabled=$(!openai_chat.get()) :required=$(openai_chat.get())></div>
-                            <div class="grid grid-cols-[190px_1fr] items-center gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="openai_responses" :value=$(if openai_responses.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if openai_responses.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !openai_responses.get(); openai_responses.set(selected); if !selected { if models_protocol.get() == "openai_responses" { models_protocol.set(if openai_chat.get() { "openai_chat" } else if anthropic_messages.get() { "anthropic_messages" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("openai_responses".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"OpenAI Responses"</button><input class="w-full" name="openai_responses_path" aria-label="OpenAI Responses 上游路径" :value=$(openai_responses_path.get()) @input=$(|event: Event| openai_responses_path.set(event.target.value)) :disabled=$(!openai_responses.get()) :required=$(openai_responses.get())></div>
-                            <div class="grid grid-cols-[190px_minmax(0,1fr)] items-end gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="anthropic_messages" :value=$(if anthropic_messages.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if anthropic_messages.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !anthropic_messages.get(); anthropic_messages.set(selected); if !selected { if models_protocol.get() == "anthropic_messages" { models_protocol.set(if openai_chat.get() { "openai_chat" } else if openai_responses.get() { "openai_responses" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("anthropic_messages".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"Anthropic Messages"</button><div class="flex min-w-0 items-end gap-3 max-[640px]:flex-col max-[640px]:items-stretch"><input class="min-w-0 flex-1 max-[640px]:w-full" name="anthropic_messages_path" aria-label="Anthropic Messages 上游路径" :value=$(anthropic_messages_path.get()) @input=$(|event: Event| anthropic_messages_path.set(event.target.value)) :disabled=$(!anthropic_messages.get()) :required=$(anthropic_messages.get())><div class="w-[160px] shrink-0 max-[640px]:w-full" :hidden=$(!anthropic_messages.get())>form_field(config: FormFieldConfig::new("anthropic-version", "API 版本"), <input class="w-full" id="anthropic-version" name="anthropic_version" :value=$(anthropic_version.get()) @input=$(|event: Event| { anthropic_version.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) placeholder="2023-06-01" :disabled=$(!anthropic_messages.get())>)</div></div></div>
+                            <div class="grid grid-cols-[190px_1fr] items-center gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="openai_chat" :value=$(if openai_chat.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if openai_chat.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !openai_chat.get(); openai_chat.set(selected); if !selected { if models_protocol.get() == "openai_chat" { models_protocol.set(if openai_responses.get() { "openai_responses" } else if anthropic_messages.get() { "anthropic_messages" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("openai_chat".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"OpenAIChat"</button><input class="w-full" name="openai_chat_path" aria-label="OpenAIChat 上游路径" :value=$(openai_chat_path.get()) @input=$(|event: Event| openai_chat_path.set(event.target.value)) :disabled=$(!openai_chat.get()) :required=$(openai_chat.get())></div>
+                            <div class="grid grid-cols-[190px_1fr] items-center gap-3 max-[640px]:grid-cols-1"><input type="hidden" name="openai_responses" :value=$(if openai_responses.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if openai_responses.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !openai_responses.get(); openai_responses.set(selected); if !selected { if models_protocol.get() == "openai_responses" { models_protocol.set(if openai_chat.get() { "openai_chat" } else if anthropic_messages.get() { "anthropic_messages" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("openai_responses".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"OpenAIResponses"</button><input class="w-full" name="openai_responses_path" aria-label="OpenAIResponses 上游路径" :value=$(openai_responses_path.get()) @input=$(|event: Event| openai_responses_path.set(event.target.value)) :disabled=$(!openai_responses.get()) :required=$(openai_responses.get())></div>
+                            <div class="grid grid-cols-[190px_minmax(0,1fr)] items-center gap-3 max-[640px]:grid-cols-1">
+                                <input type="hidden" name="anthropic_messages" :value=$(if anthropic_messages.get() { "true" } else { "false" })>
+                                <input type="hidden" name="messages_auth" :value=$(messages_auth.get())>
+                                <button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if anthropic_messages.get() { "true" } else { "false" }) @click=$(|_event: Event| { let selected = !anthropic_messages.get(); anthropic_messages.set(selected); if !selected { if models_protocol.get() == "anthropic_messages" { models_protocol.set(if openai_chat.get() { "openai_chat" } else if openai_responses.get() { "openai_responses" } else { "" }.to_owned()); } } else if models_protocol.get().is_empty() { models_protocol.set("anthropic_messages".to_owned()); } models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); })><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span>"AnthropicMessages"</button>
+                                <div class="grid min-w-0 grid-cols-[minmax(0,1fr)_190px_190px] items-center gap-3 max-[900px]:grid-cols-2 max-[480px]:grid-cols-1">
+                                    <input class="min-w-0 w-full max-[900px]:col-span-2 max-[480px]:col-span-1" name="anthropic_messages_path" aria-label="AnthropicMessages 上游路径" :value=$(anthropic_messages_path.get()) @input=$(|event: Event| anthropic_messages_path.set(event.target.value)) :disabled=$(!anthropic_messages.get()) :required=$(anthropic_messages.get())>
+                                    <div class="flex min-w-0 items-center gap-2" :hidden=$(!anthropic_messages.get())><label class="shrink-0 whitespace-nowrap text-sm text-heading" for="anthropic-version">"API版本"</label><input class="min-w-0 flex-1" id="anthropic-version" name="anthropic_version" :value=$(anthropic_version.get()) @input=$(|event: Event| { anthropic_version.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) placeholder="2023-06-01" :disabled=$(!anthropic_messages.get())></div>
+                                    <div class="flex min-w-0 items-center gap-2" :hidden=$(!anthropic_messages.get())><label class="shrink-0 whitespace-nowrap text-sm text-heading" for="messages-auth">"鉴权"</label>select(attrs: attributes! { cx => id="messages-auth" aria-label="Messages 鉴权方式" class="min-w-0 flex-1 [&>select]:whitespace-nowrap" :value=$(messages_auth.get()) :disabled=$(!anthropic_messages.get()) @change=$(|event: Event| { messages_auth.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) }, <option value="x-api-key">"x-api-key"</option><option value="bearer">"Bearer"</option>)</div>
+                                </div>
+                            </div>
                         </div>
                     </section>
                     <section class="[&+section]:mt-6 [&+section]:border-t [&+section]:border-border [&+section]:pt-6 [&_h3]:mt-0 [&_h3]:mb-4 [&_h3]:text-sm [&_h3]:font-semibold">
@@ -260,12 +275,13 @@ pub(super) async fn provider_editor(
                         <input type="hidden" name="models_probe_status" :value=$(models_probe_status.get())>
                         <div class="grid grid-cols-[minmax(0,1fr)_210px_auto_28px] items-end gap-3 max-[640px]:grid-cols-[minmax(0,1fr)_auto_28px] [&_input]:w-full [&_select]:w-full">
                             form_field(config: FormFieldConfig::new("models-path", "模型列表路径").required(), <input id="models-path" name="models_path" :value=$(models_path.get()) @input=$(|event: Event| { models_path.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) placeholder="/models" required="">)
-                            <div class="max-[640px]:col-span-full max-[640px]:row-start-2">form_field(config: FormFieldConfig::new("models-protocol", "探测协议").required(), <select id="models-protocol" name="models_protocol" :value=$(models_protocol.get()) @change=$(|event: Event| { models_protocol.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) required=""><option value="" disabled="">"请选择协议"</option><option value="openai_chat" :disabled=$(!openai_chat.get())>"OpenAI Chat"</option><option value="openai_responses" :disabled=$(!openai_responses.get())>"OpenAI Responses"</option><option value="anthropic_messages" :disabled=$(!anthropic_messages.get())>"Anthropic Messages"</option></select>)</div>
+                            <div class="max-[640px]:col-span-full max-[640px]:row-start-2">form_field(config: FormFieldConfig::new("models-protocol", "探测协议").required(), <select id="models-protocol" name="models_protocol" :value=$(models_protocol.get()) @change=$(|event: Event| { models_protocol.set(event.target.value); models_probe_status.set("unprobed".to_owned()); models_probe_message.set("".to_owned()); }) required=""><option value="" disabled="">"请选择协议"</option><option value="openai_chat" :disabled=$(!openai_chat.get())>"OpenAIChat"</option><option value="openai_responses" :disabled=$(!openai_responses.get())>"OpenAIResponses"</option><option value="anthropic_messages" :disabled=$(!anthropic_messages.get())>"AnthropicMessages"</option></select>)</div>
                             <button class=(BUTTON) type="button" :disabled=$(busy.get()) @click=$(async |_event: Event| {
                                 if busy.get() { return; }
                                 busy.set(true);
                                 models_probe_message.set("".to_owned());
-                                let result = raw!("await Promise.resolve(${preview_models}.call(${csrf}, ${id}.get(), ${name}.get(), ${openai_chat}.get(), ${openai_responses}.get(), ${anthropic_messages}.get(), ${upstream_url}.get(), ${api_key}.get(), ${models_path}.get(), ${models_protocol}.get(), ${anthropic_version}.get())).catch(() => ${probe_unavailable})", probe_unavailable.clone());
+                                let _payload = raw!("cx.hydrate(new URLSearchParams(new FormData(document.getElementById('provider-editor-form'))).toString())", String::new());
+                                let result = raw!("await Promise.resolve(${preview_models}.call(${_payload})).catch(() => ${probe_unavailable})", probe_unavailable.clone());
                                 busy.set(false);
                                 if result.is_ok() { models_probe_status.set("success".to_owned()); models_probe_message.set(result.unwrap()); }
                                 else { models_probe_status.set("failure".to_owned()); models_probe_message.set(result.unwrap_err()); }

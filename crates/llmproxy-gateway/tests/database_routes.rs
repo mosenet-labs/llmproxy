@@ -6,7 +6,7 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use llmproxy_store::{ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore};
 use support::*;
 
@@ -33,7 +33,7 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
         anthropic_messages: Some("/custom/messages".into()),
     };
     provider.anthropic_version = Some("2023-06-01".into());
-    let record = store.create(provider).await.unwrap();
+    let record = store.create(provider.clone()).await.unwrap();
     store
         .create_model(ModelMappingInput {
             alias: "public/mock".into(),
@@ -68,6 +68,40 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
         assert!(values(&request.headers, auth)[0].contains("shared-test-key"));
         assert_eq!(request.body, br#"{"model":"upstream-model"}"#);
     }
+    assert_eq!(
+        store.get(record.id).await.unwrap().messages_auth,
+        MessagesAuth::ApiKey
+    );
+    provider.api_key.clear();
+    provider.messages_auth = MessagesAuth::Bearer;
+    store
+        .update(record.id, record.version, provider.clone())
+        .await
+        .unwrap();
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        assert_eq!(
+            gateway
+                .request("POST", "/v1/messages", "", br#"{"model":"public/mock"}"#)
+                .status,
+            200
+        );
+        let request = requests.recv_timeout(DEADLINE).unwrap();
+        if values(&request.headers, "authorization") == ["Bearer shared-test-key"] {
+            assert!(values(&request.headers, "x-api-key").is_empty());
+            break;
+        }
+        assert!(Instant::now() < deadline, "Messages 鉴权切换未生效");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let current = store.get(record.id).await.unwrap();
+    let mut edited = provider;
+    edited.api_key.clear();
+    let saved = store
+        .update(record.id, current.version, edited)
+        .await
+        .unwrap();
+    assert_eq!(saved.messages_auth, MessagesAuth::Bearer);
     assert_eq!(gateway.request("POST", PATHS[0], "", b"{}").status, 400);
     assert_eq!(
         gateway
@@ -171,6 +205,7 @@ fn input(name: &str, port: u16, secret: &str) -> ProviderInput {
         models_path: "/models".into(),
         models_protocol: Protocol::OpenAiChat,
         anthropic_version: None,
+        messages_auth: MessagesAuth::ApiKey,
         connect_timeout_ms: 2000,
         read_timeout_ms: 15_000,
         write_timeout_ms: 2000,

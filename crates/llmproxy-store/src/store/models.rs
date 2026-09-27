@@ -174,6 +174,8 @@ impl ProviderStore {
                         tls: provider.tls,
                         secret: self.cipher.decrypt(&provider.encrypted_key)?,
                         anthropic_version: provider.anthropic_version.clone(),
+                        messages_auth: MessagesAuth::parse(&provider.messages_auth)
+                            .ok_or(StoreError::Internal)?,
                         connect_timeout_ms: provider.connect_timeout_ms,
                         read_timeout_ms: provider.read_timeout_ms,
                         write_timeout_ms: provider.write_timeout_ms,
@@ -217,6 +219,8 @@ impl ProviderStore {
                 tls: provider.tls,
                 secret: self.cipher.decrypt(&provider.encrypted_key)?,
                 anthropic_version: provider.anthropic_version,
+                messages_auth: MessagesAuth::parse(&provider.messages_auth)
+                    .ok_or(StoreError::Internal)?,
                 connect_timeout_ms: provider.connect_timeout_ms,
                 read_timeout_ms: provider.read_timeout_ms,
                 write_timeout_ms: provider.write_timeout_ms,

@@ -1,4 +1,4 @@
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use llmproxy_store::ModelProbeTarget;
 
 pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -17,13 +17,19 @@ pub(crate) async fn query_models(
     let request = client.get(url).header("accept", "application/json");
     let request = match target.protocol {
         Protocol::OpenAiChat | Protocol::OpenAiResponses => request.bearer_auth(&target.secret),
-        Protocol::AnthropicMessages => request.header("x-api-key", &target.secret).header(
-            "anthropic-version",
-            target
-                .anthropic_version
-                .as_deref()
-                .unwrap_or(DEFAULT_ANTHROPIC_VERSION),
-        ),
+        Protocol::AnthropicMessages => {
+            let request = match target.messages_auth {
+                MessagesAuth::ApiKey => request.header("x-api-key", &target.secret),
+                MessagesAuth::Bearer => request.bearer_auth(&target.secret),
+            };
+            request.header(
+                "anthropic-version",
+                target
+                    .anthropic_version
+                    .as_deref()
+                    .unwrap_or(DEFAULT_ANTHROPIC_VERSION),
+            )
+        }
     };
     let mut response = request
         .send()

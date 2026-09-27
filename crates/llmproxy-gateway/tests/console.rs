@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore};
 use reqwest::{Client, Response, StatusCode, redirect::Policy};
 
@@ -373,6 +373,7 @@ async fn exercise_http(database_url: &str) {
                 models_path: "/models".into(),
                 models_protocol: Protocol::OpenAiChat,
                 anthropic_version: None,
+                messages_auth: MessagesAuth::ApiKey,
                 connect_timeout_ms: 10000,
                 read_timeout_ms: 60000,
                 write_timeout_ms: 30000,
@@ -842,6 +843,17 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert_eq!(hidden(&editor, "models_probe_status"), "success");
+    let draft = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/add-draft-model"
+        ))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&serde_json::json!(["[]", " manual-model "])).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(draft.status(), StatusCode::OK);
+    assert!(draft.text().await.unwrap().contains("manual-model"));
     let model_form = serde_json::json!([
         csrf,
         "",
@@ -863,10 +875,6 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(response.status(), StatusCode::OK);
     let result: serde_json::Value = response.json().await.unwrap();
     assert_eq!(result["ok"], "「Unified Mock/mock-model」已创建");
-    assert_eq!(
-        received.recv_timeout(support::DEADLINE).unwrap().target,
-        "/custom/models"
-    );
     let models = client
         .get(format!("{base}/models"))
         .send()
@@ -891,6 +899,7 @@ async fn exercise_http(database_url: &str) {
     let model_id = store.list_models().await.unwrap()[0].id;
     assert!(chat.contains(&format!("value=\"{model_id}\"")));
     assert!(chat.contains("id=\"chat-protocol\""));
+    assert!(!chat.contains("id=\"chat-messages-auth\""));
     assert!(chat.contains("value=\"openai_chat\""));
     assert!(chat.contains("value=\"openai_responses\""));
     assert!(!chat.contains("value=\"anthropic_messages\""));
@@ -989,7 +998,7 @@ async fn exercise_http(database_url: &str) {
         "provider_id": provider.id.to_string(),
         "models": [
             {"model_id":"mock-model-a","alias":"Unified Mock/model-a","chat":true,"responses":false,"messages":false},
-            {"model_id":"missing-model","alias":"Unified Mock/missing","chat":true,"responses":false,"messages":false}
+            {"model_id":"mock-model-a","alias":"Unified Mock/duplicate","chat":true,"responses":false,"messages":false}
         ]
     });
     let response = client
@@ -1007,15 +1016,11 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.text().await.unwrap().contains("missing-model"));
-    assert_eq!(
-        received.recv_timeout(support::DEADLINE).unwrap().target,
-        "/custom/models"
-    );
+    assert!(response.text().await.unwrap().contains("模型重复选择"));
     assert_eq!(store.list_models().await.unwrap().len(), 1);
     let mut batch = batch;
-    batch["models"][1]["model_id"] = "mock-model-b".into();
-    batch["models"][1]["alias"] = "Unified Mock/model-b".into();
+    batch["models"][1]["model_id"] = "unlisted-model".into();
+    batch["models"][1]["alias"] = "Unified Mock/unlisted-model".into();
     batch["models"][1]["responses"] = true.into();
     batch["models"][1]["chat"] = false.into();
     let response = client
@@ -1037,11 +1042,13 @@ async fn exercise_http(database_url: &str) {
         response.json::<serde_json::Value>().await.unwrap()["ok"],
         "已导入 2 个模型"
     );
-    assert_eq!(
-        received.recv_timeout(support::DEADLINE).unwrap().target,
-        "/custom/models"
+    let models = store.list_models().await.unwrap();
+    assert_eq!(models.len(), 3);
+    assert!(
+        models
+            .iter()
+            .any(|model| model.upstream_model_id == "unlisted-model")
     );
-    assert_eq!(store.list_models().await.unwrap().len(), 3);
     let list = client
         .get(format!("{base}/providers"))
         .send()
@@ -1148,6 +1155,25 @@ async fn exercise_http(database_url: &str) {
             .as_str(),
         "failure"
     );
+    let manual = serde_json::json!([csrf, provider.id.to_string(), serde_json::json!([
+        {"model_id":"another-unlisted-model","alias":"","chat":true,"responses":false,"messages":false}
+    ]).to_string()]);
+    let response = client
+        .post(format!("{base}/_topcoat/runtime/procedures/save-models"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&manual).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"],
+        "已导入 1 个模型"
+    );
+    assert!(store.list_models().await.unwrap().iter().any(|model| {
+        model.alias == "Unified Mock/another-unlisted-model"
+            && model.upstream_model_id == "another-unlisted-model"
+    }));
     let editor = client
         .get(format!("{base}/providers/form?id={}", provider.id))
         .send()
@@ -1157,6 +1183,34 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert_eq!(hidden(&editor, "models_probe_status"), "failure");
+    assert!(editor.contains("API版本"));
+    assert!(editor.contains("name=\"messages_auth\""));
+    set(
+        &mut edit,
+        "version",
+        &store.get(provider.id).await.unwrap().version.to_string(),
+    );
+    set(&mut edit, "messages_auth", "bearer");
+    let response = post(&client, &base, "/providers/preview", &edit).await;
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("上游响应缺少 data 模型列表")
+    );
+    let request = received.recv_timeout(support::DEADLINE).unwrap();
+    assert_eq!(
+        support::values(&request.headers, "authorization"),
+        [format!("Bearer {PROVIDER_KEY}")]
+    );
+    assert!(support::values(&request.headers, "x-api-key").is_empty());
+    let response = post(&client, &base, "/providers/save", &edit).await;
+    success_notice(&client, &base, response, "update", "Unified Mock", "已保存").await;
+    assert_eq!(
+        store.get(provider.id).await.unwrap().messages_auth,
+        MessagesAuth::Bearer
+    );
     let logs = std::fs::read_to_string(&log_path).unwrap();
     let events: Vec<serde_json::Value> = logs
         .lines()
@@ -1295,6 +1349,7 @@ fn provider_form(csrf: &str, name: &str, protocol: &str) -> Vec<(String, String)
         ("models_protocol", protocol),
         ("models_probe_status", "unprobed"),
         ("anthropic_version", "2023-06-01"),
+        ("messages_auth", "x-api-key"),
         ("connect_timeout_ms", "10000"),
         ("read_timeout_ms", "60000"),
         ("write_timeout_ms", "30000"),
@@ -1357,7 +1412,7 @@ async fn procedure_request(
             .map_or("", |(_, value)| value.as_str())
     };
     let args = match path {
-        "/providers/save" => {
+        "/providers/save" | "/providers/preview" => {
             let form = url::form_urlencoded::Serializer::new(String::new())
                 .extend_pairs(
                     fields
@@ -1367,19 +1422,6 @@ async fn procedure_request(
                 .finish();
             vec![serde_json::Value::String(form)]
         }
-        "/providers/preview" => vec![
-            serde_json::json!(value("csrf")),
-            serde_json::json!(value("id")),
-            serde_json::json!(value("name")),
-            serde_json::json!(value("openai_chat") == "true"),
-            serde_json::json!(value("openai_responses") == "true"),
-            serde_json::json!(value("anthropic_messages") == "true"),
-            serde_json::json!(value("upstream_url")),
-            serde_json::json!(value("api_key")),
-            serde_json::json!(value("models_path")),
-            serde_json::json!(value("models_protocol")),
-            serde_json::json!(value("anthropic_version")),
-        ],
         _ => ["csrf", "id", "version", "action"]
             .into_iter()
             .map(|key| serde_json::Value::String(value(key).to_owned()))

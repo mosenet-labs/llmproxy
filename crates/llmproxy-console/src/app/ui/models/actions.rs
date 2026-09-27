@@ -71,20 +71,8 @@ pub async fn save_models(
             return Err(StoreError::Validation("请至少选择一个模型".into()));
         }
         let provider = store.get(provider_id).await?;
-        let target = store.probe_enabled_target(provider_id).await?;
-        let candidates: HashSet<_> = query_models(target)
-            .await
-            .map_err(StoreError::Validation)?
-            .into_iter()
-            .collect();
         let mut mappings = Vec::with_capacity(input.models.len());
         for model in input.models {
-            if !candidates.contains(&model.model_id) {
-                return Err(StoreError::Validation(format!(
-                    "「{}」不在 Provider 探测结果中",
-                    model.model_id
-                )));
-            }
             let mut protocols = Vec::new();
             if model.chat {
                 protocols.push(Protocol::OpenAiChat);
@@ -178,17 +166,6 @@ pub async fn save_model(
         } else {
             None
         };
-        if existing.as_ref().is_none_or(|old| {
-            old.provider_id != provider_id || old.upstream_model_id != input.upstream_model_id
-        }) {
-            let target = store.probe_enabled_target(provider_id).await?;
-            let candidates = query_models(target).await.map_err(StoreError::Validation)?;
-            if !candidates.contains(&input.upstream_model_id) {
-                return Err(StoreError::Validation(
-                    "所选模型不在 Provider 探测结果中".into(),
-                ));
-            }
-        }
         let saved = if let Some(old) = existing {
             let version = input
                 .version
@@ -272,6 +249,7 @@ pub async fn probe_saved_model(
             protocol,
             secret: provider.secret,
             anthropic_version: provider.anthropic_version,
+            messages_auth: provider.messages_auth,
             timeout: Duration::from_millis(
                 provider
                     .connect_timeout_ms
@@ -349,5 +327,15 @@ pub(super) async fn model_delete(
 pub async fn remove_draft_model(selection: String, model_id: String) -> Result<String> {
     let mut selected: Vec<String> = serde_json::from_str(&selection).unwrap_or_default();
     selected.retain(|id| id != &model_id);
+    Ok(serde_json::to_string(&selected)?)
+}
+
+#[procedure("/ui/_topcoat/runtime/procedures/add-draft-model")]
+pub async fn add_draft_model(selection: String, model_id: String) -> Result<String> {
+    let mut selected: Vec<String> = serde_json::from_str(&selection).unwrap_or_default();
+    let model_id = model_id.trim();
+    if !model_id.is_empty() && !selected.iter().any(|id| id == model_id) {
+        selected.push(model_id.to_owned());
+    }
     Ok(serde_json::to_string(&selected)?)
 }

@@ -8,8 +8,8 @@ use toasty::{Connection, Db, Executor, Transaction};
 use toasty_core::driver::operation::TransactionMode;
 
 use crate::{
-    ActiveProvider, ModelMappingInput, ModelMappingView, ModelProbeTarget, ModelRoute, ProbeStatus,
-    ProviderInput, ProviderView, StoreError, StoreResult,
+    ActiveProvider, MessagesAuth, ModelMappingInput, ModelMappingView, ModelProbeTarget,
+    ModelRoute, ProbeStatus, ProviderInput, ProviderView, StoreError, StoreResult,
     crypto::KeyCipher,
     database::Backend,
     model::{ModelMapping, Provider, RouteBinding, StoreKey, protocol},
@@ -499,6 +499,7 @@ mod tests {
             models_path: "/models".into(),
             models_protocol: Protocol::OpenAiChat,
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             connect_timeout_ms: 1000,
             read_timeout_ms: 1000,
             write_timeout_ms: 1000,
@@ -634,6 +635,7 @@ mod tests {
             models_path: "/models".into(),
             models_protocol: Protocol::OpenAiChat,
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             connect_timeout_ms: 1000,
             read_timeout_ms: 1000,
             write_timeout_ms: 1000,

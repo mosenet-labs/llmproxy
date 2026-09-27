@@ -26,6 +26,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0005_model_mappings.sql",
         include_str!("../../migrations/postgresql/0005_model_mappings.sql"),
     ),
+    MigrationFile::new(
+        202609270001,
+        "0006_messages_auth.sql",
+        include_str!("../../migrations/postgresql/0006_messages_auth.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -108,5 +113,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202609260001,
         "0016_model_mappings.sql",
         include_str!("../../migrations/sqlite/0016_model_mappings.sql"),
+    ),
+    MigrationFile::new(
+        202609270001,
+        "0017_messages_auth.sql",
+        include_str!("../../migrations/sqlite/0017_messages_auth.sql"),
     ),
 ]);

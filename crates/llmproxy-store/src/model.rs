@@ -1,4 +1,4 @@
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::protocol::{MessagesAuth, Protocol};
 
 use crate::{ProbeStatus, ProviderPaths, ProviderView, StoreError, StoreResult};
 
@@ -22,6 +22,7 @@ pub(crate) struct Provider {
     pub models_protocol: String,
     pub models_probe_status: String,
     pub anthropic_version: Option<String>,
+    pub messages_auth: String,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
@@ -97,6 +98,7 @@ impl Provider {
             models_protocol: protocol(&self.models_protocol)?,
             models_probe_status: ProbeStatus::parse(&self.models_probe_status)?,
             anthropic_version: self.anthropic_version.clone(),
+            messages_auth: MessagesAuth::parse(&self.messages_auth).ok_or(StoreError::Internal)?,
             connect_timeout_ms: self.connect_timeout_ms,
             read_timeout_ms: self.read_timeout_ms,
             write_timeout_ms: self.write_timeout_ms,

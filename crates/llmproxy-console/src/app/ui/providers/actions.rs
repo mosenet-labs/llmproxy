@@ -1,34 +1,8 @@
 use super::*;
 
 #[procedure("/ui/_topcoat/runtime/procedures/preview-models")]
-pub async fn preview_models(
-    cx: &Cx,
-    csrf: String,
-    id: String,
-    name: String,
-    openai_chat: bool,
-    openai_responses: bool,
-    anthropic_messages: bool,
-    upstream_url: String,
-    api_key: String,
-    models_path: String,
-    models_protocol: String,
-    anthropic_version: String,
-) -> Result<Outcome> {
-    let input = ProviderForm {
-        csrf,
-        id: (!id.is_empty()).then_some(id),
-        name,
-        openai_chat,
-        openai_responses,
-        anthropic_messages,
-        upstream_url,
-        api_key,
-        models_path,
-        models_protocol,
-        anthropic_version,
-        ..ProviderForm::default()
-    };
+pub async fn preview_models(cx: &Cx, payload: String) -> Result<Outcome> {
+    let Form(input) = Form::<ProviderForm>::from_bytes(payload.as_bytes())?;
     check_csrf(cx, &input.csrf)?;
     let state = app_context::<AppState>(cx);
     let name = if input.name.trim().is_empty() {

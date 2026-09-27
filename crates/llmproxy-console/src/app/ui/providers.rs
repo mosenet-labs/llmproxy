@@ -2,7 +2,9 @@
 #![expect(clippy::too_many_arguments)]
 
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProbeStatus, ProviderInput, ProviderPaths, ProviderView, StoreError};
+use llmproxy_store::{
+    MessagesAuth, ProbeStatus, ProviderInput, ProviderPaths, ProviderView, StoreError,
+};
 use serde::Deserialize;
 use topcoat::{
     Result,
@@ -22,7 +24,7 @@ use topcoat_ant_design::icons::{
 use topcoat_ant_design::{
     FormFieldConfig, NativeDialogConfig, NotificationTone, TagTone, UiLanguage, data_table,
     form_field, native_dialog, native_dialog_close_attributes, notification, popconfirm,
-    popconfirm_trigger_attributes, tag,
+    popconfirm_trigger_attributes, select, tag,
 };
 use url::{Host, Url};
 
@@ -372,6 +374,8 @@ pub struct ProviderForm {
     models_probe_status: String,
     #[serde(default)]
     anthropic_version: String,
+    #[serde(default = "default_messages_auth")]
+    messages_auth: String,
     connect_timeout_ms: String,
     read_timeout_ms: String,
     write_timeout_ms: String,
@@ -379,6 +383,10 @@ pub struct ProviderForm {
 
 fn default_probe_status() -> String {
     ProbeStatus::Unprobed.as_str().to_owned()
+}
+
+fn default_messages_auth() -> String {
+    MessagesAuth::ApiKey.as_str().to_owned()
 }
 
 impl Default for ProviderForm {
@@ -401,6 +409,7 @@ impl Default for ProviderForm {
             models_protocol: Protocol::OpenAiChat.as_str().to_owned(),
             models_probe_status: ProbeStatus::Unprobed.as_str().to_owned(),
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.to_owned(),
+            messages_auth: default_messages_auth(),
             connect_timeout_ms: "10000".to_owned(),
             read_timeout_ms: "60000".to_owned(),
             write_timeout_ms: "30000".to_owned(),
@@ -444,6 +453,7 @@ impl From<ProviderView> for ProviderForm {
                     DEFAULT_ANTHROPIC_VERSION.to_owned()
                 }
             }),
+            messages_auth: provider.messages_auth.as_str().to_owned(),
             connect_timeout_ms: provider.connect_timeout_ms.to_string(),
             read_timeout_ms: provider.read_timeout_ms.to_string(),
             write_timeout_ms: provider.write_timeout_ms.to_string(),
@@ -480,6 +490,8 @@ impl ProviderForm {
             } else {
                 None
             },
+            messages_auth: MessagesAuth::parse(&self.messages_auth)
+                .ok_or_else(|| "Messages 鉴权方式无效".to_owned())?,
             connect_timeout_ms: 10_000,
             read_timeout_ms: 60_000,
             write_timeout_ms: 30_000,
@@ -518,6 +530,8 @@ impl ProviderForm {
             } else {
                 Some(self.anthropic_version.trim().to_owned())
             },
+            messages_auth: MessagesAuth::parse(&self.messages_auth)
+                .ok_or_else(|| "Messages 鉴权方式无效".to_owned())?,
             connect_timeout_ms: timeout(&self.connect_timeout_ms)?,
             read_timeout_ms: timeout(&self.read_timeout_ms)?,
             write_timeout_ms: timeout(&self.write_timeout_ms)?,

@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use llmproxy_core::{
-    protocol::Protocol,
+    protocol::{MessagesAuth, Protocol},
     routing::{Route, match_route},
 };
 use pingora::{
@@ -305,7 +305,12 @@ impl ProxyHttp for Gateway {
         request.remove_header("digest");
         match protocol {
             Protocol::AnthropicMessages => {
-                request.insert_header("x-api-key", provider.secret.as_str())?;
+                if provider.messages_auth == MessagesAuth::Bearer {
+                    request
+                        .insert_header("authorization", format!("Bearer {}", provider.secret))?;
+                } else {
+                    request.insert_header("x-api-key", provider.secret.as_str())?;
+                }
                 if let Some(version) = &provider.anthropic_version {
                     request.insert_header("anthropic-version", version.as_str())?;
                 }

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde_json::{Value, json};
 
@@ -10,6 +10,7 @@ pub struct InferenceProbeTarget {
     pub protocol: Protocol,
     pub secret: String,
     pub anthropic_version: Option<String>,
+    pub messages_auth: MessagesAuth,
     pub timeout: Duration,
 }
 
@@ -367,10 +368,16 @@ async fn send_once(
         .json(&body);
     let request = match target.protocol {
         Protocol::OpenAiChat | Protocol::OpenAiResponses => request.bearer_auth(&target.secret),
-        Protocol::AnthropicMessages => request.header("x-api-key", &target.secret).header(
-            "anthropic-version",
-            target.anthropic_version.as_deref().unwrap_or("2023-06-01"),
-        ),
+        Protocol::AnthropicMessages => {
+            let request = match target.messages_auth {
+                MessagesAuth::ApiKey => request.header("x-api-key", &target.secret),
+                MessagesAuth::Bearer => request.bearer_auth(&target.secret),
+            };
+            request.header(
+                "anthropic-version",
+                target.anthropic_version.as_deref().unwrap_or("2023-06-01"),
+            )
+        }
     };
     let mut response = match request.send().await {
         Ok(response) => response,
@@ -553,6 +560,16 @@ mod tests {
         body: &str,
         model_id: &str,
     ) -> (ProbeResult, String) {
+        fake_upstream_model_auth(protocol, status, body, model_id, MessagesAuth::ApiKey).await
+    }
+
+    async fn fake_upstream_model_auth(
+        protocol: Protocol,
+        status: u16,
+        body: &str,
+        model_id: &str,
+        messages_auth: MessagesAuth,
+    ) -> (ProbeResult, String) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let reply = body.to_owned();
@@ -567,6 +584,7 @@ mod tests {
             protocol,
             secret: "test-secret".into(),
             anthropic_version: Some("2023-06-01".into()),
+            messages_auth,
             timeout: Duration::from_secs(3),
         };
         let result = ModelProber::new()
@@ -640,6 +658,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_probe_uses_provider_bearer_auth() {
+        let (_, request) = fake_upstream_model_auth(
+            Protocol::AnthropicMessages,
+            200,
+            r#"{"type":"message","content":[],"usage":{"input_tokens":8,"output_tokens":1}}"#,
+            "test-model",
+            MessagesAuth::Bearer,
+        )
+        .await;
+        let request = request.to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer test-secret"));
+        assert!(!request.contains("x-api-key:"));
+    }
+
+    #[tokio::test]
     async fn separates_model_not_found_from_upstream_failures() {
         let (missing, _) = fake_upstream(
             Protocol::OpenAiChat,
@@ -694,6 +727,7 @@ mod tests {
             protocol: Protocol::OpenAiChat,
             secret: "test-secret".into(),
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             timeout: Duration::from_secs(3),
         };
         let result = ModelProber::new()
@@ -738,6 +772,7 @@ mod tests {
             protocol: Protocol::OpenAiChat,
             secret: "test-secret".into(),
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             timeout: Duration::from_secs(3),
         };
         let result = ModelProber::new()
@@ -806,6 +841,7 @@ mod tests {
             protocol: Protocol::OpenAiChat,
             secret: "test-secret".into(),
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             timeout: Duration::from_secs(3),
         };
         let result = ModelProber::new()
@@ -842,6 +878,7 @@ mod tests {
             protocol: Protocol::AnthropicMessages,
             secret: "test-secret".into(),
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             timeout: Duration::from_secs(3),
         };
         let result = ModelProber::new()
@@ -881,6 +918,7 @@ mod tests {
             protocol: Protocol::OpenAiResponses,
             secret: "test-secret".into(),
             anthropic_version: None,
+            messages_auth: MessagesAuth::ApiKey,
             timeout: Duration::from_secs(3),
         };
         let result = ModelProber::new()

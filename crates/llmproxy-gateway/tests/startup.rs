@@ -144,6 +144,7 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
                 models_path: "/models".into(),
                 models_protocol: Protocol::OpenAiChat,
                 anthropic_version: None,
+                messages_auth: llmproxy_store::MessagesAuth::ApiKey,
                 connect_timeout_ms: 1000,
                 read_timeout_ms: 1000,
                 write_timeout_ms: 1000,

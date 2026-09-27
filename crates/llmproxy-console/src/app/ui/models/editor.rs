@@ -15,11 +15,11 @@ pub(super) struct Editor {
     model_id: Signal<String>,
     model_search: Signal<String>,
     model_menu_open: Signal<bool>,
+    manual_model_id: Signal<String>,
+    manual_open: Signal<bool>,
     selected_models: Signal<String>,
-    draft_revision: Signal<f64>,
     candidates: Signal<String>,
-    candidate_error: Signal<String>,
-    candidate_busy: Signal<bool>,
+    candidate_status: Signal<String>,
     chat: Signal<bool>,
     responses: Signal<bool>,
     messages: Signal<bool>,
@@ -53,11 +53,11 @@ impl Editor {
             model_id: signal(cx, String::new),
             model_search: signal(cx, String::new),
             model_menu_open: signal(cx, || false),
+            manual_model_id: signal(cx, String::new),
+            manual_open: signal(cx, || false),
             selected_models: signal(cx, || "[]".to_owned()),
-            draft_revision: signal(cx, || 0.0),
             candidates: signal(cx, || "[]".to_owned()),
-            candidate_error: signal(cx, String::new),
-            candidate_busy: signal(cx, || false),
+            candidate_status: signal(cx, String::new),
             chat: signal(cx, || false),
             responses: signal(cx, || false),
             messages: signal(cx, || false),
@@ -120,11 +120,11 @@ pub(super) fn editor_trigger(
         model_id: selected_model,
         model_search,
         model_menu_open,
+        manual_model_id,
+        manual_open,
         selected_models,
-        draft_revision,
         candidates,
-        candidate_error,
-        candidate_busy,
+        candidate_status,
         chat: selected_chat,
         responses: selected_responses,
         messages: selected_messages,
@@ -170,11 +170,11 @@ pub(super) fn editor_trigger(
         selected_model.set(model_id.to_owned());
         model_search.set("".to_owned());
         model_menu_open.set(false);
+        manual_model_id.set("".to_owned());
+        manual_open.set(false);
         selected_models.set("[]".to_owned());
-        draft_revision.increment();
         candidates.set("[]".to_owned());
-        candidate_error.set("".to_owned());
-        candidate_busy.set(false);
+        candidate_status.set("".to_owned());
         selected_chat.set(chat);
         selected_responses.set(responses);
         selected_messages.set(messages);
@@ -217,12 +217,12 @@ async fn provider_search(
         supports_responses,
         supports_messages,
         selected_models,
-        draft_revision,
         candidates,
-        candidate_error,
-        candidate_busy,
+        candidate_status,
         model_search,
         model_menu_open,
+        manual_model_id,
+        manual_open,
         ..
     } = editor;
     let _root_id = "model-provider-select".to_owned();
@@ -273,18 +273,18 @@ async fn provider_search(
                             supports_messages.set(has_messages);
                             selected_models.set("[]".to_owned());
                             candidates.set("[]".to_owned());
-                            candidate_error.set("".to_owned());
+                            candidate_status.set("".to_owned());
                             model_search.set("".to_owned());
                             model_menu_open.set(false);
-                            draft_revision.increment();
+                            manual_model_id.set("".to_owned());
+                            manual_open.set(false);
                             let creating = editing_id.get().is_empty();
-                            if creating { candidate_busy.set(true); }
+                            if creating { candidate_status.set("loading".to_owned()); }
                             let result = raw!("await Promise.resolve(${creating}.dehydrate() ? ${load_model_candidates}.call(${option_id}) : ${unavailable}).catch(() => ${unavailable})", unavailable.clone());
                             if creating {
                                 if provider_id.get() == option_id {
-                                    candidate_busy.set(false);
-                                    if result.is_ok() { candidates.set(result.unwrap()); draft_revision.increment(); }
-                                    else { candidate_error.set(result.unwrap_err()); }
+                                    if result.is_ok() { candidates.set(result.unwrap()); candidate_status.set("".to_owned()); }
+                                    else { candidate_status.set(result.unwrap_err()); }
                                 }
                             }
                         }) };
@@ -340,30 +340,30 @@ async fn draft_model_row(
 #[shard("/ui/_topcoat/runtime/shards/model-draft")]
 pub async fn model_draft(
     cx: &Cx,
-    revision: f64,
     provider_id: Signal<String>,
     provider_name: Signal<String>,
     candidates: Signal<String>,
+    candidate_status: Signal<String>,
     selected: Signal<String>,
     search: Signal<String>,
     menu_open: Signal<bool>,
+    manual_model_id: Signal<String>,
+    manual_open: Signal<bool>,
     supports_chat: Signal<bool>,
     supports_responses: Signal<bool>,
     supports_messages: Signal<bool>,
 ) -> Result<impl View> {
     let _ = cx;
-    let _ = revision;
-    let available: Vec<String> =
-        serde_json::from_str(&candidates.get_untracked()).unwrap_or_default();
+    let available: Vec<String> = serde_json::from_str(&candidates.get()).unwrap_or_default();
+    let discovered_count = available.len();
     let selected_ids: Vec<String> = serde_json::from_str(&selected.get()).unwrap_or_default();
-    let available_ids: HashSet<_> = available.iter().map(String::as_str).collect();
     let mut chosen = HashSet::new();
     let rows: Vec<_> = selected_ids
         .into_iter()
-        .filter(|id| available_ids.contains(id.as_str()) && chosen.insert(id.clone()))
+        .filter(|id| chosen.insert(id.clone()))
         .collect();
     let mut seen = HashSet::new();
-    let options: Vec<SearchOption> = available
+    let mut options: Vec<SearchOption> = available
         .into_iter()
         .filter(|id| seen.insert(id.clone()))
         .map(|id| SearchOption {
@@ -371,33 +371,57 @@ pub async fn model_draft(
             label: id,
         })
         .collect();
+    for id in &rows {
+        if seen.insert(id.clone()) {
+            options.push(SearchOption {
+                value: id.clone(),
+                label: id.clone(),
+            });
+        }
+    }
     let only_one = [
-        supports_chat.get_untracked(),
-        supports_responses.get_untracked(),
-        supports_messages.get_untracked(),
+        supports_chat.get(),
+        supports_responses.get(),
+        supports_messages.get(),
     ]
     .into_iter()
     .filter(|enabled| *enabled)
     .count()
         == 1;
-    let provider_key = provider_id.get_untracked();
-    let provider_label = provider_name.get_untracked();
-    let has_chat = supports_chat.get_untracked();
-    let has_responses = supports_responses.get_untracked();
-    let has_messages = supports_messages.get_untracked();
+    let provider_key = provider_id.get();
+    let provider_label = provider_name.get();
+    let has_chat = supports_chat.get();
+    let has_responses = supports_responses.get();
+    let has_messages = supports_messages.get();
     Ok(view! {
             <div class="min-w-0">
                 <label class="mb-2 block text-sm font-semibold text-heading" for="model-select-input">"选择上游模型"<span class="ml-1 text-[#ff4d4f]">"*"</span></label>
                 if options.is_empty() {
                     <input id="model-select-input" class="w-full" type="search" placeholder="搜索上游模型" disabled="">
                 } else {
-                    search_multi_select(id: "model-select", options: &options, selected: &selected, search: &search, open: &menu_open)
+                    search_multi_select(id: "model-select", options: &options, selected: &selected, search: &search, open: &menu_open, label: Some("上游模型"), placeholder: Some("搜索上游模型"), language: UiLanguage::ChineseSimplified)
                 }
-                <p class="mt-2 mb-0 text-xs text-secondary" role="status">
-                    if provider_id.get_untracked().is_empty() { "先选择 Provider，再从探测结果中选择模型。" }
-                    else if options.is_empty() { "模型接口未返回可选模型。" }
-                    else { (format!("探测到 {} 个模型，可搜索并一次选择多个。", options.len())) }
-                </p>
+                <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <p class="m-0 text-xs text-secondary" role="status">
+                        if provider_id.get().is_empty() { "先选择 Provider，再选择或手动添加模型。" }
+                        else if candidate_status.get() == "loading" { "正在探测模型列表，也可以先手动添加。" }
+                        else if discovered_count == 0 { "模型列表暂无可选项，也可以手动添加。" }
+                        else { (format!("探测到 {discovered_count} 个模型，可搜索并一次选择多个。")) }
+                    </p>
+                    <button class="shrink-0 border-0 bg-transparent p-0 text-xs font-medium text-primary hover:underline" type="button" :hidden=$(provider_id.get().is_empty()) @click=$(|_event: Event| manual_open.set(!manual_open.get()))>$(if manual_open.get() { "收起手动添加" } else { "+ 手动添加模型 ID" })</button>
+                </div>
+                <p class="mt-2 mb-0 text-xs text-[#cf1322]" role="alert" :hidden=$(if candidate_status.get() == "loading" { true } else { candidate_status.get().is_empty() })>$(candidate_status.get())</p>
+                <div class="mt-3 flex items-center gap-2 rounded-md border border-border bg-surface/40 p-2 max-[480px]:flex-wrap" :hidden=$(!manual_open.get())>
+                    <input id="manual-model-id" class="min-w-0 flex-1 max-[480px]:basis-full" type="text" aria-label="手动输入上游模型 ID" placeholder="输入上游模型 ID" maxlength="200" autocomplete="off" :value=$(manual_model_id.get()) @input=$(|event: Event| manual_model_id.set(event.target.value)) @keydown=$(|_event: Event| {
+                        raw!("if (${_event}.key.dehydrate() === 'Enter') { ${_event}.prevent_default(); document.getElementById('manual-model-add')?.click(); }", ());
+                    })>
+                    <button id="manual-model-add" class=(BUTTON) type="button" :disabled=$(manual_model_id.get().trim().is_empty()) @click=$(async |_event: Event| {
+                        selected.set(add_draft_model(selected.get(), manual_model_id.get()).await);
+                        manual_model_id.set("".to_owned());
+                        manual_open.set(false);
+                    })>"添加"</button>
+                </div>
+                <p class="mt-2 mb-0 text-xs text-secondary" :hidden=$(!manual_open.get())>"手动添加的模型不会经过列表校验；保存后可在编辑页探测可用性。"</p>
             </div>
             if !rows.is_empty() {
                 <div class="col-span-full mt-2">
@@ -453,13 +477,13 @@ pub(super) async fn model_editor(
         supports_chat,
         supports_responses,
         supports_messages,
-        draft_revision,
         candidates,
         selected_models,
         model_search,
         model_menu_open,
-        candidate_error,
-        candidate_busy,
+        manual_model_id,
+        manual_open,
+        candidate_status,
         probe_protocol,
         probe_tokens,
         probe_busy,
@@ -505,11 +529,7 @@ pub(super) async fn model_editor(
                             provider_search(providers: providers, editor: editor)
                         </div>
                         <div class="contents" :hidden=$(!id.get().is_empty())>
-                            <p class="mt-8 mb-0 text-sm text-secondary" role="status" :hidden=$(!candidate_busy.get())>"正在探测上游模型…"</p>
-                            <p class="mt-8 mb-0 text-sm text-[#cf1322]" role="alert" :hidden=$(candidate_error.get().is_empty())>$(candidate_error.get())</p>
-                            <div class="contents" :hidden=$(if candidate_busy.get() { true } else { !candidate_error.get().is_empty() })>
-                                model_draft(revision: $(draft_revision.get()), provider_id: provider_id.clone(), provider_name: provider_name.clone(), candidates: candidates.clone(), selected: selected_models.clone(), search: model_search.clone(), menu_open: model_menu_open.clone(), supports_chat: supports_chat.clone(), supports_responses: supports_responses.clone(), supports_messages: supports_messages.clone())
-                            </div>
+                            model_draft(provider_id: provider_id.clone(), provider_name: provider_name.clone(), candidates: candidates.clone(), candidate_status: candidate_status.clone(), selected: selected_models.clone(), search: model_search.clone(), menu_open: model_menu_open.clone(), manual_model_id: manual_model_id.clone(), manual_open: manual_open.clone(), supports_chat: supports_chat.clone(), supports_responses: supports_responses.clone(), supports_messages: supports_messages.clone())
                         </div>
                     </div>
                     <div :hidden=$(id.get().is_empty())>
@@ -524,7 +544,7 @@ pub(super) async fn model_editor(
                                         alias.push_str(model_id.get());
                                     }
                                 }
-                            }) placeholder="输入关键词搜索探测到的模型" :disabled=$(provider_id.get().is_empty())>
+                            }) placeholder="搜索探测结果，或手动输入模型 ID" :disabled=$(provider_id.get().is_empty())>
                         )</div>
                         model_candidates(provider_id: $(provider_id.get()), open: $(if id.get().is_empty() { false } else { open.get() }))
                         <div class="mt-6">form_field(config: FormFieldConfig::new("model-alias", "客户端别名"),

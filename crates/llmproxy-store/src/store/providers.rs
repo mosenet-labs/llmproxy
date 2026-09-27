@@ -57,6 +57,7 @@ impl ProviderStore {
             .models_protocol(input.models_protocol.as_str())
             .models_probe_status(status.as_str())
             .anthropic_version(input.anthropic_version)
+            .messages_auth(input.messages_auth.as_str())
             .connect_timeout_ms(input.connect_timeout_ms)
             .read_timeout_ms(input.read_timeout_ms)
             .write_timeout_ms(input.write_timeout_ms)
@@ -119,7 +120,8 @@ impl ProviderStore {
             || input.models_path != provider.models_path
             || input.models_protocol.as_str() != provider.models_protocol
             || (!input.api_key.is_empty())
-            || input.anthropic_version != provider.anthropic_version;
+            || input.anthropic_version != provider.anthropic_version
+            || input.messages_auth.as_str() != provider.messages_auth;
         let probe_status = status
             .map(|status| status.as_str().to_owned())
             .unwrap_or_else(|| {
@@ -144,6 +146,7 @@ impl ProviderStore {
             .models_protocol(input.models_protocol.as_str())
             .models_probe_status(probe_status)
             .anthropic_version(input.anthropic_version)
+            .messages_auth(input.messages_auth.as_str())
             .connect_timeout_ms(input.connect_timeout_ms)
             .read_timeout_ms(input.read_timeout_ms)
             .write_timeout_ms(input.write_timeout_ms)
@@ -271,6 +274,8 @@ impl ProviderStore {
                 tls: provider.tls,
                 secret: self.cipher.decrypt(&provider.encrypted_key)?,
                 anthropic_version: provider.anthropic_version,
+                messages_auth: MessagesAuth::parse(&provider.messages_auth)
+                    .ok_or(StoreError::Internal)?,
                 connect_timeout_ms: provider.connect_timeout_ms,
                 read_timeout_ms: provider.read_timeout_ms,
                 write_timeout_ms: provider.write_timeout_ms,
@@ -293,6 +298,8 @@ impl ProviderStore {
             protocol: protocol(&provider.models_protocol)?,
             secret: self.cipher.decrypt(&provider.encrypted_key)?,
             anthropic_version: provider.anthropic_version,
+            messages_auth: MessagesAuth::parse(&provider.messages_auth)
+                .ok_or(StoreError::Internal)?,
         };
         tx.commit().await?;
         Ok(target)
@@ -325,6 +332,7 @@ impl ProviderStore {
             protocol: input.models_protocol,
             secret,
             anthropic_version: input.anthropic_version,
+            messages_auth: input.messages_auth,
         })
     }
 }

@@ -31,8 +31,8 @@ mod editor;
 
 use actions::model_delete;
 pub(crate) use actions::{
-    delete_model, load_model_candidates, probe_saved_model, remove_draft_model, save_model,
-    save_models,
+    add_draft_model, delete_model, load_model_candidates, probe_saved_model, remove_draft_model,
+    save_model, save_models,
 };
 pub(crate) use editor::model_draft;
 use editor::{Editor, editor_trigger, model_editor};
@@ -186,7 +186,7 @@ pub async fn model_workspace(
                 if !query.is_empty() || !protocol.is_empty() || !provider.is_empty() { <button class=(class!(TEXT_LINK, "px-1")) type="button" (reset.clone())>"重置"</button> }
             </form>
             if all.is_empty() {
-                <div class="border-t border-border px-6 py-14 text-center"><h3 class="m-0 text-base font-medium">"尚未添加模型"</h3><p class="mt-2 mb-0 text-sm text-secondary">"先启用 Provider，再从其模型列表选择模型。"</p>if providers.is_empty() { <a class=(class!(BUTTON, PRIMARY, "mt-5")) href=(href!(super::providers::list))>"管理 Providers"</a> } else { <button class=(class!(BUTTON, PRIMARY, "mt-5")) type="button" (editor_trigger(cx, &editor, None, None))>"新建模型"</button> }</div>
+                <div class="border-t border-border px-6 py-14 text-center"><h3 class="m-0 text-base font-medium">"尚未添加模型"</h3><p class="mt-2 mb-0 text-sm text-secondary">"先启用 Provider，再选择或手动添加模型。"</p>if providers.is_empty() { <a class=(class!(BUTTON, PRIMARY, "mt-5")) href=(href!(super::providers::list))>"管理 Providers"</a> } else { <button class=(class!(BUTTON, PRIMARY, "mt-5")) type="button" (editor_trigger(cx, &editor, None, None))>"新建模型"</button> }</div>
             } else if filtered.is_empty() {
                 <div class="border-t border-border px-6 py-12 text-center text-sm text-secondary">"没有找到匹配的模型"</div>
             } else {
@@ -240,6 +240,6 @@ pub async fn model_candidates(cx: &Cx, provider_id: String, open: bool) -> Resul
     };
     Ok(view! {
         <datalist id="model-candidates">if let Ok(candidates) = &result { for candidate in candidates { <option value=(candidate.as_str())></option> } }</datalist>
-        if open && !provider_id.is_empty() { <p class="mt-2 mb-0 text-[13px] text-secondary" role="status">(match &result { Ok(candidates) => format!("探测到 {} 个模型，可输入关键词搜索并选择。", candidates.len()), Err(error) => format!("模型探测失败：{error}") })</p> }
+        if open && !provider_id.is_empty() { <p class="mt-2 mb-0 text-[13px] text-secondary" role="status">(match &result { Ok(candidates) => format!("探测到 {} 个模型，可搜索选择或直接填写模型 ID。", candidates.len()), Err(error) => format!("模型探测失败：{error}；仍可直接填写模型 ID。") })</p> }
     })
 }

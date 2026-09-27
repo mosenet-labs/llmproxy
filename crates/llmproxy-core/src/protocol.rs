@@ -1,5 +1,29 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MessagesAuth {
+    #[default]
+    ApiKey,
+    Bearer,
+}
+
+impl MessagesAuth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApiKey => "x-api-key",
+            Self::Bearer => "bearer",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "x-api-key" => Some(Self::ApiKey),
+            "bearer" => Some(Self::Bearer),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {

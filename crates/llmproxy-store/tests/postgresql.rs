@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use llmproxy_store::{ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore, StoreError};
 
 fn input(name: &str, protocol: Protocol) -> ProviderInput {
@@ -16,6 +16,7 @@ fn input(name: &str, protocol: Protocol) -> ProviderInput {
         models_path: "/models".into(),
         models_protocol: protocol,
         anthropic_version: (protocol == Protocol::AnthropicMessages).then(|| "2023-06-01".into()),
+        messages_auth: MessagesAuth::ApiKey,
         connect_timeout_ms: 10_000,
         read_timeout_ms: 60_000,
         write_timeout_ms: 30_000,
@@ -478,4 +479,22 @@ async fn exercise_store(url: &str, sqlite: bool) {
         .await
         .unwrap();
     assert!(store.load_model_routes().await.unwrap().is_empty());
+
+    let messages = store
+        .create(input("Bearer Messages", Protocol::AnthropicMessages))
+        .await
+        .unwrap();
+    assert_eq!(messages.messages_auth, MessagesAuth::ApiKey);
+    let mut edited = input("Bearer Messages", Protocol::AnthropicMessages);
+    edited.api_key.clear();
+    edited.messages_auth = MessagesAuth::Bearer;
+    store
+        .update(messages.id, messages.version, edited)
+        .await
+        .unwrap();
+    let reopened = ProviderStore::connect(url, &key).await.unwrap();
+    assert_eq!(
+        reopened.get(messages.id).await.unwrap().messages_auth,
+        MessagesAuth::Bearer
+    );
 }
