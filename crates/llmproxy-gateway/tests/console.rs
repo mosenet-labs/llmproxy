@@ -921,7 +921,7 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(probe_body["model"], "mock-model");
     assert_eq!(probe_body["max_tokens"], 1);
     assert_eq!(probe_body["thinking"]["type"], "disabled");
-    assert_eq!(probe_body["messages"][0]["content"], "Hi");
+    assert_eq!(probe_body["messages"][0]["content"], "你好");
     let mut invalid_probe = probe_args.clone();
     invalid_probe[2] = "anthropic_messages".to_owned();
     let invalid = client

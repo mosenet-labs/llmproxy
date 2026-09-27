@@ -13,7 +13,7 @@
 
 ## 模型可用性探测
 
-`/models` 只用于发现候选 ID，不能证明模型仍接受推理请求。Models 编辑弹窗可对已保存的模型逐协议执行一次短推理请求：输入为 `Hi`，输出上限默认 1 token，可临时调整至 1–1024。Chat 先用兼容上游常见的 `max_tokens`，仅当上游明确拒绝该字段时改用 `max_completion_tokens` 重试；Responses 用 `max_output_tokens`，Messages 用 `max_tokens`。请求使用该 Provider 已保存的协议路径和凭据；可用性结果按 Provider、上游模型 ID、协议区分，不能由一个协议的结果推断另一个协议。
+`/models` 只用于发现候选 ID，不能证明模型仍接受推理请求。Models 编辑弹窗可对已保存的模型逐协议执行一次短推理请求：输入为 `你好`，输出上限默认 1 token，可临时调整至 1–1024。Chat 先用兼容上游常见的 `max_tokens`，仅当上游明确拒绝该字段时改用 `max_completion_tokens` 重试；Responses 用 `max_output_tokens`，Messages 用 `max_tokens`。请求使用该 Provider 已保存的协议路径和凭据；可用性结果按 Provider、上游模型 ID、协议区分，不能由一个协议的结果推断另一个协议。
 
 探测请求显式尝试关闭思考：Chat 发送 `thinking.type=disabled`，仅在上游明确不识别该字段时改用 `reasoning_effort=none`；Responses 发送 `reasoning.effort=none`；Messages 发送 `thinking.type=disabled`。不移除思考控制参数后重试。对于已知强制思考的 `glm-5.3`/`glm-5.3-flash`，直接发送 `reasoning_effort=low`；若其他模型明确拒绝关闭思考，则按协议改用最低的 `low` 强度重试，并在结果中提示仍会消耗思考 token。若上游接受关闭参数却仍返回可识别的思考内容或非零思考 token，探测标记为无法判定。兼容上游可能忽略参数且不提供思考用量，因此“请求关闭思考”不能保证所有服务实际关闭。
 

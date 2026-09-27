@@ -122,7 +122,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                             chat_history(session: $(session), refresh: $(refresh))
                         </div>
                     </div>
-                    <div class="bg-white px-7 pt-3 pb-5 max-[640px]:px-4 max-[640px]:pb-4">
+                    <div class="bg-white px-7 pt-3 pb-3 max-[640px]:px-4">
                         <div class="mx-auto max-w-[820px]">chat_sender(id: "chat-draft", draft: &draft, submit_attrs: submit, busy: Some(&busy), max_length: Some(4000), language: UiLanguage::ChineseSimplified, attrs: attributes! { class="chat-composer" },
                             <div class="chat-composer-model flex min-w-0 items-center">
                                 select(attrs: attributes! { cx => id="chat-model" aria-label="选择聊天模型" class="min-w-0 max-w-[320px]" :value=$(model_id.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
@@ -143,7 +143,6 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                 )
                             </div>
                         )</div>
-                        <p class="mx-auto mt-2 mb-0 max-w-[820px] text-right text-[11px] text-[#98a2af]">"回车发送 · Shift+回车换行"</p>
                     </div>
                 } else {
                     <div class="flex flex-1 flex-col items-center justify-center px-6 text-center"><h2 class="m-0 text-lg font-medium text-heading">"暂无可聊天的模型"</h2><p class="mt-2 mb-5 text-sm text-secondary">"先在 Models 中添加模型，并启用对应 Provider。"</p><a class="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-white hover:bg-primary-hover" href=(href!(super::models::models))>"前往 Models"</a></div>

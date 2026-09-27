@@ -311,18 +311,18 @@ async fn send_once(
     let mut body = match target.protocol {
         Protocol::OpenAiChat => json!({
             "model": model_id,
-            "messages": [{"role": "user", "content": "Hi"}],
+            "messages": [{"role": "user", "content": "你好"}],
             "stream": false,
         }),
         Protocol::OpenAiResponses => json!({
             "model": model_id,
-            "input": "Hi",
+            "input": "你好",
             "max_output_tokens": max_output_tokens,
             "stream": false,
         }),
         Protocol::AnthropicMessages => json!({
             "model": model_id,
-            "messages": [{"role": "user", "content": "Hi"}],
+            "messages": [{"role": "user", "content": "你好"}],
             "max_tokens": max_output_tokens,
             "stream": false,
         }),
@@ -620,8 +620,12 @@ mod tests {
             assert_eq!(payload[limit_key], 1);
             assert_eq!(payload["stream"], false);
             match protocol {
-                Protocol::OpenAiResponses => assert_eq!(payload["reasoning"]["effort"], "none"),
+                Protocol::OpenAiResponses => {
+                    assert_eq!(payload["input"], "你好");
+                    assert_eq!(payload["reasoning"]["effort"], "none");
+                }
                 Protocol::OpenAiChat | Protocol::AnthropicMessages => {
+                    assert_eq!(payload["messages"][0]["content"], "你好");
                     assert_eq!(payload["thinking"]["type"], "disabled");
                 }
             }
