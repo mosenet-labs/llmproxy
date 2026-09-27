@@ -33,3 +33,4 @@ bash scripts/dev.sh up
 | 代理实现 | [明确入口联调](docs/05-explicit-routes-validation.md) · [Pingora 请求阶段](docs/06-pingora-request-lifecycle.md) |
 | Provider 与模型控制台 | [Provider 管理](docs/07-provider-console.md) · [多协议 Provider 与模型探测](docs/13-provider-interfaces-and-model-discovery.md) · [模型映射与 Models 控制台](docs/14-model-mapping.md) · [异步操作与一次性通知](docs/09-console-async-actions.md) |
 | 可观测性 | [访问日志](docs/04-access-logging.md) · [网关连接诊断](docs/08-gateway-observability.md) · [统一遥测](docs/10-shared-telemetry.md) |
+| 工程维护 | [模块职责整理](docs/15-module-structure.md) |

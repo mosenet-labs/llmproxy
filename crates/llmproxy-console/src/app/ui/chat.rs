@@ -1,212 +1,21 @@
-use std::{
-    cmp::Reverse,
-    collections::HashMap,
-    io,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, io};
 
 use llmproxy_core::protocol::Protocol;
-use tokio::sync::broadcast;
 use topcoat::{
     Result,
     context::{Cx, app_context},
     icon::icon,
     router::{href, page},
     runtime::{Event, Signal, procedure, shard, signal},
-    view::{View, attributes, emit, live, view},
+    view::{View, attributes, component, emit, live, view},
 };
 use topcoat_ant_design::icons::PLUS_OUTLINED;
 use topcoat_ant_design::{
     ChatBubbleRole, ChatMessage, ChatMessageStatus, UiLanguage, chat_bubble, chat_markdown,
-    chat_message_list, chat_sender, select,
+    chat_message_list, chat_sender, chat_think, select,
 };
 
 use crate::{app::AppState, chat_stream::stream_reply};
-
-const SESSION_IDLE_LIMIT: Duration = Duration::from_secs(60 * 60);
-
-#[derive(Default)]
-pub(crate) struct ChatSessions {
-    entries: Mutex<HashMap<String, (Instant, Arc<ChatSession>)>>,
-}
-
-#[derive(Default)]
-struct ChatState {
-    messages: Vec<ChatMessage>,
-    title: String,
-    next_id: u64,
-    busy: bool,
-    request_started: bool,
-}
-
-struct ChatSession {
-    scope: String,
-    model_id: String,
-    protocol: String,
-    created: Instant,
-    state: Mutex<ChatState>,
-    changed: broadcast::Sender<()>,
-}
-
-impl ChatSession {
-    fn new(scope: String, model_id: String, protocol: String) -> Self {
-        Self {
-            scope,
-            model_id,
-            protocol,
-            created: Instant::now(),
-            state: Mutex::new(ChatState::default()),
-            changed: broadcast::channel(32).0,
-        }
-    }
-
-    fn snapshot(&self) -> (Vec<ChatMessage>, bool) {
-        let state = self.state.lock().expect("chat state mutex");
-        (state.messages.clone(), state.busy)
-    }
-
-    fn begin(&self, prompt: &str) -> bool {
-        let prompt = prompt.trim();
-        if prompt.is_empty() || prompt.chars().count() > 4000 {
-            return false;
-        }
-        let mut state = self.state.lock().expect("chat state mutex");
-        if state.busy {
-            return false;
-        }
-        if state.messages.is_empty() {
-            let title: String = prompt.chars().take(24).collect();
-            state.title = if prompt.chars().count() > 24 {
-                format!("{title}…")
-            } else {
-                title
-            };
-        }
-        state.busy = true;
-        state.request_started = false;
-        state.next_id += 1;
-        let user_id = state.next_id.to_string();
-        state.messages.push(ChatMessage::new(
-            user_id,
-            ChatBubbleRole::User,
-            ChatMessageStatus::Complete,
-            prompt,
-        ));
-        state.next_id += 1;
-        let assistant_id = state.next_id.to_string();
-        state.messages.push(ChatMessage::new(
-            assistant_id,
-            ChatBubbleRole::Assistant,
-            ChatMessageStatus::Sending,
-            "",
-        ));
-        drop(state);
-        let _ = self.changed.send(());
-        true
-    }
-
-    fn start_request(&self) -> Option<Vec<ChatMessage>> {
-        let mut state = self.state.lock().expect("chat state mutex");
-        if !state.busy || state.request_started {
-            return None;
-        }
-        state.request_started = true;
-        Some(state.messages.clone())
-    }
-
-    fn update(&self, content: &str) {
-        let mut state = self.state.lock().expect("chat state mutex");
-        if let Some(message) = state.messages.last_mut() {
-            message.content = content.to_owned();
-            message.status = ChatMessageStatus::Streaming;
-        }
-        drop(state);
-        let _ = self.changed.send(());
-    }
-
-    fn finish(&self, result: std::result::Result<String, String>) {
-        let mut state = self.state.lock().expect("chat state mutex");
-        if let Some(message) = state.messages.last_mut() {
-            match result {
-                Ok(content) => {
-                    message.content = content;
-                    message.status = ChatMessageStatus::Complete;
-                }
-                Err(error) => {
-                    message.content = error;
-                    message.status = ChatMessageStatus::Failed;
-                }
-            }
-        }
-        state.busy = false;
-        state.request_started = false;
-        drop(state);
-        let _ = self.changed.send(());
-    }
-}
-
-impl ChatSessions {
-    fn create(&self, scope: Option<&str>, model_id: &str, protocol: &str) -> io::Result<String> {
-        let mut random = [0u8; 16];
-        getrandom::fill(&mut random).map_err(|_| io::Error::other("无法创建聊天会话"))?;
-        let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-        let scope = scope.unwrap_or(&id).to_owned();
-        let now = Instant::now();
-        let mut entries = self.entries.lock().expect("chat sessions mutex");
-        entries.retain(|_, (seen, _)| now.duration_since(*seen) < SESSION_IDLE_LIMIT);
-        entries.insert(
-            id.clone(),
-            (
-                now,
-                Arc::new(ChatSession::new(
-                    scope,
-                    model_id.to_owned(),
-                    protocol.to_owned(),
-                )),
-            ),
-        );
-        Ok(id)
-    }
-
-    fn get(&self, id: &str) -> Option<Arc<ChatSession>> {
-        let mut entries = self.entries.lock().expect("chat sessions mutex");
-        let (seen, session) = entries.get_mut(id)?;
-        *seen = Instant::now();
-        Some(session.clone())
-    }
-
-    fn list(&self, scope: &str, active_id: &str) -> Vec<(String, String, String, String)> {
-        let entries = self.entries.lock().expect("chat sessions mutex");
-        let mut rooms: Vec<_> = entries
-            .iter()
-            .filter(|(_, (_, room))| room.scope == scope)
-            .filter_map(|(id, (_, room))| {
-                let state = room.state.lock().expect("chat state mutex");
-                if id != active_id && state.messages.is_empty() {
-                    return None;
-                }
-                let title = state.title.clone();
-                Some((
-                    room.created,
-                    id.clone(),
-                    if title.is_empty() {
-                        "新会话".to_owned()
-                    } else {
-                        title
-                    },
-                    room.model_id.clone(),
-                    room.protocol.clone(),
-                ))
-            })
-            .collect();
-        rooms.sort_by_key(|room| Reverse(room.0));
-        rooms
-            .into_iter()
-            .map(|(_, id, title, model, protocol)| (id, title, model, protocol))
-            .collect()
-    }
-}
 
 fn protocol_label(protocol: Protocol) -> &'static str {
     match protocol {
@@ -358,7 +167,7 @@ pub async fn new_chat(
     let current = sessions
         .get(&current_session)
         .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
-    let scope = current.scope.clone();
+    let scope = current.scope().to_owned();
     let (id, protocol_kind) = selected_model(&model_id, &protocol).map_err(io::Error::other)?;
     let model = state.store.get_model(id).await?;
     if !model.provider_enabled || !model.protocols.contains(&protocol_kind) {
@@ -407,7 +216,7 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool
         return Ok(false);
     };
     let result = async {
-        let (model_id, protocol) = selected_model(&session.model_id, &session.protocol)?;
+        let (model_id, protocol) = selected_model(session.model_id(), session.protocol())?;
         let model = state
             .store
             .get_model(model_id)
@@ -422,7 +231,7 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool
             protocol,
             &model.alias,
             &history,
-            |content| session.update(content),
+            |reply| session.update(reply),
         )
         .await
     }
@@ -488,7 +297,7 @@ pub async fn chat_session_list(
         .collect();
     let rooms: Vec<_> = state
         .chat_sessions
-        .list(&current.scope, &session.get())
+        .list(current.scope(), &session.get())
         .into_iter()
         .map(|(id, title, model, kind)| {
             let alias = aliases.get(&model).cloned().unwrap_or_default();
@@ -525,11 +334,18 @@ pub async fn chat_history(
         .get(&session.get())
         .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
     Ok(live! {
-        let mut changed = room.changed.subscribe();
+        let mut changed = room.subscribe();
         loop {
-            let (messages, busy) = room.snapshot();
+            let (messages, thinking, busy) = room.snapshot();
+            let entries: Vec<_> = messages
+                .into_iter()
+                .map(|message| {
+                    let thought = thinking.get(&message.id).cloned().unwrap_or_default();
+                    (message, thought)
+                })
+                .collect();
             let token = emit! {
-                if messages.is_empty() {
+                if entries.is_empty() {
                     <div class="flex min-h-[300px] flex-1 flex-col justify-center">
                         <h2 class="m-0 text-[25px] font-semibold tracking-tight text-heading">"今天想聊什么？"</h2>
                         <p class="mt-2 mb-0 text-sm leading-6 text-secondary">"从下方选择模型，输入你的问题。历史会话仅保留在当前页面。"</p>
@@ -537,14 +353,8 @@ pub async fn chat_history(
                 } else {
                     chat_message_list(label: "聊天消息", attrs: attributes! { class="pb-2" },
                         #[key(message.id.clone())]
-                        for message in messages {
-                            chat_bubble(role: message.role, status: if message.status == ChatMessageStatus::Complete { None } else { Some(message.status) }, language: UiLanguage::ChineseSimplified,
-                                if message.role == ChatBubbleRole::User || message.status != ChatMessageStatus::Complete {
-                                    <p class="m-0 whitespace-pre-wrap break-words">(if message.content.is_empty() { "正在等待回复…" } else { message.content.as_str() })</p>
-                                } else {
-                                    chat_markdown(source: message.content.as_str())
-                                }
-                            )
+                        for (message, thought) in entries {
+                            chat_message_entry(message: message, thought: thought)
                         }
                     )
                 }
@@ -557,37 +367,22 @@ pub async fn chat_history(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ChatSessions;
-    use topcoat_ant_design::ChatMessageStatus;
-
-    #[test]
-    fn session_keeps_turns_in_page_history() {
-        let sessions = ChatSessions::default();
-        let first = sessions.create(None, "1", "openai_chat").unwrap();
-        let room = sessions.get(&first).unwrap();
-        assert!(room.begin("  hello  "));
-        assert_eq!(room.snapshot().0[0].content, "hello");
-        assert!(!room.begin("again"));
-        assert!(room.start_request().is_some());
-        assert!(room.start_request().is_none());
-        room.update("partial");
-        assert_eq!(room.snapshot().0[1].status, ChatMessageStatus::Streaming);
-        room.finish(Ok("reply".to_owned()));
-        assert_eq!(room.snapshot().0[1].content, "reply");
-        let next = sessions
-            .create(Some(&first), "2", "openai_responses")
-            .unwrap();
-        assert!(sessions.get(&next).unwrap().snapshot().0.is_empty());
-        assert_eq!(sessions.list(&first, &next).len(), 2);
-        assert_eq!(sessions.list(&first, &next)[1].1, "hello");
-        assert!(sessions.get(&first).is_some());
-        let third = sessions
-            .create(Some(&first), "2", "anthropic_messages")
-            .unwrap();
-        assert_eq!(sessions.list(&first, &third).len(), 2);
-        let other_page = sessions.create(None, "3", "anthropic_messages").unwrap();
-        assert_eq!(sessions.list(&other_page, &other_page).len(), 1);
-    }
+#[component]
+async fn chat_message_entry(cx: &Cx, message: ChatMessage, thought: String) -> Result<impl View> {
+    let thought_id = format!("chat-thought-{}", message.id);
+    let thought_open = signal(cx, || false);
+    Ok(view! {
+        chat_bubble(role: message.role, status: if message.status == ChatMessageStatus::Complete { None } else { Some(message.status) }, language: UiLanguage::ChineseSimplified,
+            if message.role == ChatBubbleRole::Assistant && !thought.is_empty() {
+                chat_think(id: thought_id.as_str(), open: &thought_open, language: UiLanguage::ChineseSimplified, attrs: attributes! { class="mb-3" },
+                    <p class="m-0 max-h-56 overflow-y-auto whitespace-pre-wrap break-words">(thought.as_str())</p>
+                )
+            }
+            if message.role == ChatBubbleRole::User || message.status != ChatMessageStatus::Complete {
+                <p class="m-0 whitespace-pre-wrap break-words">(if message.content.is_empty() { if thought.is_empty() { "正在等待回复…" } else { "正在思考…" } } else { message.content.as_str() })</p>
+            } else {
+                chat_markdown(source: message.content.as_str())
+            }
+        )
+    })
 }

@@ -39,7 +39,7 @@ impl Console {
             csrf,
             port: listen.port(),
             telemetry: observability::ConsoleTelemetry::new(),
-            chat_sessions: app::ui::chat::ChatSessions::default(),
+            chat_sessions: app::chat_sessions::ChatSessions::default(),
             chat_client: reqwest::Client::builder().no_proxy().build()?,
             gateway_origin: format!(
                 "http://{}",

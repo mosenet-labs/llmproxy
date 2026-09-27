@@ -5,6 +5,8 @@ use topcoat::{
     router::{Body, Next, error::forbidden, layer, request::headers, response::Response},
 };
 
+pub(crate) mod chat_sessions;
+pub(crate) mod model_catalog;
 pub(crate) mod ui;
 
 pub fn route_builder() -> topcoat::router::RouterBuilder {
@@ -17,7 +19,7 @@ pub struct AppState {
     pub csrf: String,
     pub port: u16,
     pub telemetry: crate::observability::ConsoleTelemetry,
-    pub chat_sessions: ui::chat::ChatSessions,
+    pub chat_sessions: chat_sessions::ChatSessions,
     pub chat_client: reqwest::Client,
     pub gateway_origin: String,
 }

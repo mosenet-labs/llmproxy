@@ -151,3 +151,13 @@ W6/W7 追加验证：隔离 PostgreSQL schema 与 SQLite 的完整 workspace 测
 ## 完整验收
 
 P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --workspace`。P1 应通过本地模拟上游的实际 HTTP/SSE 请求；P2 应验证管理变更无须重启代理即可生效。
+
+## R：模块职责整理
+
+范围、目标结构和逐步验收见[模块职责整理](15-module-structure.md)。
+
+- [x] R1：Chat 会话状态脱离 UI 模块。
+- [x] R2：上游模型目录查询成为 Console 共用模块。
+- [x] R3：Models / Providers 页面按编辑器与操作处理拆分，同时保持 Topcoat 路由不变。
+- [x] R4：Store 按 Provider、模型映射和迁移职责拆分，公共 API 不变。
+- [x] R5：完成格式、workspace 和路由行为验证。

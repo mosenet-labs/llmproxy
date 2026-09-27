@@ -5,6 +5,23 @@ use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
 
 const MAX_REPLY_BYTES: usize = 256 * 1024;
 
+#[derive(Debug, Default)]
+pub(crate) struct ChatReply {
+    pub content: String,
+    pub thinking: String,
+    pub summary: String,
+}
+
+impl ChatReply {
+    pub fn visible_thinking(&self) -> &str {
+        if self.thinking.is_empty() {
+            &self.summary
+        } else {
+            &self.thinking
+        }
+    }
+}
+
 pub fn request_body(protocol: Protocol, alias: &str, history: &[ChatMessage]) -> Value {
     let messages: Vec<_> = history
         .iter()
@@ -34,7 +51,7 @@ fn error_message(value: &Value) -> String {
         .to_owned()
 }
 
-fn event(protocol: Protocol, packet: &str) -> Result<(String, bool), String> {
+fn event(protocol: Protocol, packet: &str) -> Result<(ChatReply, bool), String> {
     let mut kind = "";
     let mut data = Vec::new();
     for line in packet.lines() {
@@ -46,11 +63,11 @@ fn event(protocol: Protocol, packet: &str) -> Result<(String, bool), String> {
         }
     }
     if data.is_empty() {
-        return Ok((String::new(), false));
+        return Ok((ChatReply::default(), false));
     }
     let data = data.join("\n");
     if data.trim() == "[DONE]" {
-        return Ok((String::new(), true));
+        return Ok((ChatReply::default(), true));
     }
     let value: Value = serde_json::from_str(&data).map_err(|_| "无法解析上游流式响应")?;
     let kind = value.get("type").and_then(Value::as_str).unwrap_or(kind);
@@ -68,15 +85,25 @@ fn event(protocol: Protocol, packet: &str) -> Result<(String, bool), String> {
                 .unwrap_or(&value),
         ));
     }
-    let (delta, done) = match protocol {
+    let (content, thinking, summary, done) = match protocol {
         Protocol::OpenAiChat => (
             value
                 .pointer("/choices/0/delta/content")
                 .and_then(Value::as_str),
+            value
+                .pointer("/choices/0/delta/reasoning_content")
+                .and_then(Value::as_str),
+            None,
             false,
         ),
         Protocol::OpenAiResponses => (
             (kind == "response.output_text.delta")
+                .then(|| value.get("delta").and_then(Value::as_str))
+                .flatten(),
+            (kind == "response.reasoning_text.delta")
+                .then(|| value.get("delta").and_then(Value::as_str))
+                .flatten(),
+            (kind == "response.reasoning_summary_text.delta")
                 .then(|| value.get("delta").and_then(Value::as_str))
                 .flatten(),
             kind == "response.completed",
@@ -97,10 +124,35 @@ fn event(protocol: Protocol, packet: &str) -> Result<(String, bool), String> {
                 }
                 _ => None,
             },
+            match kind {
+                "content_block_delta"
+                    if value.pointer("/delta/type").and_then(Value::as_str)
+                        == Some("thinking_delta") =>
+                {
+                    value.pointer("/delta/thinking").and_then(Value::as_str)
+                }
+                "content_block_start"
+                    if value.pointer("/content_block/type").and_then(Value::as_str)
+                        == Some("thinking") =>
+                {
+                    value
+                        .pointer("/content_block/thinking")
+                        .and_then(Value::as_str)
+                }
+                _ => None,
+            },
+            None,
             kind == "message_stop",
         ),
     };
-    Ok((delta.unwrap_or_default().to_owned(), done))
+    Ok((
+        ChatReply {
+            content: content.unwrap_or_default().to_owned(),
+            thinking: thinking.unwrap_or_default().to_owned(),
+            summary: summary.unwrap_or_default().to_owned(),
+        },
+        done,
+    ))
 }
 
 fn completed_text(protocol: Protocol, value: &Value) -> String {
@@ -134,6 +186,50 @@ fn completed_text(protocol: Protocol, value: &Value) -> String {
     }
 }
 
+fn completed_thinking(protocol: Protocol, value: &Value) -> String {
+    match protocol {
+        Protocol::OpenAiChat => value
+            .pointer("/choices/0/message/reasoning_content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        Protocol::OpenAiResponses => {
+            let parts: Vec<_> = value["output"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|item| item["type"] == "reasoning")
+                .collect();
+            let raw = parts
+                .iter()
+                .flat_map(|item| item["content"].as_array().into_iter().flatten())
+                .filter(|part| part["type"] == "reasoning_text")
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !raw.is_empty() {
+                raw
+            } else {
+                parts
+                    .iter()
+                    .flat_map(|item| item["summary"].as_array().into_iter().flatten())
+                    .filter(|part| part["type"] == "summary_text")
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Protocol::AnthropicMessages => value["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["type"] == "thinking")
+            .filter_map(|item| item["thinking"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 fn boundary(bytes: &[u8]) -> Option<(usize, usize)> {
     (0..bytes.len()).find_map(|index| {
         if bytes[index..].starts_with(b"\r\n\r\n") {
@@ -152,8 +248,8 @@ pub async fn stream_reply(
     protocol: Protocol,
     alias: &str,
     history: &[ChatMessage],
-    mut on_update: impl FnMut(&str),
-) -> Result<String, String> {
+    mut on_update: impl FnMut(&ChatReply),
+) -> Result<ChatReply, String> {
     let response = client
         .post(format!("{gateway_origin}{}", protocol.upstream_path()))
         .header("accept", "text/event-stream")
@@ -192,17 +288,21 @@ pub async fn stream_reply(
         .is_some_and(|value| value.contains("application/json"))
     {
         let value: Value = response.json().await.map_err(|_| "无法解析上游响应")?;
-        let text = completed_text(protocol, &value);
-        if text.is_empty() {
+        let reply = ChatReply {
+            content: completed_text(protocol, &value),
+            thinking: completed_thinking(protocol, &value),
+            summary: String::new(),
+        };
+        if reply.content.is_empty() {
             return Err("上游未返回文本内容".to_owned());
         }
-        on_update(&text);
-        return Ok(text);
+        on_update(&reply);
+        return Ok(reply);
     }
 
     let mut response = response;
     let mut pending = Vec::new();
-    let mut output = String::new();
+    let mut output = ChatReply::default();
     let mut done = false;
     while !done {
         let Some(chunk) = response
@@ -220,11 +320,21 @@ pub async fn stream_reply(
             let packet = std::str::from_utf8(&pending[..index])
                 .map_err(|_| "上游流式响应不是有效的 UTF-8")?;
             let (delta, finished) = event(protocol, packet)?;
-            if output.len() + delta.len() > MAX_REPLY_BYTES {
+            if output.content.len()
+                + output.thinking.len()
+                + output.summary.len()
+                + delta.content.len()
+                + delta.thinking.len()
+                + delta.summary.len()
+                > MAX_REPLY_BYTES
+            {
                 return Err("上游回复过长".to_owned());
             }
-            if !delta.is_empty() {
-                output.push_str(&delta);
+            if !delta.content.is_empty() || !delta.thinking.is_empty() || !delta.summary.is_empty()
+            {
+                output.content.push_str(&delta.content);
+                output.thinking.push_str(&delta.thinking);
+                output.summary.push_str(&delta.summary);
                 on_update(&output);
             }
             done = finished;
@@ -237,15 +347,24 @@ pub async fn stream_reply(
     if !done && !pending.is_empty() {
         let packet = std::str::from_utf8(&pending).map_err(|_| "上游流式响应不是有效的 UTF-8")?;
         let (delta, _) = event(protocol, packet)?;
-        if output.len() + delta.len() > MAX_REPLY_BYTES {
+        if output.content.len()
+            + output.thinking.len()
+            + output.summary.len()
+            + delta.content.len()
+            + delta.thinking.len()
+            + delta.summary.len()
+            > MAX_REPLY_BYTES
+        {
             return Err("上游回复过长".to_owned());
         }
-        output.push_str(&delta);
-        if !delta.is_empty() {
+        output.content.push_str(&delta.content);
+        output.thinking.push_str(&delta.thinking);
+        output.summary.push_str(&delta.summary);
+        if !delta.content.is_empty() || !delta.thinking.is_empty() || !delta.summary.is_empty() {
             on_update(&output);
         }
     }
-    if output.is_empty() {
+    if output.content.is_empty() {
         return Err("上游未返回文本内容".to_owned());
     }
     Ok(output)
@@ -253,7 +372,7 @@ pub async fn stream_reply(
 
 #[cfg(test)]
 mod tests {
-    use super::{boundary, completed_text, event, request_body};
+    use super::{boundary, completed_text, completed_thinking, event, request_body};
     use llmproxy_core::protocol::Protocol;
     use serde_json::json;
     use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
@@ -293,7 +412,8 @@ mod tests {
                 "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}"
             )
             .unwrap()
-            .0,
+            .0
+            .content,
             "你好"
         );
         assert_eq!(
@@ -302,10 +422,11 @@ mod tests {
                 "event: response.output_text.delta\ndata: {\"delta\":\"A\"}"
             )
             .unwrap()
-            .0,
+            .0
+            .content,
             "A"
         );
-        assert_eq!(event(Protocol::AnthropicMessages, "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"B\"}}").unwrap().0, "B");
+        assert_eq!(event(Protocol::AnthropicMessages, "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"B\"}}").unwrap().0.content, "B");
         assert!(
             event(
                 Protocol::AnthropicMessages,
@@ -316,6 +437,60 @@ mod tests {
         );
         assert!(event(Protocol::OpenAiChat, "data: [DONE]").unwrap().1);
         assert_eq!(boundary(b"data: 1\r\n\r\ndata: 2\n\n"), Some((7, 4)));
+    }
+
+    #[test]
+    fn extracts_streamed_thinking_for_each_protocol() {
+        assert_eq!(
+            event(
+                Protocol::OpenAiChat,
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"分析\"}}]}"
+            )
+            .unwrap()
+            .0
+            .thinking,
+            "分析"
+        );
+        assert_eq!(
+            event(
+                Protocol::OpenAiResponses,
+                "event: response.reasoning_text.delta\ndata: {\"delta\":\"推理\"}"
+            )
+            .unwrap()
+            .0
+            .thinking,
+            "推理"
+        );
+        assert_eq!(
+            event(
+                Protocol::OpenAiResponses,
+                "event: response.reasoning_summary_text.delta\ndata: {\"delta\":\"摘要\"}"
+            )
+            .unwrap()
+            .0
+            .visible_thinking(),
+            "摘要"
+        );
+        assert_eq!(
+            event(
+                Protocol::AnthropicMessages,
+                "event: content_block_delta\ndata: {\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"思考\"}}"
+            )
+            .unwrap()
+            .0
+            .thinking,
+            "思考"
+        );
+        assert!(
+            event(
+                Protocol::AnthropicMessages,
+                "event: content_block_delta\ndata: {\"delta\":{\"type\":\"signature_delta\",\"signature\":\"secret\"}}"
+            )
+            .unwrap()
+            .0
+            .thinking
+            .is_empty()
+        );
     }
 
     #[test]
@@ -340,6 +515,34 @@ mod tests {
                 &json!({"content":[{"type":"text","text":"message"}]})
             ),
             "message"
+        );
+        assert_eq!(
+            completed_thinking(
+                Protocol::OpenAiChat,
+                &json!({"choices":[{"message":{"reasoning_content":"chat thought"}}]})
+            ),
+            "chat thought"
+        );
+        assert_eq!(
+            completed_thinking(
+                Protocol::OpenAiResponses,
+                &json!({"output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"response thought"}]}]})
+            ),
+            "response thought"
+        );
+        assert_eq!(
+            completed_thinking(
+                Protocol::OpenAiResponses,
+                &json!({"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"response summary"}]}]})
+            ),
+            "response summary"
+        );
+        assert_eq!(
+            completed_thinking(
+                Protocol::AnthropicMessages,
+                &json!({"content":[{"type":"thinking","thinking":"message thought"}]})
+            ),
+            "message thought"
         );
     }
 }
