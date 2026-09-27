@@ -34,6 +34,7 @@ impl Console {
         let csrf = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let state = app::AppState {
             store,
+            prober: llmproxy_probe::ModelProber::new()?,
             csrf,
             port,
             telemetry: observability::ConsoleTelemetry::new(),
@@ -55,6 +56,7 @@ impl Console {
             .route(models::save_model)
             .route(models::save_models)
             .route(models::delete_model)
+            .route(models::probe_saved_model)
             .page(app::form)
             .route(app::save)
             .route(app::perform_action)

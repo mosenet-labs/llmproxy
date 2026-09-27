@@ -36,6 +36,7 @@ use url::{Host, Url};
 
 pub struct AppState {
     pub store: ProviderStore,
+    pub prober: llmproxy_probe::ModelProber,
     pub csrf: String,
     pub port: u16,
     pub telemetry: crate::observability::ConsoleTelemetry,

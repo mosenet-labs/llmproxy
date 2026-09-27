@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use llmproxy_core::protocol::Protocol;
+use llmproxy_probe::{InferenceProbeTarget, Reason, ThinkingMode, Verdict};
 use llmproxy_store::{ModelMappingInput, ModelMappingView, ProviderView, StoreError};
 use serde::{Deserialize, Serialize};
 use topcoat::{
@@ -74,6 +76,14 @@ struct Editor {
     supports_chat: Signal<bool>,
     supports_responses: Signal<bool>,
     supports_messages: Signal<bool>,
+    probe_protocol: Signal<String>,
+    probe_tokens: Signal<String>,
+    probe_busy: Signal<bool>,
+    probe_success: Signal<String>,
+    probe_failure: Signal<String>,
+    probe_chat: Signal<bool>,
+    probe_responses: Signal<bool>,
+    probe_messages: Signal<bool>,
 }
 
 impl Editor {
@@ -105,6 +115,14 @@ impl Editor {
             supports_chat: signal(cx, || false),
             supports_responses: signal(cx, || false),
             supports_messages: signal(cx, || false),
+            probe_protocol: signal(cx, String::new),
+            probe_tokens: signal(cx, || "1".to_owned()),
+            probe_busy: signal(cx, || false),
+            probe_success: signal(cx, String::new),
+            probe_failure: signal(cx, String::new),
+            probe_chat: signal(cx, || false),
+            probe_responses: signal(cx, || false),
+            probe_messages: signal(cx, || false),
         }
     }
 }
@@ -165,6 +183,14 @@ fn editor_trigger(
         supports_chat,
         supports_responses,
         supports_messages,
+        probe_protocol,
+        probe_tokens,
+        probe_busy,
+        probe_success,
+        probe_failure,
+        probe_chat,
+        probe_responses,
+        probe_messages,
         ..
     } = editor;
     let supported_chat = provider.is_some_and(|provider| provider.paths.openai_chat.is_some());
@@ -175,6 +201,15 @@ fn editor_trigger(
     let provider_name = provider
         .map_or("", |provider| provider.name.as_str())
         .to_owned();
+    let initial_probe_protocol = if chat {
+        Protocol::OpenAiChat.as_str()
+    } else if responses {
+        Protocol::OpenAiResponses.as_str()
+    } else if messages {
+        Protocol::AnthropicMessages.as_str()
+    } else {
+        ""
+    };
     attributes! { cx => aria-haspopup="dialog" aria-controls="model-dialog" @click=$(|_event: Event| {
         selected_id.set(id.to_owned());
         selected_version.set(version.to_owned());
@@ -199,6 +234,14 @@ fn editor_trigger(
         supports_chat.set(supported_chat);
         supports_responses.set(supported_responses);
         supports_messages.set(supported_messages);
+        probe_protocol.set(initial_probe_protocol.to_owned());
+        probe_tokens.set("1".to_owned());
+        probe_busy.set(false);
+        probe_success.set("".to_owned());
+        probe_failure.set("".to_owned());
+        probe_chat.set(chat);
+        probe_responses.set(responses);
+        probe_messages.set(messages);
         error.set("".to_owned());
         open.set(true);
     }) }
@@ -489,6 +532,96 @@ pub async fn delete_model(cx: &Cx, csrf: String, id: String, version: String) ->
         .map_err(|error| error.to_string()))
 }
 
+#[procedure("/ui/_topcoat/runtime/procedures/probe-saved-model")]
+pub async fn probe_saved_model(
+    cx: &Cx,
+    csrf: String,
+    id: String,
+    protocol: String,
+    max_output_tokens: String,
+) -> Result<Outcome> {
+    check_csrf(cx, &csrf)?;
+    let result: std::result::Result<String, String> = async {
+        let id = id.parse::<i64>().map_err(|_| "模型 ID 无效".to_owned())?;
+        let protocol = match protocol.as_str() {
+            "openai_chat" => Protocol::OpenAiChat,
+            "openai_responses" => Protocol::OpenAiResponses,
+            "anthropic_messages" => Protocol::AnthropicMessages,
+            _ => return Err("请选择有效的探测协议".to_owned()),
+        };
+        let max_output_tokens = max_output_tokens
+            .parse::<u32>()
+            .ok()
+            .filter(|value| (1..=1024).contains(value))
+            .ok_or_else(|| "输出上限须为 1–1024 token".to_owned())?;
+        let state = app_context::<AppState>(cx);
+        let route = state
+            .store
+            .load_model_route(id, protocol)
+            .await
+            .map_err(|error| error.to_string())?;
+        let provider = route
+            .provider
+            .ok_or_else(|| "Provider 已停用，无法探测".to_owned())?;
+        let provider_id = provider.id;
+        let scheme = if provider.tls { "https" } else { "http" };
+        let url = format!(
+            "{scheme}://{}:{}{}",
+            provider.host, provider.port, provider.upstream_path
+        )
+        .parse()
+        .map_err(|_| "Provider 上游地址无效".to_owned())?;
+        let target = InferenceProbeTarget {
+            url,
+            protocol,
+            secret: provider.secret,
+            anthropic_version: provider.anthropic_version,
+            timeout: Duration::from_millis(
+                provider
+                    .connect_timeout_ms
+                    .saturating_add(provider.read_timeout_ms),
+            ),
+        };
+        let probe = state
+            .prober
+            .probe_model(&target, &route.upstream_model_id, max_output_tokens)
+            .await;
+        state
+            .telemetry
+            .model_probe(provider_id, &route.upstream_model_id, protocol, &probe);
+        let label = format!("「{}」{}", route.alias, protocol_label(protocol));
+        let thinking_note = if probe.thinking_mode == ThinkingMode::Low {
+            "（低思考模式，仍会消耗思考 token）"
+        } else {
+            ""
+        };
+        match probe.verdict {
+            Verdict::Available => {
+                let usage = probe.usage.map_or(String::new(), |usage| {
+                    format!("，输入 {} / 输出 {} token", usage.input, usage.output)
+                });
+                Ok(format!("{label} 探测可用{usage}{thinking_note}"))
+            }
+            Verdict::Unavailable => Err(format!("{label} 上游明确报告模型不存在{thinking_note}")),
+            Verdict::Inconclusive => {
+                let reason = match probe.reason {
+                    Some(Reason::Authentication) => "上游鉴权失败",
+                    Some(Reason::RateLimited) => "上游限流",
+                    Some(Reason::Timeout) => "请求超时",
+                    Some(Reason::Connection) => "无法连接上游",
+                    Some(Reason::InvalidRequest) => "上游不接受探测参数，请检查协议或调整输出上限",
+                    Some(Reason::InvalidResponse) => "上游响应格式不符",
+                    Some(Reason::ThinkingStillEnabled) => "上游仍返回思考内容，无法确认已关闭思考",
+                    _ => "上游请求失败",
+                };
+                Err(format!("{label} 无法判定：{reason}{thinking_note}"))
+            }
+        }
+    }
+    .await;
+    Ok(result)
+}
+
 #[topcoat::view::component]
 async fn model_delete(
     cx: &Cx,
@@ -751,10 +884,19 @@ async fn model_editor(
         model_menu_open,
         candidate_error,
         candidate_busy,
+        probe_protocol,
+        probe_tokens,
+        probe_busy,
+        probe_success,
+        probe_failure,
+        probe_chat,
+        probe_responses,
+        probe_messages,
         ..
     } = editor;
     let close = native_dialog_close_attributes(cx, "model-dialog");
     let unavailable: Outcome = Err("保存请求失败，请刷新后重试".into());
+    let probe_unavailable: Outcome = Err("探测请求失败，请重试".into());
     Ok(view! {
         native_dialog(config: NativeDialogConfig::new("model-dialog", "模型配置"),
             open: Some(open), busy: busy, language: UiLanguage::ChineseSimplified,
@@ -808,6 +950,36 @@ async fn model_editor(
                             <label class="flex items-center gap-2" :hidden=$(!supports_chat.get())><input type="checkbox" :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label>
                             <label class="flex items-center gap-2" :hidden=$(!supports_responses.get())><input type="checkbox" :checked=$(responses.get()) @change=$(|event: Event| responses.set(event.target.checked))>"Responses"</label>
                             <label class="flex items-center gap-2" :hidden=$(!supports_messages.get())><input type="checkbox" :checked=$(messages.get()) @change=$(|event: Event| messages.set(event.target.checked))>"Messages"</label>
+                        </div>
+                        <div class="mt-6 rounded-lg border border-border bg-surface/40 p-4">
+                            <h3 class="m-0 text-sm font-semibold text-heading">"可用性探测"</h3>
+                            <p class="mt-1 mb-4 text-xs text-secondary">"对已保存的模型发一次极短请求。按已保存的协议和上游路径探测，不修改模型配置。"</p>
+                            <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-3 max-[640px]:grid-cols-1">
+                                <label class="min-w-0 text-xs font-medium text-heading">"探测协议"
+                                    <select class="mt-2 w-full" :value=$(probe_protocol.get()) @change=$(|event: Event| { probe_protocol.set(event.target.value); probe_success.set("".to_owned()); probe_failure.set("".to_owned()); })>
+                                        <option value="openai_chat" :disabled=$(!probe_chat.get()) :hidden=$(!probe_chat.get())>"Chat"</option>
+                                        <option value="openai_responses" :disabled=$(!probe_responses.get()) :hidden=$(!probe_responses.get())>"Responses"</option>
+                                        <option value="anthropic_messages" :disabled=$(!probe_messages.get()) :hidden=$(!probe_messages.get())>"Messages"</option>
+                                    </select>
+                                </label>
+                                <label class="min-w-0 text-xs font-medium text-heading">"输出上限（token）"
+                                    <input class="mt-2 w-full" type="number" min="1" max="1024" step="1" :value=$(probe_tokens.get()) @input=$(|event: Event| { probe_tokens.set(event.target.value); probe_success.set("".to_owned()); probe_failure.set("".to_owned()); })>
+                                </label>
+                                <button class=(class!(BUTTON, "h-10")) type="button" :disabled=$(probe_busy.get()) @click=$(async |_event: Event| {
+                                    raw!("if (${busy}.get().dehydrate() || ${probe_busy}.get().dehydrate()) return;", ());
+                                    busy.set(true);
+                                    probe_busy.set(true);
+                                    probe_success.set("".to_owned());
+                                    probe_failure.set("".to_owned());
+                                    let result = raw!("await Promise.resolve(${probe_saved_model}.call(${csrf}, ${id}.get(), ${probe_protocol}.get(), ${probe_tokens}.get())).catch(() => ${probe_unavailable})", probe_unavailable.clone());
+                                    probe_busy.set(false);
+                                    busy.set(false);
+                                    if result.is_ok() { probe_success.set(result.unwrap()); }
+                                    else { probe_failure.set(result.unwrap_err()); }
+                                })>$(if probe_busy.get() { "探测中…" } else { "立即探测" })</button>
+                            </div>
+                            <p class="mt-3 mb-0 text-sm text-[#389e0d]" role="status" :hidden=$(probe_success.get().is_empty())>$(probe_success.get())</p>
+                            <p class="mt-3 mb-0 text-sm text-[#cf1322]" role="status" :hidden=$(probe_failure.get().is_empty())>$(probe_failure.get())</p>
                         </div>
                     </div>
                 </div>

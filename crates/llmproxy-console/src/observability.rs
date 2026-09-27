@@ -3,6 +3,8 @@ use std::{
     time::Instant,
 };
 
+use llmproxy_core::protocol::Protocol;
+use llmproxy_probe::{ProbeResult, Verdict};
 use llmproxy_store::StoreError;
 use opentelemetry::{
     KeyValue,
@@ -38,6 +40,8 @@ pub struct ConsoleTelemetry {
     requests: Counter<u64>,
     duration: Histogram<f64>,
     operations: Counter<u64>,
+    model_probes: Counter<u64>,
+    model_probe_duration: Histogram<f64>,
 }
 
 impl Default for ConsoleTelemetry {
@@ -57,6 +61,11 @@ impl ConsoleTelemetry {
                 .build(),
             operations: meter
                 .u64_counter("llmproxy.console.provider.operations")
+                .build(),
+            model_probes: meter.u64_counter("llmproxy.model.probes").build(),
+            model_probe_duration: meter
+                .f64_histogram("llmproxy.model.probe.duration")
+                .with_unit("s")
                 .build(),
         }
     }
@@ -118,6 +127,43 @@ impl ConsoleTelemetry {
                 "provider operation completed"
             );
         }
+    }
+
+    pub fn model_probe(
+        &self,
+        provider_id: i64,
+        model_id: &str,
+        protocol: Protocol,
+        result: &ProbeResult,
+    ) {
+        let verdict = match result.verdict {
+            Verdict::Available => "available",
+            Verdict::Unavailable => "unavailable",
+            Verdict::Inconclusive => "inconclusive",
+        };
+        let attributes = [
+            KeyValue::new("component", "console"),
+            KeyValue::new("protocol", protocol.as_str()),
+            KeyValue::new("verdict", verdict),
+        ];
+        self.model_probes.add(1, &attributes);
+        self.model_probe_duration
+            .record(result.elapsed.as_secs_f64(), &attributes);
+        tracing::info!(
+            component = "console",
+            event_kind = "model_probe",
+            provider_id,
+            model_id,
+            protocol = protocol.as_str(),
+            verdict,
+            thinking_mode = ?result.thinking_mode,
+            reason = ?result.reason,
+            http_status = result.http_status,
+            duration_ms = result.elapsed.as_secs_f64() * 1000.0,
+            input_tokens = result.usage.map(|usage| usage.input),
+            output_tokens = result.usage.map(|usage| usage.output),
+            "model probe completed"
+        );
     }
 }
 

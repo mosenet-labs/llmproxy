@@ -764,6 +764,46 @@ impl ProviderStore {
         Ok(routes)
     }
 
+    pub async fn load_model_route(&self, id: i64, protocol: Protocol) -> StoreResult<ModelRoute> {
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, false).await?;
+        let mapping = find_mapping(&mut tx, id).await?;
+        if !mapping.protocols().contains(&protocol) {
+            return Err(StoreError::Validation("模型未配置所选协议".into()));
+        }
+        let provider = find(&mut tx, mapping.provider_id).await?;
+        let upstream_path = provider
+            .paths()
+            .get(protocol)
+            .ok_or(StoreError::Internal)?
+            .to_owned();
+        let resolved = if provider.enabled {
+            Some(ActiveProvider {
+                id: provider.id,
+                protocol,
+                upstream_path,
+                host: provider.host,
+                port: provider.port,
+                tls: provider.tls,
+                secret: self.cipher.decrypt(&provider.encrypted_key)?,
+                anthropic_version: provider.anthropic_version,
+                connect_timeout_ms: provider.connect_timeout_ms,
+                read_timeout_ms: provider.read_timeout_ms,
+                write_timeout_ms: provider.write_timeout_ms,
+            })
+        } else {
+            None
+        };
+        tx.commit().await?;
+        Ok(ModelRoute {
+            alias: mapping.alias,
+            upstream_model_id: mapping.upstream_model_id,
+            enabled: provider.enabled,
+            provider: resolved,
+            protocol,
+        })
+    }
+
     pub async fn preview_target(
         &self,
         id: Option<i64>,

@@ -14,7 +14,7 @@
   -> 基础设施（Toasty/SQLite/PostgreSQL、凭据加密、环境配置、OTLP、日志和指标）
 ```
 
-`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是进程内的 Topcoat 路由库，复用 `topcoat-ant-design` 构建 Providers 与 Models 页面；`llmproxy-store` 封装 Toasty 模型、双后端迁移、事务和密钥加密。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
+`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是进程内的 Topcoat 路由库，复用 `topcoat-ant-design` 构建 Providers 与 Models 页面；`llmproxy-store` 封装 Toasty 模型、双后端迁移、事务和密钥加密。`llmproxy-probe` 发送独立的短推理请求，供模型可用性检查复用，不访问数据库或 UI。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
 
 所选数据库是 Provider 与模型映射的唯一来源；缺省使用持久化 SQLite，显式配置 PostgreSQL 时继续使用其独立数据。网关按 `(协议, 模型别名)` 唯一确定 Provider、上游模型 ID 和协议路径；没有当前 Provider 兜底。在途请求持有原快照。具体设计见[模型映射](14-model-mapping.md)和[数据库兼容方案](12-sqlite-compatibility-plan.md)。
 

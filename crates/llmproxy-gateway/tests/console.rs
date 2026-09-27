@@ -732,12 +732,20 @@ async fn exercise_http(database_url: &str) {
         );
     }
     let (upstream, received) = support::Mock::http(|request, stream| {
-        let body: &[u8] =
-            if request.target == "/custom/models" || request.target == "/preview/models" {
-                br#"{"data":[{"id":"mock-model"},{"id":"mock-model-a"},{"id":"mock-model-b"}]}"#
-            } else {
-                br#"{"provider":"ui-configured"}"#
-            };
+        let body: &[u8] = if request.target == "/custom/models"
+            || request.target == "/preview/models"
+        {
+            br#"{"data":[{"id":"mock-model"},{"id":"mock-model-a"},{"id":"mock-model-b"}]}"#
+        } else if request.target == "/v1/chat/completions"
+            && request
+                .body
+                .windows(b"max_tokens".len())
+                .any(|part| part == b"max_tokens")
+        {
+            br#"{"choices":[{"finish_reason":"length"}],"usage":{"prompt_tokens":8,"completion_tokens":1}}"#
+        } else {
+            br#"{"provider":"ui-configured"}"#
+        };
         support::respond(stream, 200, "Content-Type: application/json\r\n", body);
     });
     let mut input = provider_form(&csrf, "Unified Mock", "openai_chat");
@@ -864,6 +872,59 @@ async fn exercise_http(database_url: &str) {
     assert!(models.contains("Unified Mock/mock-model"));
     assert!(models.contains("Chat"));
     assert!(models.contains("Responses"));
+    assert!(models.contains("可用性探测"));
+    let model_id = store.list_models().await.unwrap()[0].id;
+    let probe_args = vec![
+        csrf.clone(),
+        model_id.to_string(),
+        "openai_chat".to_owned(),
+        "1".to_owned(),
+    ];
+    let probe = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/probe-saved-model"
+        ))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&probe_args).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), StatusCode::OK);
+    assert!(probe.text().await.unwrap().contains("探测可用"));
+    let probe_request = received.recv_timeout(support::DEADLINE).unwrap();
+    assert_eq!(probe_request.target, "/v1/chat/completions");
+    assert_eq!(
+        support::values(&probe_request.headers, "authorization"),
+        [format!("Bearer {PROVIDER_KEY}")]
+    );
+    let probe_body: serde_json::Value = serde_json::from_slice(&probe_request.body).unwrap();
+    assert_eq!(probe_body["model"], "mock-model");
+    assert_eq!(probe_body["max_tokens"], 1);
+    assert_eq!(probe_body["thinking"]["type"], "disabled");
+    assert_eq!(probe_body["messages"][0]["content"], "Hi");
+    let mut invalid_probe = probe_args.clone();
+    invalid_probe[2] = "anthropic_messages".to_owned();
+    let invalid = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/probe-saved-model"
+        ))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&invalid_probe).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(invalid.text().await.unwrap().contains("模型未配置所选协议"));
+    invalid_probe[0] = "invalid-csrf".to_owned();
+    let forbidden = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/probe-saved-model"
+        ))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&invalid_probe).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
     let routes = client
         .get(format!("{base}/routes"))
         .send()
@@ -1081,6 +1142,9 @@ async fn exercise_http(database_url: &str) {
                 && event["fields"]["route"] == "/v1/chat/completions"
                 && event["fields"]["status"] == 200)
     );
+    assert!(events.iter().any(|event| {
+        event["fields"]["event_kind"] == "model_probe" && event["fields"]["verdict"] == "available"
+    }));
     assert!(!logs.contains(PROVIDER_KEY));
 }
 

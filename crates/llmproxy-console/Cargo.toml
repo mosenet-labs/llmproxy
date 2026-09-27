@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 llmproxy-core = { path = "../llmproxy-core" }
 llmproxy-store = { path = "../llmproxy-store" }
+llmproxy-probe = { path = "../llmproxy-probe" }
 tracing.workspace = true
 tracing-opentelemetry = "0.34.0"
 opentelemetry = { version = "0.33.0", features = ["metrics", "trace"] }

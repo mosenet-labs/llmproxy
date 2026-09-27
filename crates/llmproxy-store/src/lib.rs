@@ -206,7 +206,7 @@ pub struct ModelMappingView {
     pub version: u64,
 }
 
-/// Gateway-only model route. Credentials are never exposed to the console.
+/// Server-only model route. Credentials are never serialized to the browser.
 pub struct ModelRoute {
     pub alias: String,
     pub upstream_model_id: String,

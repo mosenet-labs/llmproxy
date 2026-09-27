@@ -5,6 +5,7 @@ members = [
     "crates/llmproxy-gateway",
     "crates/llmproxy-console",
     "crates/llmproxy-telemetry",
+    "crates/llmproxy-probe",
 ]
 resolver = "3"
 default-members = ["crates/llmproxy-gateway"]
