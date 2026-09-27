@@ -1,5 +1,6 @@
 mod app;
 mod assets;
+mod models;
 pub mod observability;
 
 use std::io;
@@ -14,7 +15,7 @@ use topcoat_ant_design::RouterBuilderUiExt;
 
 pub use topcoat::router::{Body, request::Request, response::Response};
 
-pub const BODY_LIMIT: usize = 32 * 1024;
+pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 pub struct Console {
     router: Router,
@@ -46,6 +47,14 @@ impl Console {
             .page(app::list)
             .page(app::routes)
             .route(app::providers_redirect)
+            .page(models::models)
+            .route(models::model_workspace)
+            .route(models::model_candidates)
+            .route(models::model_draft)
+            .route(models::load_model_candidates)
+            .route(models::save_model)
+            .route(models::save_models)
+            .route(models::delete_model)
             .page(app::form)
             .route(app::save)
             .route(app::perform_action)

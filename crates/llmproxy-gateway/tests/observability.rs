@@ -51,7 +51,14 @@ fn http_and_local_rejections_have_one_sanitized_completion_each() {
             "POST",
             &format!("{path}?token=private-query"),
             "Authorization: Bearer private-client-key\r\n",
-            b"private-prompt",
+            format!(
+                r#"{{"model":"{}","input":"private-prompt"}}"#,
+                ALIASES[PATHS
+                    .iter()
+                    .position(|route| path.starts_with(route))
+                    .unwrap()]
+            )
+            .as_bytes(),
         );
         assert_eq!(response.status, 429);
         assert_eq!(response.body(), b"private-provider-body");
@@ -107,7 +114,7 @@ fn actual_connection_reuse_preserves_identity_without_handshake_samples() {
     });
     let gateway = Gateway::start([Provider::http(upstream.address); 3]);
     for count in 1..=2 {
-        let response = gateway.request("POST", PATHS[0], "", b"{}");
+        let response = gateway.request("POST", PATHS[0], "", &model_body(PATHS[0]));
         assert_eq!(response.status, 200);
         assert_eq!(response.body(), b"{}");
         wait_completions(&gateway, count);
@@ -133,7 +140,7 @@ fn dns_and_connection_failures_include_stage_without_fake_tls_timing() {
         }
         let gateway = Gateway::start([provider; 3]);
         drop(reservation.take());
-        let response = gateway.request("POST", PATHS[0], "", b"{}");
+        let response = gateway.request("POST", PATHS[0], "", &model_body(PATHS[0]));
         assert!(matches!(response.status, 502 | 504));
         response.body();
         let records = wait_completions(&gateway, 1);
@@ -160,7 +167,7 @@ fn sse_completion_waits_for_stream_end_and_retains_written_status_on_error() {
         // Deliberately omit the terminating chunk.
     });
     let gateway = Gateway::start([Provider::http(upstream.address); 3]);
-    let mut response = gateway.request("POST", PATHS[0], "", b"{}");
+    let mut response = gateway.request("POST", PATHS[0], "", &model_body(PATHS[0]));
     assert_eq!(response.status, 200);
     assert_eq!(
         response.bytes(b"data: private-token\n\n".len()),

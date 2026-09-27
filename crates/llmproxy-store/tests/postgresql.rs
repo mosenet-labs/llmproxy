@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore, StoreError};
+use llmproxy_store::{ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore, StoreError};
 
 fn input(name: &str, protocol: Protocol) -> ProviderInput {
     ProviderInput {
@@ -275,17 +275,6 @@ async fn exercise_store(url: &str, sqlite: bool) {
         store.delete(chat.id, current.version).await,
         Err(StoreError::Conflict(_))
     ));
-    assert!(matches!(
-        store
-            .update(
-                chat.id,
-                current.version,
-                input("Changed protocol", Protocol::OpenAiResponses)
-            )
-            .await,
-        Err(StoreError::Conflict(_))
-    ));
-
     let mut edit = input("Chat Renamed", Protocol::OpenAiChat);
     edit.api_key.clear();
     edit.host = "renamed.example.com".into();
@@ -435,14 +424,58 @@ async fn exercise_store(url: &str, sqlite: bool) {
     assert_eq!(probe.secret, "test-key-do-not-return");
     let mut remove_active = input("Mixed interfaces", Protocol::OpenAiResponses);
     remove_active.api_key.clear();
-    assert!(matches!(
-        store.update(mixed.id, mixed.version, remove_active).await,
-        Err(StoreError::Conflict(_))
-    ));
+    let removed = store
+        .update(mixed.id, mixed.version, remove_active)
+        .await
+        .unwrap();
+    assert!(removed.paths.openai_chat.is_none());
+    assert_eq!(removed.active_protocols, vec![Protocol::OpenAiResponses]);
     let mut invalid_path = input("Invalid path", Protocol::OpenAiChat);
     invalid_path.paths.openai_chat = Some("https://other.example/v1/chat".into());
     assert!(matches!(
         store.create(invalid_path).await,
         Err(StoreError::Validation(_))
     ));
+
+    let mapping_input = ModelMappingInput {
+        alias: "mixed/model-a".into(),
+        provider_id: mixed.id,
+        upstream_model_id: "model-a".into(),
+        protocols: vec![Protocol::OpenAiResponses],
+    };
+    let mapping = store.create_model(mapping_input.clone()).await.unwrap();
+    assert_eq!(store.load_model_routes().await.unwrap().len(), 1);
+    let mut remove_mapped_protocol = input("Mixed interfaces", Protocol::OpenAiChat);
+    remove_mapped_protocol.api_key.clear();
+    assert!(matches!(
+        store
+            .update(mixed.id, removed.version, remove_mapped_protocol)
+            .await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(matches!(
+        store.create_model(mapping_input.clone()).await,
+        Err(StoreError::Conflict(_))
+    ));
+    let updated = store
+        .update_model(
+            mapping.id,
+            mapping.version,
+            ModelMappingInput {
+                alias: "mixed/model-b".into(),
+                ..mapping_input
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.alias, "mixed/model-b");
+    assert!(matches!(
+        store.delete_model(mapping.id, mapping.version).await,
+        Err(StoreError::Conflict(_))
+    ));
+    store
+        .delete_model(mapping.id, updated.version)
+        .await
+        .unwrap();
+    assert!(store.load_model_routes().await.unwrap().is_empty());
 }

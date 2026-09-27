@@ -17,7 +17,7 @@ use std::{
 };
 
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore};
+use llmproxy_store::{ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore};
 
 pub const DEADLINE: Duration = Duration::from_secs(8);
 pub const PATHS: [&str; 3] = ["/v1/chat/completions", "/v1/responses", "/v1/messages"];
@@ -27,6 +27,15 @@ const PROTOCOLS: [Protocol; 3] = [
     Protocol::AnthropicMessages,
 ];
 pub const SECRETS: [&str; 3] = ["dummy-chat", "dummy-responses", "dummy-messages"];
+pub const ALIASES: [&str; 3] = ["test-chat", "test-responses", "test-messages"];
+
+pub fn model_body(path: &str) -> Vec<u8> {
+    let index = PATHS
+        .iter()
+        .position(|route| path.starts_with(route))
+        .expect("known route");
+    format!(r#"{{"model":"{}"}}"#, ALIASES[index]).into_bytes()
+}
 const MASTER_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 // Hold this through gateway startup: another test must not acquire the released
@@ -96,9 +105,14 @@ impl TestDatabase {
                     .await
                     .map_err(|_| "create test provider")?;
                 store
-                    .activate(record.id, record.version, PROTOCOLS[index])
+                    .create_model(ModelMappingInput {
+                        alias: ALIASES[index].into(),
+                        provider_id: record.id,
+                        upstream_model_id: "mock".into(),
+                        protocols: vec![PROTOCOLS[index]],
+                    })
                     .await
-                    .map_err(|_| "activate test provider")?;
+                    .map_err(|_| "map test model")?;
             }
             Ok::<(), &'static str>(())
         });

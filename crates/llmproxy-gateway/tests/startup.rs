@@ -9,7 +9,9 @@ use std::{
 };
 
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{DatabaseConfig, ProviderInput, ProviderPaths, ProviderStore};
+use llmproxy_store::{
+    DatabaseConfig, ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore,
+};
 use toasty::migration::{MigrationFile, MigrationSet};
 
 const MASTER_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
@@ -89,7 +91,7 @@ fn start(directory: &Path, database_url: Option<&str>) -> RunningGateway {
     let mut running = RunningGateway { child, address };
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if let Some(response) = request(address, "/ui")
+        if let Some(response) = request(address, "/ui/providers")
             && response.starts_with("HTTP/1.1 200")
         {
             return running;
@@ -114,9 +116,9 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
     assert!(database.is_file());
     assert!(key_file.is_file());
     assert!(
-        request(first.address, "/ui")
+        request(first.address, "/ui/providers")
             .unwrap()
-            .contains("Provider 管理")
+            .contains("Providers")
     );
     drop(first);
 
@@ -149,15 +151,22 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
             .await
             .unwrap();
         store
-            .activate(provider.id, provider.version, Protocol::OpenAiChat)
+            .create_model(ModelMappingInput {
+                alias: "restart/chat-model".into(),
+                provider_id: provider.id,
+                upstream_model_id: "chat-model".into(),
+                protocols: vec![Protocol::OpenAiChat],
+            })
             .await
             .unwrap();
     });
     drop(runtime);
 
     let second = start(&directory, None);
-    let html = request(second.address, "/ui").unwrap();
+    let html = request(second.address, "/ui/providers").unwrap();
     assert!(html.contains("Restarted SQLite Provider"));
+    let models = request(second.address, "/ui/models").unwrap();
+    assert!(models.contains("restart/chat-model"));
     drop(second);
     fs::remove_file(&key_file).unwrap();
     let rejected = command(&directory).output().unwrap();
@@ -226,8 +235,12 @@ async fn postgresql_startup_applies_pending_migration_and_rejects_wrong_key() {
                 .await
                 .unwrap()
                 .len(),
-            4
+            5
         );
+        toasty::sql::query("SELECT id FROM model_mappings")
+            .exec(&mut db)
+            .await
+            .unwrap();
         toasty::sql::query("SELECT openai_chat_path FROM providers")
             .exec(&mut db)
             .await

@@ -1,5 +1,7 @@
 # 多协议 Provider 与模型探测
 
+> 本文记录多协议 Provider 和探测功能的原始设计。当前模型选择与请求路由使用[模型映射与 Models 控制台](14-model-mapping.md)；文中“设为当前服务”是历史方案。
+
 关联：[原始需求](00-original-requirements.md) · [Provider 控制台](07-provider-console.md) · [任务](02-tasks.md#w多协议-provider-与模型探测)。
 
 ## 已确认的行为

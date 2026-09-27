@@ -1,5 +1,7 @@
 # Provider 管理控制台与数据库
 
+> 本文记录 Provider 控制台的实施过程。当前请求路由已改为模型别名映射，界面不再提供“设为当前”；现行行为见[模型映射与 Models 控制台](14-model-mapping.md)。
+
 关联：[原始需求](00-original-requirements.md)、[架构设计](01-architecture.md)、[任务列表](02-tasks.md)、[本地运行](03-development.md)。
 
 ## 本轮需求

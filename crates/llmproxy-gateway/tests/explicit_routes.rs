@@ -22,8 +22,11 @@ fn proxies_requests_headers_and_provider_errors_for_each_route() {
     let gateway = Gateway::start(std::array::from_fn(|index| {
         Provider::http(upstreams[index].0.address)
     }));
-    let body = b"{  \"model\":\"mock\",\"messages\":[] , \"input\":\"raw\" }\n";
     for (index, path) in PATHS.iter().enumerate() {
+        let body = format!(
+            "{{  \"model\":\"{}\",\"messages\":[] , \"input\":\"raw\" }}\n",
+            ALIASES[index]
+        );
         for status in [200, 400, 401, 429, 500, 503] {
             let target = format!("{path}?status={status}&encoded=%2F%20&tag=a&tag=b");
             let response = gateway.request(
@@ -39,7 +42,7 @@ fn proxies_requests_headers_and_provider_errors_for_each_route() {
                     "anthropic-version: client-version\r\n",
                     "anthropic-beta: test-beta\r\n",
                 ),
-                body,
+                body.as_bytes(),
             );
             assert_eq!(response.status, status, "{path}");
             assert_eq!(
@@ -65,7 +68,10 @@ fn proxies_requests_headers_and_provider_errors_for_each_route() {
             let received = upstreams[index].1.recv_timeout(DEADLINE).unwrap();
             assert_eq!(received.method, "POST");
             assert_eq!(received.target, target);
-            assert_eq!(received.body, body);
+            assert_eq!(
+                received.body,
+                b"{  \"model\":\"mock\",\"messages\":[] , \"input\":\"raw\" }\n"
+            );
             assert_eq!(
                 values(&received.headers, "host"),
                 [upstreams[index].0.address.to_string()]
@@ -114,7 +120,7 @@ fn preserves_client_anthropic_version_without_config_override() {
                 "POST",
                 PATHS[2],
                 "anthropic-version: client-version\r\n",
-                b"{}"
+                &model_body(PATHS[2])
             )
             .body(),
         b"ok"
@@ -126,7 +132,12 @@ fn preserves_client_anthropic_version_without_config_override() {
         ),
         ["client-version"]
     );
-    assert_eq!(gateway.request("POST", PATHS[2], "", b"{}").status, 200);
+    assert_eq!(
+        gateway
+            .request("POST", PATHS[2], "", &model_body(PATHS[2]))
+            .status,
+        200
+    );
     assert!(
         values(
             &received.recv_timeout(DEADLINE).unwrap().headers,
@@ -144,7 +155,12 @@ fn rejects_connection_options_that_conflict_with_response_framing() {
     });
     let gateway = Gateway::start([Provider::http(upstream.address); 3]);
     for option in ["content-length", "transfer-encoding", "content-encoding"] {
-        let response = gateway.request("POST", &format!("{}?{option}", PATHS[0]), "", b"{}");
+        let response = gateway.request(
+            "POST",
+            &format!("{}?{option}", PATHS[0]),
+            "",
+            &model_body(PATHS[0]),
+        );
         assert_eq!(response.status, 502);
         requests.recv_timeout(DEADLINE).unwrap();
     }
@@ -199,11 +215,12 @@ fn streams_each_protocol_before_upstream_finishes() {
             finish_chunks(stream);
         });
         let gateway = Gateway::start([Provider::http(upstream.address); 3]);
+        let stream_body = format!(r#"{{"model":"{}","stream":true}}"#, ALIASES[index]);
         let mut response = gateway.request(
             "POST",
             PATHS[index],
             "Accept: text/event-stream\r\n",
-            b"{\"stream\":true}",
+            stream_body.as_bytes(),
         );
         assert_eq!(response.status, 200);
         assert_eq!(
@@ -242,7 +259,7 @@ fn active_sse_outlives_the_read_timeout() {
     provider.read_ms = 1100;
     let gateway = Gateway::start([provider; 3]);
     let start = Instant::now();
-    let response = gateway.request("POST", PATHS[0], "", b"{}");
+    let response = gateway.request("POST", PATHS[0], "", &model_body(PATHS[0]));
     assert_eq!(response.status, 200);
     assert_eq!(response.body(), b"data: heartbeat\n\n".repeat(5));
     assert!(start.elapsed() > Duration::from_millis(provider.read_ms));
@@ -262,7 +279,7 @@ fn response_header_timeout_is_504_and_never_retries() {
     let gateway = Gateway::start([provider; 3]);
     for path in PATHS {
         let started = Instant::now();
-        let response = gateway.request("POST", path, "", b"{}");
+        let response = gateway.request("POST", path, "", &model_body(path));
         assert_eq!(response.status, 504, "{}", gateway.logs());
         assert!(started.elapsed() < DEADLINE);
         assert!(started.elapsed() >= Duration::from_millis(provider.read_ms));
@@ -290,7 +307,7 @@ fn sse_timeout_or_upstream_disconnect_truncates_without_a_second_response() {
         let gateway = Gateway::start([provider; 3]);
         for path in PATHS {
             let started = Instant::now();
-            let mut response = gateway.request("POST", path, "", b"{}");
+            let mut response = gateway.request("POST", path, "", &model_body(path));
             assert_eq!(response.status, 200);
             assert_eq!(
                 response.bytes(b"data: partial\n\n".len()),
@@ -373,7 +390,7 @@ fn client_cancellation_closes_the_upstream_stream() {
         panic!("gateway did not cancel the upstream stream");
     });
     let gateway = Gateway::start([Provider::http(upstream.address); 3]);
-    let mut response = gateway.request("POST", PATHS[2], "", b"{}");
+    let mut response = gateway.request("POST", PATHS[2], "", &model_body(PATHS[2]));
     assert_eq!(response.bytes(13), b"data: first\n\n");
     response.cancel();
     release.send(()).unwrap();
@@ -388,7 +405,10 @@ fn connection_refusal_is_502_and_gateway_remains_available() {
     let gateway = Gateway::start([Provider::http(address); 3]);
     drop(reserved);
     for path in PATHS {
-        assert_eq!(gateway.request("POST", path, "", b"{}").status, 502);
+        assert_eq!(
+            gateway.request("POST", path, "", &model_body(path)).status,
+            502
+        );
     }
     assert_eq!(gateway.request("POST", "/unknown", "", b"{}").status, 404);
 }
@@ -415,7 +435,9 @@ fn tls_client_hello_has_hostname_sni_and_handshake_timeout_is_504() {
     let gateway = Gateway::start([provider; 3]);
     let started = Instant::now();
     assert_eq!(
-        gateway.request("POST", PATHS[0], "", b"{}").status,
+        gateway
+            .request("POST", PATHS[0], "", &model_body(PATHS[0]))
+            .status,
         504,
         "{}",
         gateway.logs()
@@ -489,7 +511,9 @@ fn stalled_upstream_request_write_is_504_without_retry() {
     provider.read_ms = 2500;
     let gateway = Gateway::start([provider; 3]);
     let mut stream = gateway.connect();
-    write!(stream, "POST {} HTTP/1.1\r\nHost: client.invalid\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", PATHS[1], 128 * 1024 * 1024).unwrap();
+    let prefix = br#"{"model":"test-responses","input":""#;
+    write!(stream, "POST {} HTTP/1.1\r\nHost: client.invalid\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", PATHS[1], 128 * 1024 * 1024 + prefix.len()).unwrap();
+    stream.write_all(prefix).unwrap();
     let mut writer = stream.try_clone().unwrap();
     let sending = thread::spawn(move || {
         let block = vec![b'x'; 64 * 1024];

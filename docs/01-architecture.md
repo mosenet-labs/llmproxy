@@ -2,21 +2,21 @@
 
 ## 目标和范围
 
-提供四个入口：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` 和 `POST /v1/auto`。前三个入口透明代理原生协议；自动入口识别协议后代理到对应上游，不转换协议请求体或响应体（HTTP 自动入口仍待实现）。Topcoat 控制台通过 SQLite 或 PostgreSQL 管理 Provider。
+提供四个入口：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` 和 `POST /v1/auto`。前三个入口保留原生协议，请求体顶层模型别名改写为上游模型 ID 后转发；响应体原样透传。自动入口识别协议后转发（HTTP 自动入口仍待实现）。Topcoat 控制台通过 SQLite 或 PostgreSQL 管理 Provider 与模型映射。
 
 ## 分层与工程结构
 
 ```text
 客户端
   -> Pingora 接入层（方法/路径、鉴权、限制、流式代理）
-  -> 应用层（协议识别、选择上游、配置快照）
-  -> 领域层（协议、Provider、路由、配置校验）
+  -> 应用层（协议识别、模型别名路由、配置快照）
+  -> 领域层（协议、Provider、模型映射、配置校验）
   -> 基础设施（Toasty/SQLite/PostgreSQL、凭据加密、环境配置、OTLP、日志和指标）
 ```
 
-`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是进程内的 Topcoat 路由库，复用 `topcoat-ant-design` 构建 Provider 管理页面；`llmproxy-store` 封装 Toasty 模型、双后端迁移、事务和密钥加密。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
+`llmproxy-core` 只含类型、配置校验和纯路由/识别逻辑，不依赖 Pingora 或 Topcoat。`llmproxy-gateway` 实现 Pingora 回调和遥测。`llmproxy-console` 是进程内的 Topcoat 路由库，复用 `topcoat-ant-design` 构建 Providers 与 Models 页面；`llmproxy-store` 封装 Toasty 模型、双后端迁移、事务和密钥加密。控制台写入数据库，网关每秒加载并原子切换不可变快照，请求处理不查询数据库。
 
-所选数据库是唯一的 Provider 来源；缺省使用持久化 SQLite，显式配置 PostgreSQL 时继续使用其独立数据。每种协议允许多个 Provider，但只有一个当前绑定；在途请求持有原 Provider 快照。具体设计见 [Provider 管理控制台](07-provider-console.md)和[数据库兼容方案](12-sqlite-compatibility-plan.md)。
+所选数据库是 Provider 与模型映射的唯一来源；缺省使用持久化 SQLite，显式配置 PostgreSQL 时继续使用其独立数据。网关按 `(协议, 模型别名)` 唯一确定 Provider、上游模型 ID 和协议路径；没有当前 Provider 兜底。在途请求持有原快照。具体设计见[模型映射](14-model-mapping.md)和[数据库兼容方案](12-sqlite-compatibility-plan.md)。
 
 统一入口由 `llmproxy-gateway` 的 `llmproxy` 二进制承载，Pingora 在请求过滤阶段将 `/ui` 交给 Topcoat，其余按代理路径分发。默认 `127.0.0.1:3200`，见[单端口设计](11-unified-service.md)。
 
@@ -35,7 +35,7 @@
 
 优先通过 `anthropic-version` 识别 Anthropic Messages；没有该头时，JSON 顶层 `input` 对应 Responses，顶层 `messages` 对应 Chat。两种信号冲突或缺失时返回 `400`。仅凭 `messages` 无法可靠区分 Chat 与 Anthropic，因此未提供 Anthropic 标识的 Messages 请求不能保证被识别；调用方可使用明确入口。
 
-Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_filter` 每次只收到一块数据。因此自动入口必须先限量读取请求体、识别并重放，再建立上游连接；不可仅在 `request_body_filter` 中做上游选择。这个处理器作为单独任务实现，须验证同端口接入和请求体重放。明确入口继续使用 Pingora 的透明流式代理。自动入口设可配置请求体上限，超限返回 `413`。参见 [Pingora 请求阶段](https://github.com/cloudflare/pingora/blob/main/docs/user_guide/phase.md)。
+Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_filter` 每次只收到一块数据。明确入口已在 `request_filter` 读取至顶层 `model` 字段，选择映射后借助 Pingora 重试缓冲回放前缀，并继续流式转发后续正文；可读前缀上限为 64 KiB。自动入口还须限量读取请求体以识别协议，作为单独任务实现。参见[模型映射的阶段设计](14-model-mapping.md#pingora-阶段)和 [Pingora 请求阶段](https://github.com/cloudflare/pingora/blob/main/docs/user_guide/phase.md)。
 
 ## 可观测性
 
@@ -52,10 +52,10 @@ Pingora 的 `upstream_peer` 在请求体过滤器前执行，而 `request_body_f
 - 连接超时与响应读取超时分别配置，SSE 不做全量缓冲或自动压缩。
 - `POST` 请求在请求体已发出或响应已开始后不重试，避免重复生成和计费。
 - 配置在启动和热更新时校验；显式 PostgreSQL 缺少主密钥或迁移失败、所选数据库连接失败、SQLite 配套密钥缺失或主密钥错误均阻止启动。启动时先迁移所选数据库，再加载 Provider；运行中加载失败保留上一份有效快照。
-- 数据库允许空 Provider 配置，未绑定 Provider 的协议返回 `503`。
+- 数据库允许零模型映射；缺少或无效的顶层 `model` 返回 `400`，找不到别名与协议映射返回 `404`，映射的 Provider 已停用返回 `503`。
 
 ## Topcoat 控制台与后续演进
 
-管理页面与网关运行于同一进程、同一端口，控制台挂载 `/ui` 并限制回环客户端访问，提供 Provider 新增、编辑、启停、删除及当前协议绑定。采用 PostgreSQL 持久化、Toasty ORM、AES-256-GCM 凭据加密和乐观版本检查；本机表单使用 Host/Origin 校验和 CSRF token。
+管理页面与网关运行于同一进程、同一端口，控制台挂载 `/ui` 并限制回环客户端访问。`/ui/providers` 管理上游连接，`/ui/models` 从已启用 Provider 探测候选模型并管理别名与协议，`/ui/routes` 显示映射数量。采用 SQLite 或 PostgreSQL 持久化、Toasty ORM、AES-256-GCM 凭据加密和乐观版本检查；本机表单使用 Host/Origin 校验和 CSRF token。
 
 登录权限、操作审计、健康检查和聚合指标视图是后续任务。需要多实例配置快速同步时，可在当前轮询基础上增加通知；数据库继续作为配置来源。Topcoat 项目资料见[官方仓库](https://github.com/tokio-rs/topcoat)。

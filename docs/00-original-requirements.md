@@ -22,6 +22,8 @@
 
 ## 关联文档
 
+模型映射补充确认：新增 Models 页面；只从已启用 Provider 的模型接口选择模型，默认别名为 `Provider名称/模型ID`；每个模型可选择多个协议，至少一个；请求严格按协议和模型别名映射，不再依赖“当前 Provider”兜底。设计见[模型映射与 Models 控制台](14-model-mapping.md)，实施任务见[M：模型映射](02-tasks.md#m模型映射)。
+
 最新补充：
 
 > 新增provider表单
@@ -71,3 +73,4 @@
 - [单进程、单端口与 /ui 控制台](11-unified-service.md)
 - [SQLite 兼容与默认数据库计划](12-sqlite-compatibility-plan.md)
 - [多协议 Provider、可配置路径与模型探测](13-provider-interfaces-and-model-discovery.md)
+- [模型映射与 Models 控制台](14-model-mapping.md)

@@ -185,3 +185,32 @@ pub struct ModelProbeTarget {
     pub secret: String,
     pub anthropic_version: Option<String>,
 }
+
+#[derive(Clone, Debug)]
+pub struct ModelMappingInput {
+    pub alias: String,
+    pub provider_id: i64,
+    pub upstream_model_id: String,
+    pub protocols: Vec<Protocol>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelMappingView {
+    pub id: i64,
+    pub alias: String,
+    pub provider_id: i64,
+    pub provider_name: String,
+    pub upstream_model_id: String,
+    pub protocols: Vec<Protocol>,
+    pub provider_enabled: bool,
+    pub version: u64,
+}
+
+/// Gateway-only model route. Credentials are never exposed to the console.
+pub struct ModelRoute {
+    pub alias: String,
+    pub upstream_model_id: String,
+    pub enabled: bool,
+    pub provider: Option<ActiveProvider>,
+    pub protocol: Protocol,
+}

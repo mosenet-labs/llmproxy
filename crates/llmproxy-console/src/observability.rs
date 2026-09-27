@@ -210,6 +210,7 @@ fn route_label(path: &str) -> &'static str {
         "/ui" => "/ui",
         "/ui/routes" => "/ui/routes",
         "/ui/providers" => "/ui/providers",
+        "/ui/models" => "/ui/models",
         "/ui/providers/form" => "/ui/providers/form",
         "/ui/providers/save" => "/ui/providers/save",
         "/ui/providers/action" => "/ui/providers/action",

@@ -7,7 +7,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::protocol::Protocol;
-use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore};
+use llmproxy_store::{ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore};
 use support::*;
 
 #[tokio::test]
@@ -33,18 +33,20 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
         anthropic_messages: Some("/custom/messages".into()),
     };
     provider.anthropic_version = Some("2023-06-01".into());
-    let mut record = store.create(provider).await.unwrap();
-    for protocol in [
-        Protocol::OpenAiChat,
-        Protocol::OpenAiResponses,
-        Protocol::AnthropicMessages,
-    ] {
-        store
-            .activate(record.id, record.version, protocol)
-            .await
-            .unwrap();
-        record = store.get(record.id).await.unwrap();
-    }
+    let record = store.create(provider).await.unwrap();
+    store
+        .create_model(ModelMappingInput {
+            alias: "public/mock".into(),
+            provider_id: record.id,
+            upstream_model_id: "upstream-model".into(),
+            protocols: vec![
+                Protocol::OpenAiChat,
+                Protocol::OpenAiResponses,
+                Protocol::AnthropicMessages,
+            ],
+        })
+        .await
+        .unwrap();
     let gateway = Gateway::database(&url, &master_key);
     for (downstream, upstream_path, auth) in [
         (
@@ -55,10 +57,67 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
         ("/v1/responses", "/custom/responses", "authorization"),
         ("/v1/messages", "/custom/messages", "x-api-key"),
     ] {
-        assert_eq!(gateway.request("POST", downstream, "", b"{}").status, 200);
+        assert_eq!(
+            gateway
+                .request("POST", downstream, "", br#"{"model":"public/mock"}"#)
+                .status,
+            200
+        );
         let request = requests.recv_timeout(DEADLINE).unwrap();
         assert_eq!(request.target, upstream_path);
         assert!(values(&request.headers, auth)[0].contains("shared-test-key"));
+        assert_eq!(request.body, br#"{"model":"upstream-model"}"#);
+    }
+    assert_eq!(gateway.request("POST", PATHS[0], "", b"{}").status, 400);
+    assert_eq!(
+        gateway
+            .request("POST", PATHS[0], "", br#"{"model":"unknown"}"#)
+            .status,
+        404
+    );
+    let large = format!(
+        r#"{{"model":"public/mock","input":"{}"}}"#,
+        "x".repeat(100_000)
+    );
+    assert_eq!(
+        gateway
+            .request("POST", PATHS[0], "", large.as_bytes())
+            .status,
+        200
+    );
+    let request = requests.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        request.body,
+        large.replace("public/mock", "upstream-model").as_bytes()
+    );
+    let late = format!(
+        r#"{{"input":"{}","model":"public/mock"}}"#,
+        "x".repeat(66_000)
+    );
+    assert_eq!(
+        gateway
+            .request("POST", PATHS[0], "", late.as_bytes())
+            .status,
+        413
+    );
+    let current = store.get(record.id).await.unwrap();
+    store
+        .set_enabled(record.id, current.version, false)
+        .await
+        .unwrap();
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let status = gateway
+            .request("POST", PATHS[0], "", br#"{"model":"public/mock"}"#)
+            .status;
+        if status == 503 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "disabled mapping did not become unavailable"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     drop(gateway);
     drop(store);
@@ -148,7 +207,12 @@ async fn exercise_gateway(url: &str) {
     let gateway = Gateway::database(url, &master_key);
 
     for path in PATHS {
-        assert_eq!(gateway.request("POST", path, "", b"{}").status, 503);
+        assert_eq!(
+            gateway
+                .request("POST", path, "", br#"{"model":"public/model"}"#)
+                .status,
+            404
+        );
     }
     assert_eq!(gateway.request("POST", "/v1/auto", "", b"{}").status, 501);
     assert_eq!(old_upstream.count(), 0);
@@ -162,8 +226,13 @@ async fn exercise_gateway(url: &str) {
         ))
         .await
         .unwrap();
-    store
-        .activate(old.id, old.version, Protocol::OpenAiChat)
+    let mapping = store
+        .create_model(ModelMappingInput {
+            alias: "public/model".into(),
+            provider_id: old.id,
+            upstream_model_id: "upstream-old".into(),
+            protocols: vec![Protocol::OpenAiChat],
+        })
         .await
         .unwrap();
     wait_for_route(&gateway, 200, Some(b"old-provider"), None).await;
@@ -181,7 +250,7 @@ async fn exercise_gateway(url: &str) {
         "POST",
         &format!("{}?stream=1", PATHS[0]),
         "Accept: text/event-stream\r\n",
-        b"{}",
+        br#"{"model":"public/model"}"#,
     );
     assert_eq!(in_flight.status, 200);
     assert_eq!(
@@ -212,7 +281,16 @@ async fn exercise_gateway(url: &str) {
         .await
         .unwrap();
     store
-        .activate(new.id, new.version, Protocol::OpenAiChat)
+        .update_model(
+            mapping.id,
+            mapping.version,
+            ModelMappingInput {
+                alias: "public/model".into(),
+                provider_id: new.id,
+                upstream_model_id: "upstream-new".into(),
+                protocols: vec![Protocol::OpenAiChat],
+            },
+        )
         .await
         .unwrap();
     wait_for_route(
@@ -281,7 +359,7 @@ async fn exercise_gateway(url: &str) {
         "provider snapshot refresh failed; retaining the last snapshot",
     )
     .await;
-    let response = gateway.request("POST", PATHS[0], "", b"{}");
+    let response = gateway.request("POST", PATHS[0], "", br#"{"model":"public/model"}"#);
     assert_eq!(response.status, 200);
     assert_eq!(
         values(&response.headers, "x-mock-authorization"),
@@ -298,9 +376,21 @@ async fn exercise_gateway(url: &str) {
         .unwrap();
     wait_for_route(&gateway, 503, None, None).await;
     let count = new_upstream.count();
-    assert_eq!(gateway.request("POST", PATHS[0], "", b"{}").status, 503);
+    assert_eq!(
+        gateway
+            .request("POST", PATHS[0], "", br#"{"model":"public/model"}"#)
+            .status,
+        503
+    );
     assert_eq!(new_upstream.count(), count);
-    assert!(store.load_active().await.unwrap().is_empty());
+    assert!(
+        store
+            .load_model_routes()
+            .await
+            .unwrap()
+            .iter()
+            .all(|route| !route.enabled)
+    );
     let logs = gateway.logs();
     for secret in [
         "old-dummy-key",
@@ -325,7 +415,7 @@ async fn wait_for_route(
     let deadline = Instant::now() + DEADLINE;
     loop {
         // Every poll is an independent new request observing snapshot convergence.
-        let response = gateway.request("POST", PATHS[0], "", b"{}");
+        let response = gateway.request("POST", PATHS[0], "", br#"{"model":"public/model"}"#);
         let matched = response.status == status
             && authorization.is_none_or(|expected| {
                 values(&response.headers, "x-mock-authorization") == [expected]

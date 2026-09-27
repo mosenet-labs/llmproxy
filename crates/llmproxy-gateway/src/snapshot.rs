@@ -6,7 +6,7 @@ use std::{
 };
 
 use llmproxy_core::{protocol::Protocol, provider::validate_upstream};
-use llmproxy_store::{ActiveProvider, DatabaseConfig, ProviderStore, StoreError};
+use llmproxy_store::{DatabaseConfig, ModelRoute, ProviderStore, StoreError};
 use tokio::{runtime::Builder, sync::oneshot, time};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -40,29 +40,45 @@ impl ResolvedProvider {
 
 #[derive(Default)]
 pub struct ProviderSnapshot {
-    providers: HashMap<Protocol, Arc<ResolvedProvider>>,
+    models: HashMap<(Protocol, String), Arc<ResolvedModel>>,
+}
+
+pub struct ResolvedModel {
+    pub upstream_model_id: String,
+    pub provider: Option<Arc<ResolvedProvider>>,
 }
 
 impl ProviderSnapshot {
     pub fn new(
-        providers: impl IntoIterator<Item = (Protocol, ResolvedProvider)>,
+        models: impl IntoIterator<Item = (Protocol, String, ResolvedModel)>,
     ) -> Result<Self, &'static str> {
         let mut snapshot = Self::default();
-        for (protocol, provider) in providers {
+        for (protocol, alias, model) in models {
             if snapshot
-                .providers
-                .insert(protocol, Arc::new(provider))
+                .models
+                .insert((protocol, alias), Arc::new(model))
                 .is_some()
             {
-                return Err("multiple active providers for one protocol");
+                return Err("duplicate model alias for protocol");
             }
         }
         Ok(snapshot)
     }
 
-    fn from_database(providers: Vec<ActiveProvider>) -> Result<Self, &'static str> {
-        let mut resolved = Vec::with_capacity(providers.len());
-        for provider in providers {
+    fn from_database(routes: Vec<ModelRoute>) -> Result<Self, &'static str> {
+        let mut resolved = Vec::with_capacity(routes.len());
+        for route in routes {
+            let Some(provider) = route.provider else {
+                resolved.push((
+                    route.protocol,
+                    route.alias,
+                    ResolvedModel {
+                        upstream_model_id: route.upstream_model_id,
+                        provider: None,
+                    },
+                ));
+                continue;
+            };
             // Validate the entire candidate before replacing the live snapshot,
             // including rows that may have been edited outside the console.
             validate_upstream(
@@ -83,17 +99,21 @@ impl ProviderSnapshot {
                 return Err("invalid active provider path");
             }
             resolved.push((
-                provider.protocol,
-                ResolvedProvider {
-                    upstream_path: provider.upstream_path,
-                    host: provider.host,
-                    port: provider.port,
-                    tls: provider.tls,
-                    secret: provider.secret,
-                    anthropic_version: provider.anthropic_version,
-                    connect_timeout_ms: provider.connect_timeout_ms,
-                    read_timeout_ms: provider.read_timeout_ms,
-                    write_timeout_ms: provider.write_timeout_ms,
+                route.protocol,
+                route.alias,
+                ResolvedModel {
+                    upstream_model_id: route.upstream_model_id,
+                    provider: Some(Arc::new(ResolvedProvider {
+                        upstream_path: provider.upstream_path,
+                        host: provider.host,
+                        port: provider.port,
+                        tls: provider.tls,
+                        secret: provider.secret,
+                        anthropic_version: provider.anthropic_version,
+                        connect_timeout_ms: provider.connect_timeout_ms,
+                        read_timeout_ms: provider.read_timeout_ms,
+                        write_timeout_ms: provider.write_timeout_ms,
+                    })),
                 },
             ));
         }
@@ -113,12 +133,12 @@ impl ProviderSnapshots {
         }
     }
 
-    pub fn select(&self, protocol: Protocol) -> Option<Arc<ResolvedProvider>> {
+    pub fn select(&self, protocol: Protocol, alias: &str) -> Option<Arc<ResolvedModel>> {
         self.current
             .read()
             .unwrap_or_else(|error| error.into_inner())
-            .providers
-            .get(&protocol)
+            .models
+            .get(&(protocol, alias.to_owned()))
             .cloned()
     }
 
@@ -155,7 +175,7 @@ impl ProviderSnapshots {
                 event_kind = "runtime",
                 "provider database schema ready"
             );
-            let providers = time::timeout(DATABASE_TIMEOUT, store.load_active())
+            let providers = time::timeout(DATABASE_TIMEOUT, store.load_model_routes())
                 .await
                 .map_err(|_| "initial provider snapshot timed out")?
                 .map_err(|_| "cannot load provider snapshot; check provider records")?;
@@ -179,7 +199,7 @@ impl ProviderSnapshots {
                     loop {
                         let next_snapshot = async {
                             interval.tick().await;
-                            time::timeout(DATABASE_TIMEOUT, store.load_active())
+                            time::timeout(DATABASE_TIMEOUT, store.load_model_routes())
                                 .await
                                 .map_err(|_| ())?
                                 .map_err(|_| ())
@@ -239,7 +259,9 @@ impl Drop for DatabaseRefresh {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderSnapshot, ProviderSnapshots, ResolvedProvider};
+    use std::sync::Arc;
+
+    use super::{ProviderSnapshot, ProviderSnapshots, ResolvedModel, ResolvedProvider};
     use llmproxy_core::protocol::Protocol;
 
     fn provider(host: &str, secret: &str) -> ResolvedProvider {
@@ -261,34 +283,67 @@ mod tests {
         let snapshots = ProviderSnapshots::new(
             ProviderSnapshot::new([(
                 Protocol::OpenAiChat,
-                provider("old.example", "old-dummy-key"),
+                "public/one".to_owned(),
+                ResolvedModel {
+                    upstream_model_id: "one".to_owned(),
+                    provider: Some(Arc::new(provider("old.example", "old-dummy-key"))),
+                },
             )])
             .unwrap(),
         );
-        let in_flight = snapshots.select(Protocol::OpenAiChat).unwrap();
+        let in_flight = snapshots
+            .select(Protocol::OpenAiChat, "public/one")
+            .unwrap();
         snapshots.replace(
             ProviderSnapshot::new([(
                 Protocol::OpenAiChat,
-                provider("new.example", "new-dummy-key"),
+                "public/one".to_owned(),
+                ResolvedModel {
+                    upstream_model_id: "two".to_owned(),
+                    provider: Some(Arc::new(provider("new.example", "new-dummy-key"))),
+                },
             )])
             .unwrap(),
         );
-        let next_request = snapshots.select(Protocol::OpenAiChat).unwrap();
-        assert_eq!(in_flight.host, "old.example");
-        assert_eq!(in_flight.secret, "old-dummy-key");
-        assert_eq!(next_request.host, "new.example");
-        assert_eq!(next_request.secret, "new-dummy-key");
+        let next_request = snapshots
+            .select(Protocol::OpenAiChat, "public/one")
+            .unwrap();
+        assert_eq!(in_flight.provider.as_ref().unwrap().host, "old.example");
+        assert_eq!(in_flight.provider.as_ref().unwrap().secret, "old-dummy-key");
+        assert_eq!(next_request.provider.as_ref().unwrap().host, "new.example");
+        assert_eq!(
+            next_request.provider.as_ref().unwrap().secret,
+            "new-dummy-key"
+        );
         snapshots.replace(ProviderSnapshot::default());
-        assert!(snapshots.select(Protocol::OpenAiChat).is_none());
-        assert_eq!(next_request.host, "new.example");
+        assert!(
+            snapshots
+                .select(Protocol::OpenAiChat, "public/one")
+                .is_none()
+        );
+        assert_eq!(next_request.provider.as_ref().unwrap().host, "new.example");
     }
 
     #[test]
     fn duplicate_active_protocols_do_not_produce_a_snapshot() {
         assert!(
             ProviderSnapshot::new([
-                (Protocol::OpenAiChat, provider("first.example", "dummy")),
-                (Protocol::OpenAiChat, provider("second.example", "dummy")),
+                (
+                    Protocol::OpenAiChat,
+                    "same".to_owned(),
+                    ResolvedModel {
+                        upstream_model_id: "one".to_owned(),
+                        provider: Some(Arc::new(provider("first.example", "dummy")))
+                    }
+                ),
+                (
+                    Protocol::OpenAiChat,
+                    "same".to_owned(),
+                    ResolvedModel {
+                        upstream_model_id: "two".to_owned(),
+                        provider: Some(Arc::new(provider("second.example", "dummy")))
+                    }
+                ),
             ])
             .is_err()
         );

@@ -2,7 +2,7 @@
 
 ## 控制台与网关启动
 
-运行 `bash scripts/dev.sh up` 会编译并启动单一 `llmproxy` 进程（3200）；进程启动时检查并执行待应用的数据库迁移，完成后才加载 Provider、开放端口。`/ui` 为控制台、`/v1/*` 为代理。新增 Provider 后选择“设为当前”；没有绑定的协议入口返回 `503`。从其他机器克隆时按 [Provider 控制台启动说明](07-provider-console.md#启动) 准备组件库。本机现有 `.env` 包含 PostgreSQL URL 时，仍会选择 PostgreSQL。
+运行 `bash scripts/dev.sh up` 会编译并启动单一 `llmproxy` 进程（3200）；进程启动时检查并执行待应用的数据库迁移，完成后才加载 Provider 和模型映射、开放端口。`/ui/providers` 与 `/ui/models` 为控制台，`/v1/*` 为代理。新增并启用 Provider 后，在 Models 页从 `/models` 探测结果选择上游模型、设置别名和至少一个协议。代理按请求体顶层 `model` 别名路由：缺少模型返回 `400`，无映射返回 `404`，映射的 Provider 已停用返回 `503`。从其他机器克隆时按 [Provider 控制台启动说明](07-provider-console.md#启动) 准备组件库。本机现有 `.env` 包含 PostgreSQL URL 时，仍会选择 PostgreSQL。
 
 不设置 `LLMPROXY_DATABASE_URL` 或设置为空白时，默认使用工作目录下的 `./data/llmproxy.sqlite3`。首次启动自动建目录、生成 `llmproxy.sqlite3.key` 并执行 SQLite 迁移；后续启动沿用同一密钥。请将数据库文件和密钥文件一起备份。已有数据库缺少密钥文件会拒绝启动；显式 `LLMPROXY_MASTER_KEY` 优先于密钥文件。`sqlite::memory:` 不适用于统一服务。
 
@@ -25,6 +25,8 @@ cargo test -p llmproxy-gateway --test explicit_routes
 ```
 
 网关测试使用本地 TCP 模拟上游和自动启动的网关进程，不需要真实 Provider API key 或 OpenObserve。默认使用独立临时 SQLite 文件运行控制台、明确入口、SSE 和可观测性集成测试，不会清空开发数据库。设置 `LLMPROXY_TEST_DATABASE_URL` 时，额外运行隔离 PostgreSQL schema 的回归测试；该 URL 必须指向测试数据库。运行环境需要允许监听和访问回环地址。完整行为约定与测试矩阵见[三个明确入口的联调验收](05-explicit-routes-validation.md)。
+
+三个明确入口必须发送未压缩 JSON，顶层 `model` 字段填写 Models 页配置的别名。它须完整落在请求体前 64 KiB；后续正文保持流式。网关只改写上游请求的 `model` 值，响应错误和 SSE 原样转发。模型映射的测试范围见[模型映射与 Models 控制台](14-model-mapping.md)。
 
 ## OTLP/OpenObserve
 

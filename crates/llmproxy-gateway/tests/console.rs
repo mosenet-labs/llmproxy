@@ -103,7 +103,7 @@ async fn exercise_http(database_url: &str) {
             "console exited before binding"
         );
         if client
-            .get(&base)
+            .get(format!("{base}/providers"))
             .send()
             .await
             .is_ok_and(|response| response.status() == StatusCode::OK)
@@ -115,30 +115,33 @@ async fn exercise_http(database_url: &str) {
     }
     assert!(ready, "console failed to become ready");
 
-    let response = client.get(&base).send().await.unwrap();
+    let response = client
+        .get(format!("{base}/providers"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.headers()["x-frame-options"], "DENY");
     assert_eq!(response.headers()["cache-control"], "no-store");
     let html = response.text().await.unwrap();
     assert!(html.contains("连接第一个模型服务"));
     assert!(html.contains("/ui/_topcoat/runtime/shards/provider-list"));
-    assert_navigation(&html, "/ui", "Provider 管理");
+    assert_navigation(&html, "/ui/providers", "Providers");
     assert!(!html.contains("id=\"routes\""));
     let routes = client.get(format!("{base}/routes")).send().await.unwrap();
     assert_eq!(routes.status(), StatusCode::OK);
     let routes = routes.text().await.unwrap();
     assert_navigation(&routes, "/ui/routes", "路由概览");
     assert!(!routes.contains("providers-panel"));
-    assert_eq!(routes.matches("尚未分配").count(), 3);
+    assert_eq!(routes.matches("0 个模型").count(), 3);
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
         assert!(routes.contains(path));
     }
-    let alias = client
-        .get(format!("{base}/providers"))
-        .send()
-        .await
-        .unwrap();
+    let alias = client.get(&base).send().await.unwrap();
     assert_eq!(alias.status(), StatusCode::SEE_OTHER);
-    assert_eq!(alias.headers()["location"], "/ui");
+    assert_eq!(alias.headers()["location"], "/ui/providers");
+    let models = client.get(format!("{base}/models")).send().await.unwrap();
+    assert_eq!(models.status(), StatusCode::OK);
+    assert_navigation(&models.text().await.unwrap(), "/ui/models", "Models");
     for asset in ["components.css", "console.css", "runtime.js"] {
         let response = client
             .get(format!("{base}/assets/{asset}"))
@@ -177,7 +180,11 @@ async fn exercise_http(database_url: &str) {
             .contains("font-family: \"JetBrains Mono\"")
     );
 
-    for (path, title) in [("/ui", "Provider 管理"), ("/ui/routes", "路由概览")] {
+    for (path, title) in [
+        ("/ui/providers", "Providers"),
+        ("/ui/models", "Models"),
+        ("/ui/routes", "路由概览"),
+    ] {
         let response = client
             .post(format!("{origin}{path}"))
             .header("content-type", "application/json")
@@ -210,7 +217,7 @@ async fn exercise_http(database_url: &str) {
         assert!(!editor.contains(&format!("name=\"{field}\"")));
     }
     let bad_host = client
-        .get(&base)
+        .get(format!("{base}/providers"))
         .header("host", "rebind.invalid")
         .send()
         .await
@@ -397,7 +404,9 @@ async fn exercise_http(database_url: &str) {
         .find(|provider| provider.name == "Chat Test")
         .unwrap();
     let filtered = client
-        .get(format!("{base}?q=Chat&protocol=openai_chat&state=enabled"))
+        .get(format!(
+            "{base}/providers?q=Chat&protocol=openai_chat&state=enabled"
+        ))
         .send()
         .await
         .unwrap()
@@ -408,8 +417,7 @@ async fn exercise_http(database_url: &str) {
     assert!(!filtered.contains("Responses Test"));
     assert!(!filtered.contains("Messages 测试"));
     assert!(!filtered.contains(PROVIDER_KEY));
-    assert!(filtered.contains("设为当前服务"));
-    assert!(filtered.contains(&format!("id=\"activate-menu-{}\"", chat.id)));
+    assert!(!filtered.contains("设为当前"));
     assert!(filtered.contains(&format!("id=\"disable-{}\"", chat.id)));
     assert!(!filtered.contains(&format!("id=\"delete-{}\"", chat.id)));
     assert!(filtered.contains("确认停用「Chat Test」？"));
@@ -430,7 +438,7 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     let failure = &rejected_delete;
-    assert!(failure.contains("「Chat Test」删除失败"));
+    assert!(failure.contains("「Chat Test」删除失败"), "{failure}");
     assert!(failure.contains("先停用"));
     assert!(!failure.contains("伪造名称"));
     let unchanged = store.get(chat.id).await.unwrap();
@@ -487,19 +495,8 @@ async fn exercise_http(database_url: &str) {
     assert!(!conflict.contains(PROVIDER_KEY));
     assert_eq!(store.get(chat.id).await.unwrap().version, updated.version);
 
-    let activate = action_form(&csrf, updated.id, updated.version, "activate");
-    let response = post(&client, &base, "/providers/action", &activate).await;
-    success_notice(
-        &client,
-        &base,
-        response,
-        "activate",
-        "Chat Renamed",
-        "OpenAI Chat 已设为当前服务",
-    )
-    .await;
     let active = store.get(chat.id).await.unwrap();
-    assert!(active.active && active.enabled);
+    assert!(!active.active && active.enabled);
     let routes = client
         .get(format!("{base}/routes"))
         .send()
@@ -508,23 +505,22 @@ async fn exercise_http(database_url: &str) {
         .text()
         .await
         .unwrap();
-    assert!(routes.contains("Chat Renamed"));
-    assert!(routes.contains("当前 Provider"));
+    assert!(routes.contains("0 个模型"));
     assert!(!routes.contains(PROVIDER_KEY));
     assert_eq!(
-        store.load_active().await.unwrap()[0].secret,
+        store.probe_target(chat.id).await.unwrap().secret,
         PROVIDER_KEY,
         "empty edit key must preserve the credential"
     );
     let list_html = client
-        .get(&base)
+        .get(format!("{base}/providers"))
         .send()
         .await
         .unwrap()
         .text()
         .await
         .unwrap();
-    assert!(list_html.contains("当前 Chat"));
+    assert!(!list_html.contains("当前 Chat"));
     assert!(!list_html.contains(&format!("id=\"activate-menu-{}\"", active.id)));
     assert!(list_html.contains(&format!("id=\"disable-{}\"", active.id)));
     assert!(!list_html.contains(&format!("id=\"delete-{}\"", active.id)));
@@ -552,7 +548,7 @@ async fn exercise_http(database_url: &str) {
     let failure = &rejected_delete;
     assert!(failure.contains("「Chat Renamed」删除失败"));
     assert!(failure.contains("先停用"));
-    assert!(store.get(chat.id).await.unwrap().active);
+    assert!(!store.get(chat.id).await.unwrap().active);
     let disable = action_form(&csrf, active.id, active.version, "disable");
     let response = post(&client, &base, "/providers/action", &disable).await;
     let disabled_html = success_notice(
@@ -640,7 +636,7 @@ async fn exercise_http(database_url: &str) {
         client
             .post(format!("{base}/providers/save"))
             .header("content-type", "application/x-www-form-urlencoded")
-            .body("x".repeat(40 * 1024))
+            .body("x".repeat(llmproxy_console::BODY_LIMIT + 1))
             .send()
             .await
             .unwrap()
@@ -697,9 +693,7 @@ async fn exercise_http(database_url: &str) {
         .iter()
         .filter(|event| event["fields"]["event_kind"] == "provider_operation")
         .collect();
-    for action in [
-        "create", "update", "activate", "enable", "disable", "delete",
-    ] {
+    for action in ["create", "update", "enable", "disable", "delete"] {
         assert!(
             operations
                 .iter()
@@ -740,7 +734,7 @@ async fn exercise_http(database_url: &str) {
     let (upstream, received) = support::Mock::http(|request, stream| {
         let body: &[u8] =
             if request.target == "/custom/models" || request.target == "/preview/models" {
-                br#"{"data":[{"id":"mock-model"}]}"#
+                br#"{"data":[{"id":"mock-model"},{"id":"mock-model-a"},{"id":"mock-model-b"}]}"#
             } else {
                 br#"{"provider":"ui-configured"}"#
             };
@@ -834,27 +828,56 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert_eq!(hidden(&editor, "models_probe_status"), "success");
-    let response = post(
-        &client,
-        &base,
-        "/providers/action",
-        &action_form(&csrf, provider.id, provider.version, "activate"),
-    )
-    .await;
-    success_notice(
-        &client,
-        &base,
-        response,
-        "activate",
-        "Unified Mock",
-        "OpenAI Chat 已设为当前服务",
-    )
-    .await;
+    let model_form = serde_json::json!({
+        "csrf": csrf,
+        "id": null,
+        "version": null,
+        "alias": "",
+        "provider_id": provider.id.to_string(),
+        "upstream_model_id": "mock-model",
+        "chat": true,
+        "responses": true,
+        "messages": false
+    });
+    let response = client
+        .post(format!("{base}/_topcoat/runtime/procedures/save-model"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&vec![model_form.to_string()]).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(result["ok"], "「Unified Mock/mock-model」已创建");
+    assert_eq!(
+        received.recv_timeout(support::DEADLINE).unwrap().target,
+        "/custom/models"
+    );
+    let models = client
+        .get(format!("{base}/models"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(models.contains("Unified Mock/mock-model"));
+    assert!(models.contains("Chat"));
+    assert!(models.contains("Responses"));
+    let routes = client
+        .get(format!("{base}/routes"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(routes.matches("1 个模型").count(), 2);
     let mut forwarded = false;
     for _ in 0..60 {
         let response = client
             .post(format!("{origin}/v1/chat/completions"))
-            .body(r#"{"model":"mock","messages":[]}"#)
+            .body(r#"{"model":"Unified Mock/mock-model","messages":[]}"#)
             .send()
             .await
             .unwrap();
@@ -866,25 +889,66 @@ async fn exercise_http(database_url: &str) {
             forwarded = true;
             break;
         }
-        // The preceding CRUD cases may still be in the one-second snapshot.
-        // An old placeholder upstream returns 502; an unbound snapshot returns 503.
-        assert!(matches!(
-            response.status(),
-            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
-        ));
+        // The one-second snapshot may still have no model mapping.
+        assert!(matches!(response.status(), StatusCode::NOT_FOUND));
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(
         forwarded,
-        "UI activation must update the same process's gateway snapshot"
+        "model save must update the same process's gateway snapshot"
     );
     let request = received.recv_timeout(support::DEADLINE).unwrap();
     assert_eq!(
         support::values(&request.headers, "authorization"),
         [format!("Bearer {PROVIDER_KEY}")]
     );
+    assert_eq!(request.body, br#"{"model":"mock-model","messages":[]}"#);
+    let batch = serde_json::json!({
+        "csrf": csrf,
+        "provider_id": provider.id.to_string(),
+        "models": [
+            {"model_id":"mock-model-a","alias":"Unified Mock/model-a","chat":true,"responses":false,"messages":false},
+            {"model_id":"missing-model","alias":"Unified Mock/missing","chat":true,"responses":false,"messages":false}
+        ]
+    });
+    let response = client
+        .post(format!("{base}/_topcoat/runtime/procedures/save-models"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&vec![batch.to_string()]).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("missing-model"));
+    assert_eq!(
+        received.recv_timeout(support::DEADLINE).unwrap().target,
+        "/custom/models"
+    );
+    assert_eq!(store.list_models().await.unwrap().len(), 1);
+    let mut batch = batch;
+    batch["models"][1]["model_id"] = "mock-model-b".into();
+    batch["models"][1]["alias"] = "Unified Mock/model-b".into();
+    batch["models"][1]["responses"] = true.into();
+    batch["models"][1]["chat"] = false.into();
+    let response = client
+        .post(format!("{base}/_topcoat/runtime/procedures/save-models"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&vec![batch.to_string()]).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"],
+        "已导入 2 个模型"
+    );
+    assert_eq!(
+        received.recv_timeout(support::DEADLINE).unwrap().target,
+        "/custom/models"
+    );
+    assert_eq!(store.list_models().await.unwrap().len(), 3);
     let list = client
-        .get(&base)
+        .get(format!("{base}/providers"))
         .send()
         .await
         .unwrap()
@@ -1043,7 +1107,7 @@ async fn success_notice(
     // Both a plain refresh and an old success URL must start without feedback.
     for suffix in [String::new(), format!("?{query}"), format!("?{query}")] {
         let html = client
-            .get(format!("{base}{suffix}"))
+            .get(format!("{base}/providers{suffix}"))
             .send()
             .await
             .unwrap()
@@ -1056,7 +1120,14 @@ async fn success_notice(
         )));
         assert!(!html.contains("data-state=\"open\""));
     }
-    client.get(base).send().await.unwrap().text().await.unwrap()
+    client
+        .get(format!("{base}/providers"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
 }
 
 fn confirmation_without_description(html: &str, id: &str, title: &str) {
@@ -1078,7 +1149,13 @@ fn element<'a>(html: &'a str, tag: &str, marker: &str) -> &'a str {
 
 fn assert_navigation(html: &str, active_href: &str, title: &str) {
     assert!(html.contains(&format!("<title>{title} · LLMProxy</title>")));
-    assert!(html.contains(&format!("<h1>{title}</h1>")));
+    assert!(
+        html.split("<h1")
+            .nth(1)
+            .and_then(|heading| heading.split_once("</h1>"))
+            .is_some_and(|(heading, _)| heading.contains(title)),
+        "missing heading {title}"
+    );
     assert!(html.contains(&format!("<strong>{title}</strong>")));
     assert!(!html.contains("href=\"/#routes\""));
     let nav = html
@@ -1144,14 +1221,6 @@ fn action_form(csrf: &str, id: i64, version: u64, action: &str) -> Vec<(String, 
         ("id".into(), id.to_string()),
         ("version".into(), version.to_string()),
         ("action".into(), action.into()),
-        (
-            "protocol".into(),
-            if action == "activate" {
-                "openai_chat".into()
-            } else {
-                String::new()
-            },
-        ),
     ]
 }
 
@@ -1207,7 +1276,7 @@ async fn procedure_request(
             "write_timeout_ms",
         ]
     } else {
-        &["csrf", "id", "version", "action", "protocol"]
+        &["csrf", "id", "version", "action"]
     };
     let args: Vec<serde_json::Value> = keys
         .iter()

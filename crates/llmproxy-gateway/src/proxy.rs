@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use llmproxy_core::{
     protocol::Protocol,
     routing::{Route, match_route},
@@ -17,6 +18,7 @@ use pingora::{
 use pingora_http::{RequestHeader, ResponseHeader};
 
 use crate::{
+    model_body::{MODEL_PREFIX_LIMIT, Scan, scan_model},
     observability::{GatewayTelemetry, RequestTelemetry},
     snapshot::{ProviderSnapshots, ResolvedProvider},
 };
@@ -32,6 +34,9 @@ pub struct RequestContext {
     protocol: Option<Protocol>,
     provider: Option<Arc<ResolvedProvider>>,
     console: bool,
+    replay_prefix: Option<Bytes>,
+    original_prefix_len: usize,
+    body_delta: isize,
 }
 
 impl Gateway {
@@ -54,6 +59,9 @@ impl ProxyHttp for Gateway {
             protocol: None,
             provider: None,
             console: false,
+            replay_prefix: None,
+            original_prefix_len: 0,
+            body_delta: 0,
         }
     }
 
@@ -72,15 +80,77 @@ impl ProxyHttp for Gateway {
         match route {
             Route::Proxy(protocol) => {
                 ctx.protocol = Some(protocol);
-                // Pin one immutable provider for the full request, including SSE.
-                // Later refreshes affect only requests entering after selection.
-                ctx.provider = self.providers.select(protocol);
-                ctx.telemetry
-                    .selected(protocol, ctx.provider.as_ref().map(|p| p.authority()));
-                if ctx.provider.is_none() {
-                    session.respond_error(503).await?;
+                let content_encoding = session.get_header_bytes("content-encoding");
+                if !content_encoding.is_empty()
+                    && !content_encoding.eq_ignore_ascii_case(b"identity")
+                {
+                    session.set_keepalive(None);
+                    session.respond_error(415).await?;
                     return Ok(true);
                 }
+                // Pingora selects the peer before request_body_filter. Read only
+                // through the model field, and let its retry buffer replay that
+                // prefix while the rest of the request continues streaming.
+                session.enable_retry_buffering();
+                let mut prefix = Vec::new();
+                let (alias, range) = loop {
+                    let Some(chunk) = session.read_request_body().await? else {
+                        session.set_keepalive(None);
+                        session.respond_error(400).await?;
+                        return Ok(true);
+                    };
+                    prefix.extend_from_slice(&chunk);
+                    if prefix.len() > MODEL_PREFIX_LIMIT || session.retry_buffer_truncated() {
+                        session.set_keepalive(None);
+                        session.respond_error(413).await?;
+                        return Ok(true);
+                    }
+                    match scan_model(&prefix) {
+                        Scan::Found { alias, range } => break (alias, range),
+                        Scan::More if prefix.len() < MODEL_PREFIX_LIMIT => {}
+                        Scan::More => {
+                            session.set_keepalive(None);
+                            session.respond_error(413).await?;
+                            return Ok(true);
+                        }
+                        Scan::Invalid | Scan::Missing => {
+                            session.set_keepalive(None);
+                            session.respond_error(400).await?;
+                            return Ok(true);
+                        }
+                    }
+                };
+                if alias.is_empty() || session.get_retry_buffer().is_none() {
+                    session.set_keepalive(None);
+                    session.respond_error(400).await?;
+                    return Ok(true);
+                }
+                let Some(model) = self.providers.select(protocol, &alias) else {
+                    ctx.telemetry.selected(protocol, None);
+                    session.set_keepalive(None);
+                    session.respond_error(404).await?;
+                    return Ok(true);
+                };
+                let Some(provider) = model.provider.as_ref() else {
+                    ctx.telemetry.selected(protocol, None);
+                    session.set_keepalive(None);
+                    session.respond_error(503).await?;
+                    return Ok(true);
+                };
+                let model_json = serde_json::to_vec(&model.upstream_model_id).map_err(|_| {
+                    Error::explain(ErrorType::InternalError, "cannot encode upstream model")
+                })?;
+                let mut rewritten =
+                    Vec::with_capacity(prefix.len() - range.len() + model_json.len());
+                rewritten.extend_from_slice(&prefix[..range.start]);
+                rewritten.extend_from_slice(&model_json);
+                rewritten.extend_from_slice(&prefix[range.end..]);
+                ctx.body_delta = rewritten.len() as isize - prefix.len() as isize;
+                ctx.original_prefix_len = prefix.len();
+                ctx.replay_prefix = Some(Bytes::from(rewritten));
+                // Pin one immutable provider for the full request, including SSE.
+                ctx.provider = Some(provider.clone());
+                ctx.telemetry.selected(protocol, Some(provider.authority()));
                 Ok(false)
             }
             Route::Auto => {
@@ -194,6 +264,24 @@ impl ProxyHttp for Gateway {
         request.remove_header("authorization");
         request.remove_header("x-api-key");
         request.insert_header("host", provider.authority())?;
+        if let Some(length) = request.headers.get("content-length") {
+            let length = length
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    Error::explain(ErrorType::InvalidHTTPHeader, "invalid content length")
+                })?;
+            let adjusted = length.checked_add_signed(ctx.body_delta).ok_or_else(|| {
+                Error::explain(
+                    ErrorType::InvalidHTTPHeader,
+                    "invalid rewritten content length",
+                )
+            })?;
+            request.insert_header("content-length", adjusted.to_string())?;
+        }
+        request.remove_header("content-md5");
+        request.remove_header("digest");
         match protocol {
             Protocol::AnthropicMessages => {
                 request.insert_header("x-api-key", provider.secret.as_str())?;
@@ -204,6 +292,25 @@ impl ProxyHttp for Gateway {
             Protocol::OpenAiChat | Protocol::OpenAiResponses => {
                 request.insert_header("authorization", format!("Bearer {}", provider.secret))?;
             }
+        }
+        Ok(())
+    }
+
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if let Some(rewritten) = ctx.replay_prefix.take() {
+            if body.as_ref().map(Bytes::len) != Some(ctx.original_prefix_len) {
+                return Err(Error::explain(
+                    ErrorType::InternalError,
+                    "request body replay prefix mismatch",
+                ));
+            }
+            *body = Some(rewritten);
         }
         Ok(())
     }

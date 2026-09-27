@@ -41,6 +41,24 @@ pub(crate) struct RouteBinding {
 }
 
 #[derive(toasty::Model)]
+#[table = "model_mappings"]
+pub(crate) struct ModelMapping {
+    #[key]
+    #[auto]
+    pub id: i64,
+    #[unique]
+    pub alias: String,
+    pub provider_id: i64,
+    pub upstream_model_id: String,
+    pub openai_chat: bool,
+    pub openai_responses: bool,
+    pub anthropic_messages: bool,
+    #[version]
+    pub version: u64,
+    pub updated_at: i64,
+}
+
+#[derive(toasty::Model)]
 #[table = "store_keys"]
 pub(crate) struct StoreKey {
     #[key]
@@ -88,5 +106,18 @@ impl Provider {
             key_configured: !self.encrypted_key.is_empty(),
             updated_at: self.updated_at,
         })
+    }
+}
+
+impl ModelMapping {
+    pub fn protocols(&self) -> Vec<Protocol> {
+        [
+            (self.openai_chat, Protocol::OpenAiChat),
+            (self.openai_responses, Protocol::OpenAiResponses),
+            (self.anthropic_messages, Protocol::AnthropicMessages),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, protocol)| enabled.then_some(protocol))
+        .collect()
     }
 }

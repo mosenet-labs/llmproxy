@@ -28,9 +28,9 @@ use topcoat_ant_design::icons::{
     CLOSE_CIRCLE_FILLED, DOWN_OUTLINED, INFO_CIRCLE_FILLED, PLUS_OUTLINED, SEARCH_OUTLINED,
 };
 use topcoat_ant_design::{
-    FormFieldConfig, NativeDialogConfig, NotificationTone, TagTone, UiLanguage, anchored_menu,
-    anchored_menu_trigger_attributes, data_table, form_field, head_assets, native_dialog,
-    native_dialog_close_attributes, notification, popconfirm, popconfirm_trigger_attributes, tag,
+    FormFieldConfig, NativeDialogConfig, NotificationTone, TagTone, UiLanguage, data_table,
+    form_field, head_assets, native_dialog, native_dialog_close_attributes, notification,
+    popconfirm, popconfirm_trigger_attributes, tag,
 };
 use url::{Host, Url};
 
@@ -59,9 +59,9 @@ const PROTOCOLS: [Protocol; 3] = [
     Protocol::AnthropicMessages,
 ];
 
-#[route(GET "/ui/providers")]
+#[route(GET "/ui")]
 pub async fn providers_redirect() -> Result<topcoat::router::error::SeeOther> {
-    Ok(see_other("/ui"))
+    Ok(see_other("/ui/providers"))
 }
 
 fn protocol_label(protocol: Protocol) -> &'static str {
@@ -69,14 +69,6 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::OpenAiChat => "OpenAI Chat",
         Protocol::OpenAiResponses => "OpenAI Responses",
         Protocol::AnthropicMessages => "Anthropic Messages",
-    }
-}
-
-fn protocol_short_label(protocol: Protocol) -> &'static str {
-    match protocol {
-        Protocol::OpenAiChat => "Chat",
-        Protocol::OpenAiResponses => "Responses",
-        Protocol::AnthropicMessages => "Messages",
     }
 }
 
@@ -182,7 +174,7 @@ pub async fn protect(cx: &Cx, body: Body, next: Next<'_>) -> Result<Response> {
     Ok(response)
 }
 
-fn check_csrf(cx: &Cx, supplied: &str) -> Result<()> {
+pub(crate) fn check_csrf(cx: &Cx, supplied: &str) -> Result<()> {
     let expected = app_context::<AppState>(cx).csrf.as_bytes();
     let supplied = supplied.as_bytes();
     let difference = expected
@@ -198,10 +190,13 @@ fn check_csrf(cx: &Cx, supplied: &str) -> Result<()> {
 #[layout("/")]
 pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     let routes_page = uri(cx).path() == "/ui/routes";
+    let models_page = uri(cx).path() == "/ui/models";
     let page_title = if routes_page {
         "路由概览"
+    } else if models_page {
+        "Models"
     } else {
-        "Provider 管理"
+        "Providers"
     };
     Ok(view! {
         <!DOCTYPE html>
@@ -218,9 +213,10 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
             <body>
                 <div class="grid min-h-screen grid-cols-[216px_minmax(0,1fr)] max-[900px]:grid-cols-[176px_minmax(0,1fr)] max-[640px]:block">
                     <aside class="sticky top-0 flex h-screen flex-col border-r border-border bg-white px-3 max-[640px]:static max-[640px]:h-auto max-[640px]:border-r-0 max-[640px]:border-b max-[640px]:px-4 max-[640px]:pb-2">
-                        <a class="flex h-16 shrink-0 items-center gap-3 px-3 text-lg font-semibold max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-base max-[640px]:h-14 max-[640px]:px-0" href="/ui"><span class="grid size-8 place-items-center rounded-lg bg-primary text-xl font-bold text-white" aria-hidden="true">"L"</span><strong>"LLMProxy"</strong></a>
-                        <nav class="mt-4 grid gap-1 max-[640px]:mt-0 max-[640px]:grid-cols-2" aria-label="主导航">
-                            <a class=(NAV_ITEM) href="/ui" aria-current=(if routes_page { None } else { Some("page") })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Provider 管理"</a>
+                        <a class="flex h-16 shrink-0 items-center gap-3 px-3 text-lg font-semibold max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-base max-[640px]:h-14 max-[640px]:px-0" href="/ui/providers"><span class="grid size-8 place-items-center rounded-lg bg-primary text-xl font-bold text-white" aria-hidden="true">"L"</span><strong>"LLMProxy"</strong></a>
+                        <nav class="mt-4 grid gap-1 max-[640px]:mt-0 max-[640px]:grid-cols-3" aria-label="主导航">
+                            <a class=(NAV_ITEM) href="/ui/providers" aria-current=(if routes_page || models_page { None } else { Some("page") })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Providers"</a>
+                            <a class=(NAV_ITEM) href="/ui/models" aria-current=(if models_page { Some("page") } else { None })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Models"</a>
                             <a class=(NAV_ITEM) href="/ui/routes" aria-current=(if routes_page { Some("page") } else { None })>icon(data: APARTMENT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"路由概览"</a>
                         </nav>
                         <div class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden">"本地开发环境"</div>
@@ -245,7 +241,7 @@ pub struct ListQuery {
     state: String,
 }
 
-#[page("/ui")]
+#[page("/ui/providers")]
 pub async fn list(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> {
     let _ = cx;
     Ok(view! { provider_workspace(query: &query, edit_id: "", editor_open: false) })
@@ -273,21 +269,17 @@ async fn provider_workspace(
 
 #[page("/ui/routes")]
 pub async fn routes(cx: &Cx) -> Result<impl View> {
-    let all = app_context::<AppState>(cx).store.list().await?;
+    let all = app_context::<AppState>(cx).store.list_models().await?;
     Ok(view! {
         <section class=(PAGE_HEADING)>
-            <div><h1>"路由概览"</h1><p>"查看各协议入口与当前使用的 Provider。"</p></div>
-            <a class=(BUTTON) href="/ui">"管理 Provider"</a>
+            <div><h1>"路由概览"</h1><p>"查看三个协议入口与已配置的模型数量。"</p></div>
+            <a class=(BUTTON) href="/ui/models">"管理 Models"</a>
         </section>
-        <section class="grid grid-cols-3 gap-5 max-[1180px]:grid-cols-1" id="routes" aria-label="三个协议的当前 Provider">
+        <section class="grid grid-cols-3 gap-5 max-[1180px]:grid-cols-1" id="routes" aria-label="三个协议的模型映射">
             for protocol in PROTOCOLS {
-                <a class="group min-w-0 rounded-lg border border-border bg-white p-6 shadow-xs hover:border-[#91caff] max-[640px]:p-5" href=(format!("/ui?protocol={}", protocol.as_str()))>
+                <a class="group min-w-0 rounded-lg border border-border bg-white p-6 shadow-xs hover:border-[#91caff] max-[640px]:p-5" href="/ui/models">
                     <div class="flex items-center gap-3"><span class="grid size-8 shrink-0 place-items-center rounded-md bg-primary-soft text-sm font-semibold text-primary" aria-hidden="true">(match protocol { Protocol::OpenAiChat => "C", Protocol::OpenAiResponses => "R", Protocol::AnthropicMessages => "A" })</span><span class="text-sm font-medium text-heading">(protocol_label(protocol))</span></div>
-                    if let Some(provider) = all.iter().find(|provider| provider.active_protocols.contains(&protocol)) {
-                        <strong class="mt-6 block truncate text-xl font-semibold leading-7">(provider.name.as_str())</strong><span class="mt-2 flex items-center gap-2 text-[13px] text-secondary">icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-3.5 text-[#389e0d]" aria-hidden="true" })"当前 Provider"</span>
-                    } else {
-                        <strong class="mt-6 block text-xl font-medium leading-7 text-secondary">"尚未分配"</strong><span class="mt-2 block text-[13px] text-secondary">"启用 Provider 后设为当前服务"</span>
-                    }
+                    <strong class="mt-6 block truncate text-xl font-semibold leading-7">(all.iter().filter(|model| model.protocols.contains(&protocol)).count())" 个模型"</strong><span class="mt-2 block text-[13px] text-secondary">"按请求中的模型别名匹配"</span>
                     <div class="mt-6 flex items-center justify-between gap-3 border-t border-border pt-4"><code class="truncate font-mono text-[13px] text-secondary">(protocol.upstream_path())</code>icon(data: ARROW_RIGHT_OUTLINED, attrs: attributes! { class="size-4 shrink-0 text-muted group-hover:text-primary" aria-hidden="true" })</div>
                 </a>
             }
@@ -341,7 +333,6 @@ pub async fn provider_list(
                 && match query.state.as_str() {
                     "enabled" => provider.enabled,
                     "disabled" => !provider.enabled,
-                    "active" => provider.active,
                     _ => true,
                 }
         })
@@ -375,12 +366,12 @@ pub async fn provider_list(
     Ok(view! {
         provider_editor(editor: &editor, controls: &controls)
         <section class=(PAGE_HEADING)>
-            <div><h1>"Provider 管理"</h1><p>"管理上游连接与凭据，为每种协议选择当前服务。"</p></div>
+            <div><h1>"Providers"</h1><p>"管理上游连接、协议路径与凭据。"</p></div>
             <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())>icon(data: PLUS_OUTLINED, attrs: attributes! { class="size-4 shrink-0" aria-hidden="true" })"新建 Provider"</button>
         </section>
         <section class="providers-panel overflow-visible rounded-lg border border-border bg-white shadow-xs" aria-labelledby="providers-heading">
             <div class="flex items-center justify-between gap-4 px-6 pt-5 max-[640px]:px-4 [&_h2]:m-0 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:text-base [&_h2]:font-semibold"><h2 id="providers-heading">"Provider 列表"<span class="rounded bg-surface px-2 text-[13px] font-normal leading-6 text-secondary">(total)</span></h2><span class="text-[13px] text-secondary">(enabled)" 个已启用"</span></div>
-            <form class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/ui" role="search" @submit=$(|event: Event| {
+            <form class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/ui/providers" role="search" @submit=$(|event: Event| {
                 event.prevent_default();
                 applied_q.set(draft_q.get());
                 applied_protocol.set(draft_protocol.get());
@@ -389,7 +380,7 @@ pub async fn provider_list(
             })>
                 <div class="flex h-9 w-[300px] items-center gap-2 rounded-md border border-control-border pl-3 focus-within:border-primary-hover focus-within:ring-2 focus-within:ring-primary/10 max-[640px]:w-full [&_input]:h-8 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:pl-0 [&_input]:text-sm [&_input]:shadow-none">icon(data: SEARCH_OUTLINED, attrs: attributes! { class="size-4 shrink-0 text-muted" aria-hidden="true" })<input aria-label="搜索名称或主机" name="q" :value=$(draft_q.get()) @input=$(|event: Event| draft_q.set(event.target.value)) placeholder="搜索名称或主机地址"></div>
                 <select name="protocol" aria-label="筛选协议" :value=$(draft_protocol.get()) @change=$(|event: Event| draft_protocol.set(event.target.value))><option value="">"全部协议"</option>for protocol in PROTOCOLS { <option value=(protocol.as_str()) selected=(draft_protocol.get_untracked() == protocol.as_str())>(protocol_label(protocol))</option> }</select>
-                <select name="state" aria-label="筛选状态" :value=$(draft_state.get()) @change=$(|event: Event| draft_state.set(event.target.value))><option value="">"全部状态"</option><option value="enabled" selected=(draft_state.get_untracked() == "enabled")>"已启用"</option><option value="disabled" selected=(draft_state.get_untracked() == "disabled")>"已停用"</option><option value="active" selected=(draft_state.get_untracked() == "active")>"当前使用"</option></select>
+                <select name="state" aria-label="筛选状态" :value=$(draft_state.get()) @change=$(|event: Event| draft_state.set(event.target.value))><option value="">"全部状态"</option><option value="enabled" selected=(draft_state.get_untracked() == "enabled")>"已启用"</option><option value="disabled" selected=(draft_state.get_untracked() == "disabled")>"已停用"</option></select>
                 <button class=(BUTTON) type="submit">"查询"</button>
                 if !query.q.is_empty() || !query.protocol.is_empty() || !query.state.is_empty() { <button class=(class!(TEXT_LINK, "px-1")) type="button" (reset.clone())>"重置"</button> }
             </form>
@@ -404,17 +395,14 @@ pub async fn provider_list(
                             <tr id=(format!("provider-{}", provider.id))>
                                 <td><button class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-1 block whitespace-nowrap text-[13px] leading-5 text-secondary" title=(provider.paths.supported().into_iter().map(protocol_label).collect::<Vec<_>>().join(" / "))>(provider.paths.supported().into_iter().map(protocol_compact_label).collect::<Vec<_>>().join(" · "))</span></td>
                                 <td><span class="whitespace-nowrap text-sm text-heading">(provider_url(provider))</span><span class="mt-1 block text-[13px] leading-5 text-secondary">"读取超时 "(provider.read_timeout_ms / 1000)" 秒"</span></td>
-                                <td><div class="flex max-w-[185px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" })) for active in &provider.active_protocols { tag(tone: TagTone::Processing, (format!("当前 {}", protocol_short_label(*active)))) }</div></td>
+                                <td><div class="flex max-w-[185px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" }))</div></td>
                                 <td><span class="inline-flex items-center gap-1.5 whitespace-nowrap text-[13px] text-secondary">if provider.key_configured { icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-3.5 text-muted" aria-hidden="true" }) }(if provider.key_configured { "已配置" } else { "未配置" })</span></td>
                                 <td><div class="flex min-w-[204px] items-center justify-end gap-3 whitespace-nowrap">
                                     <button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, provider.clone().into()))>"编辑"</button>
                                     if provider.enabled {
-                                        if provider.paths.supported().into_iter().any(|protocol| !provider.active_protocols.contains(&protocol)) {
-                                            provider_activation_menu(controls: &controls, provider: provider, csrf: csrf)
-                                        }
                                         provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: false)
                                     } else {
-                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "enable", protocol: "", label: "启用".to_owned())
+                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "enable", label: "启用".to_owned())
                                         provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: true)
                                     }
                                 </div></td>
@@ -425,31 +413,7 @@ pub async fn provider_list(
                 <div class="border-t border-border px-6 py-4 text-[13px] text-secondary max-[640px]:px-4">"显示 "(providers.len())" / "(total)" 个 Provider"</div>
             }
         </section>
-        <p class="mt-4 mb-0 flex items-start gap-2 text-[13px] leading-relaxed text-secondary">icon(data: INFO_CIRCLE_FILLED, attrs: attributes! { class="mt-1 size-3.5 shrink-0 text-muted" aria-hidden="true" })"设为当前服务后，该协议的新请求会使用此 Provider。"</p>
-    })
-}
-
-#[component]
-async fn provider_activation_menu(
-    cx: &Cx,
-    provider: &ProviderView,
-    csrf: &str,
-    controls: &ListSignals,
-) -> Result<impl View> {
-    let id = format!("activate-menu-{}", provider.id);
-    let label = format!("为「{}」选择当前协议", provider.name);
-    let trigger = anchored_menu_trigger_attributes(cx, &id);
-    Ok(view! {
-        <button class=(class!(TEXT_LINK, "inline-flex items-center gap-1")) type="button" (trigger)>"设为当前" icon(data: DOWN_OUTLINED, attrs: attributes! { class="size-3 text-muted" aria-hidden="true" })</button>
-        anchored_menu(id: id.as_str(), label: label.as_str(),
-            for protocol in provider.paths.supported() {
-                if provider.active_protocols.contains(&protocol) {
-                    <button type="button" disabled="" aria-label=(format!("{}，当前使用", protocol_label(protocol)))><span>(protocol_short_label(protocol))</span><span aria-hidden="true">"✓"</span></button>
-                } else {
-                    action_form(controls: controls, csrf: csrf, provider: provider, action: "activate", protocol: protocol.as_str(), label: protocol_short_label(protocol).to_owned())
-                }
-            }
-        )
+        <p class="mt-4 mb-0 flex items-start gap-2 text-[13px] leading-relaxed text-secondary">icon(data: INFO_CIRCLE_FILLED, attrs: attributes! { class="mt-1 size-3.5 shrink-0 text-muted" aria-hidden="true" })"请在 Models 中选择模型并设置别名，网关按别名和协议转发请求。"</p>
     })
 }
 
@@ -469,7 +433,7 @@ async fn provider_action_confirmation(
     let id = format!("{action}-{}", provider.id);
     let title = format!("确认{label}「{}」？", provider.name);
     let trigger = popconfirm_trigger_attributes(cx, &id);
-    let submit = action_submit(cx, controls, csrf, provider, action, "");
+    let submit = action_submit(cx, controls, csrf, provider, action);
     let busy = &controls.busy;
     Ok(view! {
         <button class=(class!(TEXT_LINK, "text-[#cf1322]! hover:text-[#ff4d4f]!")) type="button" (trigger) :disabled=$(busy.get())>(label)</button>
@@ -487,13 +451,12 @@ async fn action_form(
     csrf: &str,
     provider: &ProviderView,
     action: &str,
-    protocol: &str,
     label: String,
 ) -> Result<impl View> {
-    let submit = action_submit(cx, controls, csrf, provider, action, protocol);
+    let submit = action_submit(cx, controls, csrf, provider, action);
     let busy = &controls.busy;
     Ok(
-        view! { <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><input type="hidden" name="protocol" value=(protocol)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
+        view! { <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
     )
 }
 
@@ -535,16 +498,23 @@ fn probe_message(name: &str, result: std::result::Result<Vec<String>, String>) -
                 format!("「{name}」模型探测成功，上游未返回模型 ID")
             } else {
                 format!(
-                    "「{name}」探测到 {} 个模型：{}",
+                    "「{name}」探测到 {} 个模型，示例：{}",
                     models.len(),
-                    models.join("、")
+                    models
+                        .iter()
+                        .take(10)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("、")
                 )
             }
         })
         .map_err(|error| format!("「{name}」模型探测失败：{error}"))
 }
 
-async fn query_models(target: ModelProbeTarget) -> std::result::Result<Vec<String>, String> {
+pub(crate) async fn query_models(
+    target: ModelProbeTarget,
+) -> std::result::Result<Vec<String>, String> {
     let scheme = if target.tls { "https" } else { "http" };
     let url = format!("{scheme}://{}:{}{}", target.host, target.port, target.path);
     let client = reqwest::Client::builder()
@@ -592,7 +562,7 @@ async fn query_models(target: ModelProbeTarget) -> std::result::Result<Vec<Strin
         .iter()
         .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
         .filter(|id| !id.is_empty() && id.len() <= 200)
-        .take(100)
+        .take(5000)
         .map(str::to_owned)
         .collect())
 }
@@ -876,8 +846,6 @@ pub struct ActionForm {
     id: i64,
     version: u64,
     action: String,
-    #[serde(default)]
-    protocol: String,
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/provider-action")]
@@ -887,7 +855,6 @@ pub async fn provider_action(
     id: String,
     version: String,
     action: String,
-    protocol: String,
 ) -> Result<Outcome> {
     action_input(
         cx,
@@ -896,7 +863,6 @@ pub async fn provider_action(
             id: id.parse()?,
             version: version.parse()?,
             action,
-            protocol,
         },
     )
     .await
@@ -912,7 +878,6 @@ async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
     let state = app_context::<AppState>(cx);
     let store = &state.store;
     let (action, label, completed) = match input.action.as_str() {
-        "activate" => ("activate", "设为当前服务", "已设为当前服务"),
         "enable" => ("enable", "启用", "已启用"),
         "disable" => ("disable", "停用", "已停用"),
         "delete" => ("delete", "删除", "已删除"),
@@ -928,10 +893,6 @@ async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
         }
     };
     let result = match input.action.as_str() {
-        "activate" => match parse_protocol(&input.protocol) {
-            Ok(protocol) => store.activate(input.id, input.version, protocol).await,
-            Err(error) => Err(StoreError::Validation(error)),
-        },
         "enable" => store
             .set_enabled(input.id, input.version, true)
             .await
@@ -946,21 +907,8 @@ async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
     state
         .telemetry
         .provider_operation(action, Some(input.id), Some(&name), result.as_ref().err());
-    let protocol_name = if input.action == "activate" {
-        parse_protocol(&input.protocol)
-            .map(protocol_label)
-            .unwrap_or("")
-    } else {
-        ""
-    };
     Ok(result
-        .map(|_| {
-            if protocol_name.is_empty() {
-                format!("「{name}」{completed}")
-            } else {
-                format!("「{name}」{protocol_name} {completed}")
-            }
-        })
+        .map(|_| format!("「{name}」{completed}"))
         .map_err(|error| format!("「{name}」{label}失败：{error}")))
 }
 
@@ -977,7 +925,6 @@ fn action_submit(
     csrf: &str,
     provider: &ProviderView,
     action: &str,
-    protocol: &str,
 ) -> Attributes {
     let ListSignals {
         refresh,
@@ -997,8 +944,8 @@ fn action_submit(
         busy.set(true);
         success.set("".to_owned());
         failure.set("".to_owned());
-        // Native procedures have no Rust expression API for transport rejections in 0.8.
-        let result = raw!("await Promise.resolve(${provider_action}.call(${csrf}, ${id}, ${version}, ${action}, ${protocol})).catch(() => ${unavailable})", unavailable.clone());
+        // Native procedures need a transport rejection handler.
+        let result = raw!("await Promise.resolve(${provider_action}.call(${csrf}, ${id}, ${version}, ${action})).catch(() => ${unavailable})", unavailable.clone());
         busy.set(false);
         if result.is_ok() {
             success.set(result.unwrap());
@@ -1235,7 +1182,7 @@ async fn provider_editor(
                         <div class=(FIELDS_GRID)>
                             form_field(config: FormFieldConfig::new("name", "Provider 名称").required(), <input id="name" name="name" :value=$(name.get()) @input=$(|event: Event| name.set(event.target.value)) placeholder="例如：OpenAI · Production" maxlength="80" required="" autofocus="">)
                         </div>
-                        <div class="mt-5 flex items-start gap-2 text-sm leading-[22px] text-heading [&_small]:ml-3 [&_small]:inline [&_small]:text-[13px] [&_small]:text-muted max-[640px]:[&_small]:ml-0 max-[640px]:[&_small]:block"><input type="hidden" name="enabled" :value=$(if enabled.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if enabled.get() { "true" } else { "false" }) @click=$(|_event: Event| enabled.toggle())><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span><span>"启用此 Provider"</span></button><small>"保存后可在列表中设为当前服务。"</small></div>
+                        <div class="mt-5 flex items-start gap-2 text-sm leading-[22px] text-heading [&_small]:ml-3 [&_small]:inline [&_small]:text-[13px] [&_small]:text-muted max-[640px]:[&_small]:ml-0 max-[640px]:[&_small]:block"><input type="hidden" name="enabled" :value=$(if enabled.get() { "true" } else { "false" })><button class=(CHECKBOX) type="button" role="checkbox" :aria-checked=$(if enabled.get() { "true" } else { "false" }) @click=$(|_event: Event| enabled.toggle())><span class=(CHECKBOX_MARK) aria-hidden="true"><span class="invisible group-aria-[checked=true]:visible">"✓"</span></span><span>"启用此 Provider"</span></button><small>"启用后可在 Models 中添加模型。"</small></div>
                     </section>
                     <section class="[&+section]:mt-6 [&+section]:border-t [&+section]:border-border [&+section]:pt-6 [&_h3]:mt-0 [&_h3]:mb-4 [&_h3]:text-sm [&_h3]:font-semibold">
                         <h3>"接口协议与上游路径"</h3>

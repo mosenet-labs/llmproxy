@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashSet,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use llmproxy_core::{protocol::Protocol, provider::validate_upstream};
 use toasty::{
@@ -8,11 +11,11 @@ use toasty::{
 use toasty_core::driver::operation::TransactionMode;
 
 use crate::{
-    ActiveProvider, ModelProbeTarget, ProbeStatus, ProviderInput, ProviderView, StoreError,
-    StoreResult,
+    ActiveProvider, ModelMappingInput, ModelMappingView, ModelProbeTarget, ModelRoute, ProbeStatus,
+    ProviderInput, ProviderView, StoreError, StoreResult,
     crypto::KeyCipher,
     database::Backend,
-    model::{Provider, RouteBinding, StoreKey, protocol},
+    model::{ModelMapping, Provider, RouteBinding, StoreKey, protocol},
 };
 
 static MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -35,6 +38,11 @@ static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202609250002,
         "0004_model_probe_protocol_status.sql",
         include_str!("../migrations/postgresql/0004_model_probe_protocol_status.sql"),
+    ),
+    MigrationFile::new(
+        202609260001,
+        "0005_model_mappings.sql",
+        include_str!("../migrations/postgresql/0005_model_mappings.sql"),
     ),
 ]);
 
@@ -114,6 +122,11 @@ static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0015_drop_models_auth.sql",
         include_str!("../migrations/sqlite/0015_drop_models_auth.sql"),
     ),
+    MigrationFile::new(
+        202609260001,
+        "0016_model_mappings.sql",
+        include_str!("../migrations/sqlite/0016_model_mappings.sql"),
+    ),
 ]);
 
 const KEY_VERIFIER: &str = "llmproxy.database-master-key.verifier.v1";
@@ -135,7 +148,12 @@ impl ProviderStore {
         let backend = Backend::parse(url)?;
         let cipher = KeyCipher::new(master_key)?;
         let db = Db::builder()
-            .models(toasty::models!(Provider, RouteBinding, StoreKey))
+            .models(toasty::models!(
+                Provider,
+                RouteBinding,
+                StoreKey,
+                ModelMapping
+            ))
             .max_pool_size(10)
             .pool_wait_timeout(Some(Duration::from_secs(10)))
             .pool_create_timeout(Some(Duration::from_secs(10)))
@@ -340,15 +358,23 @@ impl ProviderStore {
         let mut provider = find(&mut tx, id).await?;
         check_version(&provider, version)?;
         check_unique_name(&mut tx, &input.name, Some(id)).await?;
-        if input.enabled
-            && active_protocols(&bindings, id)
-                .into_iter()
-                .any(|protocol| input.paths.get(protocol).is_none())
+        if ModelMapping::all()
+            .exec(&mut tx)
+            .await?
+            .iter()
+            .any(|mapping| {
+                mapping.provider_id == id
+                    && mapping
+                        .protocols()
+                        .into_iter()
+                        .any(|protocol| input.paths.get(protocol).is_none())
+            })
         {
             return Err(StoreError::Conflict(
-                "当前路由正在使用此 Provider，请先停用或切换后再移除协议".into(),
+                "已有模型使用此协议，请先调整或删除模型映射".into(),
             ));
         }
+        let paths = input.paths.clone();
         let encrypted_key = self
             .cipher
             .replacement(&input.api_key, &provider.encrypted_key)?;
@@ -392,6 +418,14 @@ impl ProviderStore {
             .await?;
         if !provider.enabled {
             unbind(&mut tx, &mut bindings, id).await?;
+        } else {
+            for binding in &mut bindings {
+                if binding.provider_id == Some(id)
+                    && paths.get(protocol(&binding.protocol)?).is_none()
+                {
+                    binding.update().provider_id(None).exec(&mut tx).await?;
+                }
+            }
         }
         let view = provider.view(active_protocols(&bindings, id))?;
         tx.commit().await?;
@@ -452,12 +486,17 @@ impl ProviderStore {
     pub async fn delete(&self, id: i64, version: u64) -> StoreResult<()> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
-        let bindings = self.bindings(&mut tx, true).await?;
+        let mut bindings = self.bindings(&mut tx, true).await?;
         let provider = find(&mut tx, id).await?;
         check_version(&provider, version)?;
-        if is_active(&bindings, id) {
+        if ModelMapping::all()
+            .exec(&mut tx)
+            .await?
+            .iter()
+            .any(|mapping| mapping.provider_id == id)
+        {
             return Err(StoreError::Conflict(
-                "当前路由正在使用此 Provider，请先停用后再删除".into(),
+                "此 Provider 仍有模型映射，请先删除模型".into(),
             ));
         }
         if provider.enabled {
@@ -465,6 +504,7 @@ impl ProviderStore {
                 "Provider 仍处于启用状态，请先停用后再删除".into(),
             ));
         }
+        unbind(&mut tx, &mut bindings, id).await?;
         provider.delete().exec(&mut tx).await?;
         tx.commit().await?;
         Ok(())
@@ -524,6 +564,206 @@ impl ProviderStore {
         Ok(target)
     }
 
+    pub async fn probe_enabled_target(&self, id: i64) -> StoreResult<ModelProbeTarget> {
+        if !self.get(id).await?.enabled {
+            return Err(StoreError::Conflict("请先启用 Provider".into()));
+        }
+        self.probe_target(id).await
+    }
+
+    pub async fn list_models(&self) -> StoreResult<Vec<ModelMappingView>> {
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, false).await?;
+        self.bindings(&mut tx, false).await?;
+        let mappings = ModelMapping::all()
+            .order_by(ModelMapping::fields().id().asc())
+            .exec(&mut tx)
+            .await?;
+        let mut result = Vec::with_capacity(mappings.len());
+        for mapping in mappings {
+            let provider = find(&mut tx, mapping.provider_id).await?;
+            result.push(mapping_view(&mapping, &provider));
+        }
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn get_model(&self, id: i64) -> StoreResult<ModelMappingView> {
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, false).await?;
+        self.bindings(&mut tx, false).await?;
+        let mapping = find_mapping(&mut tx, id).await?;
+        let provider = find(&mut tx, mapping.provider_id).await?;
+        let view = mapping_view(&mapping, &provider);
+        tx.commit().await?;
+        Ok(view)
+    }
+
+    pub async fn create_model(&self, input: ModelMappingInput) -> StoreResult<ModelMappingView> {
+        let input = validate_mapping(input)?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
+        self.bindings(&mut tx, true).await?;
+        let provider = find(&mut tx, input.provider_id).await?;
+        check_mapping_provider(&provider, &input)?;
+        check_unique_alias(&mut tx, &input.alias, None).await?;
+        let mapping = ModelMapping::create()
+            .alias(input.alias)
+            .provider_id(input.provider_id)
+            .upstream_model_id(input.upstream_model_id)
+            .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
+            .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
+            .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+            .updated_at(now()?)
+            .exec(&mut tx)
+            .await?;
+        let view = mapping_view(&mapping, &provider);
+        tx.commit().await?;
+        Ok(view)
+    }
+
+    pub async fn create_models(
+        &self,
+        inputs: Vec<ModelMappingInput>,
+    ) -> StoreResult<Vec<ModelMappingView>> {
+        let Some(first) = inputs.first() else {
+            return Err(StoreError::Validation("请至少选择一个模型".into()));
+        };
+        let provider_id = first.provider_id;
+        let mut aliases = HashSet::new();
+        let mut model_ids = HashSet::new();
+        let mut validated = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let label = input.upstream_model_id.clone();
+            let input = validate_mapping(input)
+                .map_err(|error| StoreError::Validation(format!("「{label}」：{error}")))?;
+            if input.provider_id != provider_id {
+                return Err(StoreError::Validation(
+                    "一次只能导入同一 Provider 的模型".into(),
+                ));
+            }
+            if !aliases.insert(input.alias.clone()) {
+                return Err(StoreError::Conflict(format!("「{label}」：模型别名重复")));
+            }
+            if !model_ids.insert(input.upstream_model_id.clone()) {
+                return Err(StoreError::Conflict(format!("「{label}」：模型重复选择")));
+            }
+            validated.push(input);
+        }
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
+        self.bindings(&mut tx, true).await?;
+        let provider = find(&mut tx, provider_id).await?;
+        let mut saved = Vec::with_capacity(validated.len());
+        for input in validated {
+            let label = input.upstream_model_id.clone();
+            check_mapping_provider(&provider, &input)
+                .map_err(|error| StoreError::Validation(format!("「{label}」：{error}")))?;
+            check_unique_alias(&mut tx, &input.alias, None)
+                .await
+                .map_err(|error| StoreError::Conflict(format!("「{label}」：{error}")))?;
+            let mapping = ModelMapping::create()
+                .alias(input.alias)
+                .provider_id(provider_id)
+                .upstream_model_id(input.upstream_model_id)
+                .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
+                .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
+                .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+                .updated_at(now()?)
+                .exec(&mut tx)
+                .await?;
+            saved.push(mapping_view(&mapping, &provider));
+        }
+        tx.commit().await?;
+        Ok(saved)
+    }
+
+    pub async fn update_model(
+        &self,
+        id: i64,
+        version: u64,
+        input: ModelMappingInput,
+    ) -> StoreResult<ModelMappingView> {
+        let input = validate_mapping(input)?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
+        self.bindings(&mut tx, true).await?;
+        let mut mapping = find_mapping(&mut tx, id).await?;
+        check_mapping_version(&mapping, version)?;
+        let provider = find(&mut tx, input.provider_id).await?;
+        check_mapping_provider(&provider, &input)?;
+        check_unique_alias(&mut tx, &input.alias, Some(id)).await?;
+        mapping
+            .update()
+            .alias(input.alias)
+            .provider_id(input.provider_id)
+            .upstream_model_id(input.upstream_model_id)
+            .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
+            .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
+            .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+            .updated_at(now()?)
+            .exec(&mut tx)
+            .await?;
+        let view = mapping_view(&mapping, &provider);
+        tx.commit().await?;
+        Ok(view)
+    }
+
+    pub async fn delete_model(&self, id: i64, version: u64) -> StoreResult<()> {
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
+        self.bindings(&mut tx, true).await?;
+        let mapping = find_mapping(&mut tx, id).await?;
+        check_mapping_version(&mapping, version)?;
+        mapping.delete().exec(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn load_model_routes(&self) -> StoreResult<Vec<ModelRoute>> {
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, false).await?;
+        self.bindings(&mut tx, false).await?;
+        let mappings = ModelMapping::all().exec(&mut tx).await?;
+        let mut routes = Vec::new();
+        for mapping in mappings {
+            let provider = find(&mut tx, mapping.provider_id).await?;
+            for protocol in mapping.protocols() {
+                let upstream_path = provider
+                    .paths()
+                    .get(protocol)
+                    .ok_or(StoreError::Internal)?
+                    .to_owned();
+                let resolved = if provider.enabled {
+                    Some(ActiveProvider {
+                        id: provider.id,
+                        protocol,
+                        upstream_path,
+                        host: provider.host.clone(),
+                        port: provider.port,
+                        tls: provider.tls,
+                        secret: self.cipher.decrypt(&provider.encrypted_key)?,
+                        anthropic_version: provider.anthropic_version.clone(),
+                        connect_timeout_ms: provider.connect_timeout_ms,
+                        read_timeout_ms: provider.read_timeout_ms,
+                        write_timeout_ms: provider.write_timeout_ms,
+                    })
+                } else {
+                    None
+                };
+                routes.push(ModelRoute {
+                    alias: mapping.alias.clone(),
+                    upstream_model_id: mapping.upstream_model_id.clone(),
+                    enabled: provider.enabled,
+                    provider: resolved,
+                    protocol,
+                });
+            }
+        }
+        tx.commit().await?;
+        Ok(routes)
+    }
+
     pub async fn preview_target(
         &self,
         id: Option<i64>,
@@ -577,6 +817,84 @@ async fn find(executor: &mut dyn Executor, id: i64) -> StoreResult<Provider> {
         .ok_or(StoreError::NotFound)
 }
 
+async fn find_mapping(executor: &mut dyn Executor, id: i64) -> StoreResult<ModelMapping> {
+    ModelMapping::filter_by_id(id)
+        .first()
+        .exec(executor)
+        .await?
+        .ok_or(StoreError::NotFound)
+}
+
+fn mapping_view(mapping: &ModelMapping, provider: &Provider) -> ModelMappingView {
+    ModelMappingView {
+        id: mapping.id,
+        alias: mapping.alias.clone(),
+        provider_id: mapping.provider_id,
+        provider_name: provider.name.clone(),
+        upstream_model_id: mapping.upstream_model_id.clone(),
+        protocols: mapping.protocols(),
+        provider_enabled: provider.enabled,
+        version: mapping.version,
+    }
+}
+
+fn validate_mapping(mut input: ModelMappingInput) -> StoreResult<ModelMappingInput> {
+    input.alias = input.alias.trim().to_owned();
+    if input.alias.is_empty()
+        || input.alias.len() > 200
+        || input.alias.chars().any(char::is_control)
+    {
+        return Err(StoreError::Validation("模型别名须为 1–200 个字符".into()));
+    }
+    if input.upstream_model_id.is_empty()
+        || input.upstream_model_id.len() > 200
+        || input.upstream_model_id.chars().any(char::is_control)
+    {
+        return Err(StoreError::Validation("请选择有效的上游模型 ID".into()));
+    }
+    if input.protocols.is_empty() {
+        return Err(StoreError::Validation("请至少选择一个协议".into()));
+    }
+    Ok(input)
+}
+
+fn check_mapping_provider(provider: &Provider, input: &ModelMappingInput) -> StoreResult<()> {
+    if !provider.enabled {
+        return Err(StoreError::Conflict("请先启用 Provider".into()));
+    }
+    if input
+        .protocols
+        .iter()
+        .any(|protocol| provider.paths().get(*protocol).is_none())
+    {
+        return Err(StoreError::Validation("Provider 未配置所选协议".into()));
+    }
+    Ok(())
+}
+
+async fn check_unique_alias(
+    executor: &mut dyn Executor,
+    alias: &str,
+    own_id: Option<i64>,
+) -> StoreResult<()> {
+    if let Some(existing) = ModelMapping::filter_by_alias(alias)
+        .first()
+        .exec(executor)
+        .await?
+        && Some(existing.id) != own_id
+    {
+        return Err(StoreError::Conflict("模型别名已存在".into()));
+    }
+    Ok(())
+}
+
+fn check_mapping_version(mapping: &ModelMapping, expected: u64) -> StoreResult<()> {
+    if mapping.version != expected {
+        return Err(StoreError::Conflict("模型已被修改，请刷新后重试".into()));
+    }
+    Ok(())
+}
+
 async fn check_unique_name(
     executor: &mut dyn Executor,
     name: &str,
@@ -602,12 +920,6 @@ fn check_version(provider: &Provider, expected: u64) -> StoreResult<()> {
         ));
     }
     Ok(())
-}
-
-fn is_active(bindings: &[RouteBinding], id: i64) -> bool {
-    bindings
-        .iter()
-        .any(|binding| binding.provider_id == Some(id))
 }
 
 fn active_protocols(bindings: &[RouteBinding], id: i64) -> Vec<Protocol> {
@@ -782,6 +1094,103 @@ mod tests {
             include_str!("../migrations/postgresql/0002_store_key.sql"),
         ),
     ]);
+
+    #[tokio::test]
+    async fn sqlite_model_mapping_enforces_provider_protocols_and_references() {
+        let directory = std::env::temp_dir().join(format!(
+            "llmproxy-model-mapping-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+        let store = ProviderStore::connect(&url, &STANDARD.encode([8; 32]))
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        let provider_input = ProviderInput {
+            name: "Primary".into(),
+            paths: crate::ProviderPaths {
+                openai_chat: Some("/chat".into()),
+                openai_responses: Some("/responses".into()),
+                anthropic_messages: None,
+            },
+            host: "api.example.com".into(),
+            port: 443,
+            tls: true,
+            api_key: "test-secret".into(),
+            enabled: true,
+            models_path: "/models".into(),
+            models_protocol: Protocol::OpenAiChat,
+            anthropic_version: None,
+            connect_timeout_ms: 1000,
+            read_timeout_ms: 1000,
+            write_timeout_ms: 1000,
+        };
+        let provider = store.create(provider_input.clone()).await.unwrap();
+        let mapping = ModelMappingInput {
+            alias: "Primary/model".into(),
+            provider_id: provider.id,
+            upstream_model_id: "upstream-model".into(),
+            protocols: vec![Protocol::OpenAiChat, Protocol::OpenAiResponses],
+        };
+        let saved = store.create_model(mapping.clone()).await.unwrap();
+        assert_eq!(store.list_models().await.unwrap().len(), 1);
+        assert_eq!(store.load_model_routes().await.unwrap().len(), 2);
+        let batch = ["first", "second"].map(|id| ModelMappingInput {
+            alias: format!("Primary/{id}"),
+            provider_id: provider.id,
+            upstream_model_id: id.into(),
+            protocols: vec![Protocol::OpenAiChat],
+        });
+        let imported = store.create_models(batch.to_vec()).await.unwrap();
+        assert_eq!(imported.len(), 2);
+        assert_eq!(store.list_models().await.unwrap().len(), 3);
+        let mut invalid_batch = batch.to_vec();
+        invalid_batch[0].alias = "Primary/third".into();
+        invalid_batch[0].upstream_model_id = "third".into();
+        invalid_batch[1].protocols = vec![Protocol::AnthropicMessages];
+        assert!(matches!(
+            store.create_models(invalid_batch).await,
+            Err(StoreError::Validation(_))
+        ));
+        assert_eq!(store.list_models().await.unwrap().len(), 3);
+        assert!(matches!(
+            store.create_model(mapping.clone()).await,
+            Err(StoreError::Conflict(_))
+        ));
+        let mut invalid = mapping.clone();
+        invalid.alias = "another".into();
+        invalid.protocols = vec![Protocol::AnthropicMessages];
+        assert!(matches!(
+            store.create_model(invalid).await,
+            Err(StoreError::Validation(_))
+        ));
+        let mut without_chat = provider_input.clone();
+        without_chat.paths.openai_chat = None;
+        without_chat.models_protocol = Protocol::OpenAiResponses;
+        without_chat.api_key.clear();
+        assert!(matches!(
+            store
+                .update(provider.id, provider.version, without_chat)
+                .await,
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(matches!(
+            store.delete(provider.id, provider.version).await,
+            Err(StoreError::Conflict(_))
+        ));
+        store.delete_model(saved.id, saved.version).await.unwrap();
+        for model in imported {
+            store.delete_model(model.id, model.version).await.unwrap();
+        }
+        assert!(store.list_models().await.unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn sqlite_pool_connections_enable_foreign_keys_busy_timeout_and_wal() {

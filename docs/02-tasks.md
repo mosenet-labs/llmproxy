@@ -127,7 +127,20 @@
 - [x] W6：修复编辑表单协议开关的受控状态；探测协议仅从已配置协议选择，鉴权方式由协议确定。
 - [x] W7：表单支持未保存配置的预览探测；保存后持久化成功/失败/未探测状态并在重新打开时回显，配置变更清除旧状态。
 - [x] W8：将 Anthropic API 版本移到 Messages 协议行；列表协议使用简称，并移除列表探测操作。
-- [ ] W9：后续建立模型 ID 与 Provider 的映射关系，并明确它与现有按协议绑定的关系。
+- [x] W9：按 [M：模型映射](#m模型映射)建立模型 ID 与 Provider 的映射，取代按协议的当前绑定。
+
+## M：模型映射
+
+设计与验收见[模型映射与 Models 控制台](14-model-mapping.md)。
+
+- [x] M1：双数据库追加模型映射迁移；Toasty 模型、CRUD、唯一别名、乐观版本及 Provider 引用保护。
+- [x] M2：网关快照改为 `(协议, 别名)` 查找，停用 Provider 有明确不可用状态；移除当前绑定的运行时路径。
+- [x] M3：Pingora 读取顶层 `model`、回放已读正文、改写上游模型 ID 与长度；验证当前明文 HTTP/1.1 入口及大正文边界。
+- [x] M4：Topcoat Models 页面、可搜索探测候选、原生 Dialog、异步局部刷新和一次性通知；Providers 页面移除“设为当前”。
+- [x] M5：路由概览改为模型映射数，更新 README 和运行文档；完成双数据库、网关、控制台及浏览器验收。
+- [ ] M6：下游增加 TLS/HTTP/2 监听时，补充模型字段前缀读取和正文改写的 H2 端到端验证。
+
+M1–M5 验证：`cargo fmt --all`、`cargo check --workspace`、`cargo test --workspace` 通过，完整测试包含隔离 PostgreSQL schema 与 SQLite。浏览器在隔离环境验证了 Topcoat Dialog、120 个候选模型、默认别名、多协议保存、一次性通知及局部搜索。当前仅监听明文 HTTP，H2 验证留给 M6。
 
 本轮验证：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace` 通过。测试覆盖双数据库旧记录升级与 Provider 生命周期、同一 Provider 多协议转发路径、模型探测 Bearer/Anthropic 鉴权及凭据脱敏；临时 SQLite 控制台的浏览器实测覆盖协议简称、列表移除探测入口、Messages 协议行 API 版本默认值与编辑回显。
 
