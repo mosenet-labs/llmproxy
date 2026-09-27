@@ -1843,6 +1843,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tokio",
  "topcoat",
  "topcoat-ant-design",
  "topcoat-asset",
@@ -4116,6 +4117,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f2d2ade409750d9dd4fa69ab474d63baf313497f2b1919e5d63d22dc31fcd7"
 dependencies = [
+ "inventory",
  "serde",
  "topcoat-asset",
  "topcoat-cookie",
@@ -4225,6 +4227,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eadcc0557a6a65481f088326815eb57026f4b7115a656fde5e8254d12ad87b33"
 dependencies = [
  "heck 0.5.0",
+ "inventory",
  "serde",
  "serde_json",
  "topcoat-asset",
@@ -4331,6 +4334,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "inventory",
  "ipnet",
  "matchit",
  "percent-encoding",

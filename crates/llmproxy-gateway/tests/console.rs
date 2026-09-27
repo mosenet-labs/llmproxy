@@ -142,6 +142,11 @@ async fn exercise_http(database_url: &str) {
     let models = client.get(format!("{base}/models")).send().await.unwrap();
     assert_eq!(models.status(), StatusCode::OK);
     assert_navigation(&models.text().await.unwrap(), "/ui/models", "Models");
+    let chat = client.get(format!("{base}/chat")).send().await.unwrap();
+    assert_eq!(chat.status(), StatusCode::OK);
+    let chat = chat.text().await.unwrap();
+    assert_navigation(&chat, "/ui/chat", "Chat");
+    assert!(chat.contains("暂无可聊天的模型"));
     for asset in ["components.css", "console.css", "runtime.js"] {
         let response = client
             .get(format!("{base}/assets/{asset}"))
@@ -183,6 +188,7 @@ async fn exercise_http(database_url: &str) {
     for (path, title) in [
         ("/ui/providers", "Providers"),
         ("/ui/models", "Models"),
+        ("/ui/chat", "Chat"),
         ("/ui/routes", "路由概览"),
     ] {
         let response = client
@@ -836,21 +842,21 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert_eq!(hidden(&editor, "models_probe_status"), "success");
-    let model_form = serde_json::json!({
-        "csrf": csrf,
-        "id": null,
-        "version": null,
-        "alias": "",
-        "provider_id": provider.id.to_string(),
-        "upstream_model_id": "mock-model",
-        "chat": true,
-        "responses": true,
-        "messages": false
-    });
+    let model_form = serde_json::json!([
+        csrf,
+        "",
+        "",
+        "",
+        provider.id.to_string(),
+        "mock-model",
+        true,
+        true,
+        false
+    ]);
     let response = client
         .post(format!("{base}/_topcoat/runtime/procedures/save-model"))
         .header("content-type", "application/json")
-        .body(serde_json::to_vec(&vec![model_form.to_string()]).unwrap())
+        .body(serde_json::to_vec(&model_form).unwrap())
         .send()
         .await
         .unwrap();
@@ -873,7 +879,21 @@ async fn exercise_http(database_url: &str) {
     assert!(models.contains("Chat"));
     assert!(models.contains("Responses"));
     assert!(models.contains("可用性探测"));
+    let chat = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(chat.contains("Unified Mock/mock-model"));
     let model_id = store.list_models().await.unwrap()[0].id;
+    assert!(chat.contains(&format!("value=\"{model_id}\"")));
+    assert!(chat.contains("id=\"chat-protocol\""));
+    assert!(chat.contains("value=\"openai_chat\""));
+    assert!(chat.contains("value=\"openai_responses\""));
+    assert!(!chat.contains("value=\"anthropic_messages\""));
     let probe_args = vec![
         csrf.clone(),
         model_id.to_string(),
@@ -975,7 +995,14 @@ async fn exercise_http(database_url: &str) {
     let response = client
         .post(format!("{base}/_topcoat/runtime/procedures/save-models"))
         .header("content-type", "application/json")
-        .body(serde_json::to_vec(&vec![batch.to_string()]).unwrap())
+        .body(
+            serde_json::to_vec(&serde_json::json!([
+                csrf,
+                provider.id.to_string(),
+                batch["models"].to_string()
+            ]))
+            .unwrap(),
+        )
         .send()
         .await
         .unwrap();
@@ -994,7 +1021,14 @@ async fn exercise_http(database_url: &str) {
     let response = client
         .post(format!("{base}/_topcoat/runtime/procedures/save-models"))
         .header("content-type", "application/json")
-        .body(serde_json::to_vec(&vec![batch.to_string()]).unwrap())
+        .body(
+            serde_json::to_vec(&serde_json::json!([
+                csrf,
+                provider.id.to_string(),
+                batch["models"].to_string()
+            ]))
+            .unwrap(),
+        )
         .send()
         .await
         .unwrap();
@@ -1316,74 +1350,40 @@ async fn procedure_request(
         "/providers/action" => "provider-action",
         _ => panic!("unknown procedure path: {path}"),
     };
-    let keys: &[&str] = if path == "/providers/save" || path == "/providers/preview" {
-        &[
-            "csrf",
-            "id",
-            "version",
-            "name",
-            "openai_chat",
-            "openai_chat_path",
-            "openai_responses",
-            "openai_responses_path",
-            "anthropic_messages",
-            "anthropic_messages_path",
-            "upstream_url",
-            "enabled",
-            "api_key",
-            "models_path",
-            "models_protocol",
-            "models_probe_status",
-            "anthropic_version",
-            "connect_timeout_ms",
-            "read_timeout_ms",
-            "write_timeout_ms",
-        ]
-    } else {
-        &["csrf", "id", "version", "action"]
-    };
-    let args: Vec<serde_json::Value> = keys
-        .iter()
-        .map(|key| {
-            let value = fields
-                .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.as_str())
-                .unwrap_or("");
-            if [
-                "enabled",
-                "openai_chat",
-                "openai_responses",
-                "anthropic_messages",
-            ]
-            .contains(key)
-            {
-                serde_json::Value::Bool(value == "true")
-            } else {
-                serde_json::Value::String(value.to_owned())
-            }
-        })
-        .collect();
-    let args = if path == "/providers/save" || path == "/providers/preview" {
-        let object = keys
+    let value = |name: &str| {
+        fields
             .iter()
-            .zip(args)
-            .map(|(key, value)| {
-                (
-                    (*key).to_owned(),
-                    if (*key == "id" || *key == "version") && value == "" {
-                        serde_json::Value::Null
-                    } else {
-                        value
-                    },
+            .find(|(key, _)| key == name)
+            .map_or("", |(_, value)| value.as_str())
+    };
+    let args = match path {
+        "/providers/save" => {
+            let form = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(
+                    fields
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str())),
                 )
-            })
-            .collect::<serde_json::Map<String, serde_json::Value>>();
-        vec![serde_json::Value::String(
-            serde_json::Value::Object(object).to_string(),
-        )]
-    } else {
-        args
+                .finish();
+            vec![serde_json::Value::String(form)]
+        }
+        "/providers/preview" => vec![
+            serde_json::json!(value("csrf")),
+            serde_json::json!(value("id")),
+            serde_json::json!(value("name")),
+            serde_json::json!(value("openai_chat") == "true"),
+            serde_json::json!(value("openai_responses") == "true"),
+            serde_json::json!(value("anthropic_messages") == "true"),
+            serde_json::json!(value("upstream_url")),
+            serde_json::json!(value("api_key")),
+            serde_json::json!(value("models_path")),
+            serde_json::json!(value("models_protocol")),
+            serde_json::json!(value("anthropic_version")),
+        ],
+        _ => ["csrf", "id", "version", "action"]
+            .into_iter()
+            .map(|key| serde_json::Value::String(value(key).to_owned()))
+            .collect(),
     };
     client
         .post(format!("{base}/_topcoat/runtime/procedures/{endpoint}"))

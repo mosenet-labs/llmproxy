@@ -1,3 +1,6 @@
+// Topcoat shards and procedures receive their signal fields as separate arguments.
+#![expect(clippy::too_many_arguments)]
+
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -9,7 +12,7 @@ use topcoat::{
     Result,
     context::{Cx, app_context},
     icon::icon,
-    router::page,
+    router::{href, page},
     runtime::{Event, Signal, procedure, shard, signal},
     view::{Attributes, View, attributes, class, view},
 };
@@ -20,7 +23,8 @@ use topcoat_ant_design::{
     popconfirm, popconfirm_trigger_attributes, search_multi_select, tag,
 };
 
-use crate::app::{AppState, check_csrf, query_models};
+use super::providers::query_models;
+use crate::app::{AppState, check_csrf};
 
 const BUTTON: &str = "inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-control-border bg-white px-4 text-sm font-medium leading-5 text-heading hover:border-primary-hover hover:text-primary";
 const PRIMARY: &str = "border-primary! bg-primary! text-white! shadow-sm hover:border-primary-hover! hover:bg-primary-hover!";
@@ -36,7 +40,7 @@ fn protocol_label(protocol: Protocol) -> &'static str {
     }
 }
 
-#[page("/ui/models")]
+#[page]
 pub async fn models(cx: &Cx) -> Result<impl View> {
     let refresh = signal(cx, || 0.0);
     let search = signal(cx, String::new);
@@ -65,7 +69,6 @@ struct Editor {
     model_search: Signal<String>,
     model_menu_open: Signal<bool>,
     selected_models: Signal<String>,
-    draft_models: Signal<String>,
     draft_revision: Signal<f64>,
     candidates: Signal<String>,
     candidate_error: Signal<String>,
@@ -104,7 +107,6 @@ impl Editor {
             model_search: signal(cx, String::new),
             model_menu_open: signal(cx, || false),
             selected_models: signal(cx, || "[]".to_owned()),
-            draft_models: signal(cx, || "[]".to_owned()),
             draft_revision: signal(cx, || 0.0),
             candidates: signal(cx, || "[]".to_owned()),
             candidate_error: signal(cx, String::new),
@@ -172,7 +174,6 @@ fn editor_trigger(
         model_search,
         model_menu_open,
         selected_models,
-        draft_models,
         draft_revision,
         candidates,
         candidate_error,
@@ -223,7 +224,6 @@ fn editor_trigger(
         model_search.set("".to_owned());
         model_menu_open.set(false);
         selected_models.set("[]".to_owned());
-        draft_models.set("[]".to_owned());
         draft_revision.increment();
         candidates.set("[]".to_owned());
         candidate_error.set("".to_owned());
@@ -291,7 +291,7 @@ pub async fn model_workspace(
             <div class="flex items-center justify-between gap-4 px-6 py-5 max-[640px]:px-4"><h2 class="m-0 text-base font-semibold">"模型列表"<span class="ml-2 rounded bg-surface px-2 text-[13px] font-normal text-secondary">(all.len())</span></h2><span class="text-[13px] text-secondary">"按协议与别名匹配请求"</span></div>
             <div class="border-t border-border px-6 py-4 max-[640px]:px-4"><input class="h-9 w-[320px] max-w-full rounded-md border border-control-border px-3 text-sm focus:border-primary" type="search" aria-label="搜索模型" placeholder="搜索别名、上游模型或 Provider" :value=$(search.get()) @input=$(|event: Event| search.set(event.target.value))></div>
             if all.is_empty() {
-                <div class="border-t border-border px-6 py-14 text-center"><h3 class="m-0 text-base font-medium">"尚未添加模型"</h3><p class="mt-2 mb-0 text-sm text-secondary">"先启用 Provider，再从其模型列表选择模型。"</p>if providers.is_empty() { <a class=(class!(BUTTON, PRIMARY, "mt-5")) href="/ui/providers">"管理 Providers"</a> } else { <button class=(class!(BUTTON, PRIMARY, "mt-5")) type="button" (editor_trigger(cx, &editor, None, None))>"新建模型"</button> }</div>
+                <div class="border-t border-border px-6 py-14 text-center"><h3 class="m-0 text-base font-medium">"尚未添加模型"</h3><p class="mt-2 mb-0 text-sm text-secondary">"先启用 Provider，再从其模型列表选择模型。"</p>if providers.is_empty() { <a class=(class!(BUTTON, PRIMARY, "mt-5")) href=(href!(super::providers::list))>"管理 Providers"</a> } else { <button class=(class!(BUTTON, PRIMARY, "mt-5")) type="button" (editor_trigger(cx, &editor, None, None))>"新建模型"</button> }</div>
             } else if filtered.is_empty() {
                 <div class="border-t border-border px-6 py-12 text-center text-sm text-secondary">"没有找到匹配的模型"</div>
             } else {
@@ -381,9 +381,18 @@ pub async fn load_model_candidates(cx: &Cx, provider_id: String) -> Result<Outco
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/save-models")]
-pub async fn save_models(cx: &Cx, payload: String) -> Result<Outcome> {
-    let input: BatchModelForm = serde_json::from_str(&payload)
-        .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?;
+pub async fn save_models(
+    cx: &Cx,
+    csrf: String,
+    provider_id: String,
+    models_json: String,
+) -> Result<Outcome> {
+    let input = BatchModelForm {
+        csrf,
+        provider_id,
+        models: serde_json::from_str(&models_json)
+            .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?,
+    };
     check_csrf(cx, &input.csrf)?;
     let store = &app_context::<AppState>(cx).store;
     let result: std::result::Result<String, StoreError> = async {
@@ -438,9 +447,29 @@ pub async fn save_models(cx: &Cx, payload: String) -> Result<Outcome> {
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/save-model")]
-pub async fn save_model(cx: &Cx, payload: String) -> Result<Outcome> {
-    let input: ModelForm = serde_json::from_str(&payload)
-        .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?;
+pub async fn save_model(
+    cx: &Cx,
+    csrf: String,
+    id: String,
+    version: String,
+    alias: String,
+    provider_id: String,
+    upstream_model_id: String,
+    chat: bool,
+    responses: bool,
+    messages: bool,
+) -> Result<Outcome> {
+    let input = ModelForm {
+        csrf,
+        id: (!id.is_empty()).then_some(id),
+        version: (!version.is_empty()).then_some(version),
+        alias,
+        provider_id,
+        upstream_model_id,
+        chat,
+        responses,
+        messages,
+    };
     check_csrf(cx, &input.csrf)?;
     let store = &app_context::<AppState>(cx).store;
     let result: std::result::Result<String, StoreError> = async {
@@ -672,7 +701,6 @@ async fn provider_search(
         supports_responses,
         supports_messages,
         selected_models,
-        draft_models,
         draft_revision,
         candidates,
         candidate_error,
@@ -711,9 +739,10 @@ async fn provider_search(
                     let default_responses = only_one && has_responses;
                     let default_messages = only_one && has_messages;
                     let unavailable = unavailable.clone();
-                    <button class="block w-full rounded-md border-0! bg-transparent! px-3 py-2 text-left text-sm leading-5 text-heading shadow-none! hover:bg-primary-soft! focus:bg-primary-soft! focus:outline-none aria-selected:text-primary data-[filtered]:hidden" type="button" role="option" :aria-selected=$(provider_id.get() == option_id) :data-filtered=$(if provider_query.get().is_empty() { false } else { raw!("!${option_name}.dehydrate().toLowerCase().includes(${provider_query}.get().dehydrate().toLowerCase())", false) })
-                        @click=$(async |_event: Event| {
-                            raw!("if (!(${provider_id}.get().dehydrate() === ${option_id}.dehydrate() || JSON.parse(${draft_models}.get().dehydrate()).length === 0 || window.confirm('切换 Provider 将清空尚未保存的模型，继续吗？'))) return;", ());
+                    let confirm_id = format!("switch-model-provider-{}", provider.id);
+                    let confirm_title = format!("切换到「{}」？未保存的模型会清空。", provider.name);
+                    let option_class = "block w-full rounded-md border-0! bg-transparent! px-3 py-2 text-left text-sm leading-5 text-heading shadow-none! hover:bg-primary-soft! focus:bg-primary-soft! focus:outline-none aria-selected:text-primary data-[filtered]:hidden";
+                    let choose = attributes! { cx => @click=$(async |_event: Event| {
                             provider_id.set(option_id.to_owned());
                             provider_name.set(option_name.to_owned());
                             provider_query.set(option_name.to_owned());
@@ -727,7 +756,6 @@ async fn provider_search(
                             supports_responses.set(has_responses);
                             supports_messages.set(has_messages);
                             selected_models.set("[]".to_owned());
-                            draft_models.set("[]".to_owned());
                             candidates.set("[]".to_owned());
                             candidate_error.set("".to_owned());
                             model_search.set("".to_owned());
@@ -743,9 +771,59 @@ async fn provider_search(
                                     else { candidate_error.set(result.unwrap_err()); }
                                 }
                             }
-                        })>(provider.name.as_str())</button>
+                        }) };
+                    <button class=(option_class) type="button" role="option" :aria-selected=$(provider_id.get() == option_id) :data-filtered=$(if provider_query.get().is_empty() { false } else { raw!("!${option_name}.dehydrate().toLowerCase().includes(${provider_query}.get().dehydrate().toLowerCase())", false) }) :hidden=$(if selected_models.get() == "[]" { false } else { provider_id.get() != option_id }) (choose.clone())>(provider.name.as_str())</button>
+                    <button class=(option_class) type="button" role="option" :aria-selected=$(provider_id.get() == option_id) :data-filtered=$(if provider_query.get().is_empty() { false } else { raw!("!${option_name}.dehydrate().toLowerCase().includes(${provider_query}.get().dehydrate().toLowerCase())", false) }) :hidden=$(if selected_models.get() == "[]" { true } else { provider_id.get() == option_id }) (popconfirm_trigger_attributes(cx, &confirm_id))>(provider.name.as_str())</button>
+                    popconfirm(id: confirm_id.as_str(), title: confirm_title.as_str(), language: UiLanguage::ChineseSimplified,
+                        attrs: attributes! { cx => @click=$(|_event: Event| provider_query.set(provider_name.get())) },
+                        <button class="gr-button gr-button-danger" type="button" (choose)>"确认切换"</button>
+                    )
                 }
             </div>
+        </div>
+    })
+}
+
+#[procedure("/ui/_topcoat/runtime/procedures/remove-draft-model")]
+pub async fn remove_draft_model(selection: String, model_id: String) -> Result<String> {
+    let mut selected: Vec<String> = serde_json::from_str(&selection).unwrap_or_default();
+    selected.retain(|id| id != &model_id);
+    Ok(serde_json::to_string(&selected)?)
+}
+
+#[topcoat::view::component]
+async fn draft_model_row(
+    cx: &Cx,
+    model_id: &str,
+    index: usize,
+    provider_name: &str,
+    selected: Signal<String>,
+    supports_chat: bool,
+    supports_responses: bool,
+    supports_messages: bool,
+    default_chat: bool,
+    default_responses: bool,
+    default_messages: bool,
+) -> Result<impl View> {
+    let alias = signal(cx, || format!("{provider_name}/{model_id}"));
+    let chat = signal(cx, || default_chat);
+    let responses = signal(cx, || default_responses);
+    let messages = signal(cx, || default_messages);
+    let row_id = model_id.to_owned();
+    Ok(view! {
+        <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_32px] items-start gap-3 py-3 max-[760px]:grid-cols-[minmax(0,1fr)_32px]">
+            <input type="hidden" name="model_id" value=(model_id)>
+            <div class="min-w-0 pt-2 text-sm break-all text-heading max-[760px]:col-span-1 max-[760px]:pt-0"><span class="hidden text-xs text-secondary max-[760px]:block">"模型 ID"</span>(model_id)</div>
+            <div class="min-w-0 max-[760px]:col-span-1 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{index}"))>"客户端别名"</label><input id=(format!("alias-{index}")) name=(format!("alias-{index}")) class="w-full" type="text" :value=$(alias.get()) maxlength="200" aria-label=(format!("{model_id} 的客户端别名")) @input=$(|event: Event| alias.set(event.target.value))></div>
+            <div class="flex min-w-0 flex-wrap gap-x-3 gap-y-1 pt-2 text-xs text-heading max-[760px]:col-span-1 max-[760px]:row-start-3 max-[760px]:pt-0">
+                <span class="hidden w-full text-xs text-secondary max-[760px]:block">"支持协议"</span>
+                if supports_chat { <label class="inline-flex items-center gap-1"><input type="checkbox" name=(format!("chat-{index}")) :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label> }
+                if supports_responses { <label class="inline-flex items-center gap-1"><input type="checkbox" name=(format!("responses-{index}")) :checked=$(responses.get()) @change=$(|event: Event| responses.set(event.target.checked))>"Responses"</label> }
+                if supports_messages { <label class="inline-flex items-center gap-1"><input type="checkbox" name=(format!("messages-{index}")) :checked=$(messages.get()) @change=$(|event: Event| messages.set(event.target.checked))>"Messages"</label> }
+            </div>
+            <button class="inline-flex size-8 shrink-0 items-center justify-center self-center rounded-full border border-control-border bg-white p-0 text-muted shadow-sm transition-colors duration-150 hover:border-[#ffccc7] hover:bg-[#fff2f0] hover:text-[#cf1322] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#91caff] max-[760px]:col-start-2 max-[760px]:row-start-1" type="button" aria-label=(format!("移除 {model_id}")) title="移除模型" @click=$(async |_event: Event| {
+                selected.set(remove_draft_model(selected.get(), row_id.to_owned()).await);
+            })>icon(data: CLOSE_OUTLINED, size: 14)</button>
         </div>
     })
 }
@@ -758,19 +836,23 @@ pub async fn model_draft(
     provider_name: Signal<String>,
     candidates: Signal<String>,
     selected: Signal<String>,
-    draft: Signal<String>,
     search: Signal<String>,
     menu_open: Signal<bool>,
     supports_chat: Signal<bool>,
     supports_responses: Signal<bool>,
     supports_messages: Signal<bool>,
-    refresh: Signal<f64>,
 ) -> Result<impl View> {
     let _ = cx;
     let _ = revision;
     let available: Vec<String> =
         serde_json::from_str(&candidates.get_untracked()).unwrap_or_default();
-    let rows: Vec<DraftModel> = serde_json::from_str(&draft.get_untracked()).unwrap_or_default();
+    let selected_ids: Vec<String> = serde_json::from_str(&selected.get()).unwrap_or_default();
+    let available_ids: HashSet<_> = available.iter().map(String::as_str).collect();
+    let mut chosen = HashSet::new();
+    let rows: Vec<_> = selected_ids
+        .into_iter()
+        .filter(|id| available_ids.contains(id.as_str()) && chosen.insert(id.clone()))
+        .collect();
     let mut seen = HashSet::new();
     let options: Vec<SearchOption> = available
         .into_iter()
@@ -789,26 +871,18 @@ pub async fn model_draft(
     .filter(|enabled| *enabled)
     .count()
         == 1;
-    let defaults = serde_json::to_string(&DraftModel {
-        model_id: String::new(),
-        alias: String::new(),
-        chat: only_one && supports_chat.get_untracked(),
-        responses: only_one && supports_responses.get_untracked(),
-        messages: only_one && supports_messages.get_untracked(),
-    })?;
+    let provider_key = provider_id.get_untracked();
+    let provider_label = provider_name.get_untracked();
+    let has_chat = supports_chat.get_untracked();
+    let has_responses = supports_responses.get_untracked();
+    let has_messages = supports_messages.get_untracked();
     Ok(view! {
             <div class="min-w-0">
                 <label class="mb-2 block text-sm font-semibold text-heading" for="model-select-input">"选择上游模型"<span class="ml-1 text-[#ff4d4f]">"*"</span></label>
                 if options.is_empty() {
                     <input id="model-select-input" class="w-full" type="search" placeholder="搜索上游模型" disabled="">
                 } else {
-                    search_multi_select(id: "model-select", options: &options, selected: &selected, search: &search, open: &menu_open,
-                        attrs: attributes! { @selectionchange=$(|_event: Event| {
-                            let _defaults = defaults.to_owned();
-                            raw!("(() => { const ids = JSON.parse(${selected}.get().dehydrate()); const previous = JSON.parse(${draft}.get().dehydrate()); const base = JSON.parse(${_defaults}.dehydrate()); const name = ${provider_name}.get().dehydrate(); const next = ids.map(id => previous.find(row => row.model_id === id) ?? {...base, model_id:id, alias:name + '/' + id}); ${draft}.set(cx.hydrate(JSON.stringify(next))); })();", ());
-                            refresh.increment();
-                        }) }
-                    )
+                    search_multi_select(id: "model-select", options: &options, selected: &selected, search: &search, open: &menu_open)
                 }
                 <p class="mt-2 mb-0 text-xs text-secondary" role="status">
                     if provider_id.get_untracked().is_empty() { "先选择 Provider，再从探测结果中选择模型。" }
@@ -823,26 +897,19 @@ pub async fn model_draft(
                         <span>"模型 ID"</span><span>"客户端别名"</span><span>"支持协议"</span><span class="sr-only">"操作"</span>
                     </div>
                     <div class="divide-y divide-border">
-                        #[key(row.model_id)] for row in &rows {
-                            let row_id = row.model_id.clone();
-                            <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_32px] items-start gap-3 py-3 max-[760px]:grid-cols-[minmax(0,1fr)_32px]">
-                                <div class="min-w-0 pt-2 text-sm break-all text-heading max-[760px]:col-span-1 max-[760px]:pt-0"><span class="hidden text-xs text-secondary max-[760px]:block">"模型 ID"</span>(row.model_id.as_str())</div>
-                                <div class="min-w-0 max-[760px]:col-span-1 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{}", row.model_id))>"客户端别名"</label><input id=(format!("alias-{}", row.model_id)) class="w-full" type="text" :value=(row.alias.as_str()) maxlength="200" aria-label=(format!("{} 的客户端别名", row.model_id)) @input=$(|_event: Event| {
-                                    let _row_id = row_id.to_owned();
-                                    raw!("(() => { const rows = JSON.parse(${draft}.get().dehydrate()); const row = rows.find(item => item.model_id === ${_row_id}.dehydrate()); if (row) { row.alias = ${_event}.target.value.dehydrate(); ${draft}.set(cx.hydrate(JSON.stringify(rows))); } })();", ());
-                                })></div>
-                                <div class="flex min-w-0 flex-wrap gap-x-3 gap-y-1 pt-2 text-xs text-heading max-[760px]:col-span-1 max-[760px]:row-start-3 max-[760px]:pt-0">
-                                    <span class="hidden w-full text-xs text-secondary max-[760px]:block">"支持协议"</span>
-                                    if supports_chat.get_untracked() { <label class="inline-flex items-center gap-1"><input type="checkbox" :checked=(row.chat) @change=$(|_event: Event| { let _row_id = row_id.to_owned(); raw!("(() => { const rows = JSON.parse(${draft}.get().dehydrate()); const row = rows.find(item => item.model_id === ${_row_id}.dehydrate()); if (row) { row.chat = ${_event}.target.checked.dehydrate(); ${draft}.set(cx.hydrate(JSON.stringify(rows))); } })();", ()); })>"Chat"</label> }
-                                    if supports_responses.get_untracked() { <label class="inline-flex items-center gap-1"><input type="checkbox" :checked=(row.responses) @change=$(|_event: Event| { let _row_id = row_id.to_owned(); raw!("(() => { const rows = JSON.parse(${draft}.get().dehydrate()); const row = rows.find(item => item.model_id === ${_row_id}.dehydrate()); if (row) { row.responses = ${_event}.target.checked.dehydrate(); ${draft}.set(cx.hydrate(JSON.stringify(rows))); } })();", ()); })>"Responses"</label> }
-                                    if supports_messages.get_untracked() { <label class="inline-flex items-center gap-1"><input type="checkbox" :checked=(row.messages) @change=$(|_event: Event| { let _row_id = row_id.to_owned(); raw!("(() => { const rows = JSON.parse(${draft}.get().dehydrate()); const row = rows.find(item => item.model_id === ${_row_id}.dehydrate()); if (row) { row.messages = ${_event}.target.checked.dehydrate(); ${draft}.set(cx.hydrate(JSON.stringify(rows))); } })();", ()); })>"Messages"</label> }
-                                </div>
-                                <button class="inline-flex size-8 shrink-0 items-center justify-center self-center rounded-full border border-control-border bg-white p-0 text-muted shadow-sm transition-colors duration-150 hover:border-[#ffccc7] hover:bg-[#fff2f0] hover:text-[#cf1322] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#91caff] max-[760px]:col-start-2 max-[760px]:row-start-1" type="button" aria-label=(format!("移除 {}", row.model_id)) title="移除模型" @click=$(|_event: Event| {
-                                    let _row_id = row_id.to_owned();
-                                    raw!("(() => { const id = ${_row_id}.dehydrate(); ${selected}.set(cx.hydrate(JSON.stringify(JSON.parse(${selected}.get().dehydrate()).filter(item => item !== id)))); ${draft}.set(cx.hydrate(JSON.stringify(JSON.parse(${draft}.get().dehydrate()).filter(item => item.model_id !== id)))); })();", ());
-                                    refresh.increment();
-                                })>icon(data: CLOSE_OUTLINED, size: 14)</button>
-                            </div>
+                        #[key((provider_key.as_str(), row_id.as_str()))] for (index, row_id) in rows.iter().enumerate() {
+                            draft_model_row(
+                                model_id: row_id.as_str(),
+                                index: index,
+                                provider_name: provider_label.as_str(),
+                                selected: selected.clone(),
+                                supports_chat: has_chat,
+                                supports_responses: has_responses,
+                                supports_messages: has_messages,
+                                default_chat: only_one && has_chat,
+                                default_responses: only_one && has_responses,
+                                default_messages: only_one && has_messages,
+                            )
                         }
                     </div>
                 </div>
@@ -869,6 +936,7 @@ async fn model_editor(
         alias_edited,
         provider_id,
         provider_name,
+        provider_query,
         model_id,
         chat,
         responses,
@@ -876,7 +944,6 @@ async fn model_editor(
         supports_chat,
         supports_responses,
         supports_messages,
-        draft_models,
         draft_revision,
         candidates,
         selected_models,
@@ -901,13 +968,22 @@ async fn model_editor(
         native_dialog(config: NativeDialogConfig::new("model-dialog", "模型配置"),
             open: Some(open), busy: busy, language: UiLanguage::ChineseSimplified,
             attrs: attributes! { class="w-[min(960px,calc(100%_-_32px))]! [&_.gr-native-dialog-header]:px-6 [&_.gr-native-dialog-header]:py-4" },
-            <form class="m-0 flex min-h-0 max-h-[calc(100dvh_-_48px)] flex-col" @submit=$(async |event: Event| {
+            <form id="model-editor-form" class="m-0 flex min-h-0 max-h-[calc(100dvh_-_48px)] flex-col" @submit=$(async |event: Event| {
                 event.prevent_default();
-                raw!("if (${busy}.get().dehydrate()) return;", ());
-                raw!("if (!${provider_id}.get().dehydrate() || (document.getElementById('model-provider-input')?.value ?? '') !== ${provider_name}.get().dehydrate()) { ${error}.set(cx.hydrate('请从下拉列表选择 Provider')); return; }", ());
+                if busy.get() { return; }
+                if provider_id.get().is_empty() {
+                    error.set("请从下拉列表选择 Provider".to_owned());
+                    return;
+                }
+                if provider_query.get() != provider_name.get() {
+                    error.set("请从下拉列表选择 Provider".to_owned());
+                    return;
+                }
                 busy.set(true);
                 error.set("".to_owned());
-                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(cx.hydrate(JSON.stringify({csrf:${csrf}.dehydrate(),id:${id}.get().dehydrate(),version:${version}.get().dehydrate(),alias:${alias}.get().dehydrate(),provider_id:${provider_id}.get().dehydrate(),upstream_model_id:${model_id}.get().dehydrate(),chat:${chat}.get().dehydrate(),responses:${responses}.get().dehydrate(),messages:${messages}.get().dehydrate()}))) : ${save_models}.call(cx.hydrate(JSON.stringify({csrf:${csrf}.dehydrate(),provider_id:${provider_id}.get().dehydrate(),models:JSON.parse(${draft_models}.get().dehydrate())})))).catch(() => ${unavailable})", unavailable.clone());
+                // Topcoat renders each draft row with signals; its runtime
+                // cannot collect a dynamic form list without FormData.
+                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(${csrf}, ${id}.get(), ${version}.get(), ${alias}.get(), ${provider_id}.get(), ${model_id}.get(), ${chat}.get(), ${responses}.get(), ${messages}.get()) : (() => { const form = new FormData(document.getElementById('model-editor-form')); const rows = form.getAll('model_id').map((model_id, index) => ({model_id, alias: form.get('alias-' + index) || '', chat: form.has('chat-' + index), responses: form.has('responses-' + index), messages: form.has('messages-' + index)})); return ${save_models}.call(${csrf}, ${provider_id}.get(), cx.hydrate(JSON.stringify(rows))); })()).catch(() => ${unavailable})", unavailable.clone());
                 busy.set(false);
                 if result.is_ok() { open.set(false); success.set(result.unwrap()); refresh.increment(); }
                 else { error.set(result.unwrap_err()); }
@@ -923,7 +999,7 @@ async fn model_editor(
                             <p class="mt-8 mb-0 text-sm text-secondary" role="status" :hidden=$(!candidate_busy.get())>"正在探测上游模型…"</p>
                             <p class="mt-8 mb-0 text-sm text-[#cf1322]" role="alert" :hidden=$(candidate_error.get().is_empty())>$(candidate_error.get())</p>
                             <div class="contents" :hidden=$(if candidate_busy.get() { true } else { !candidate_error.get().is_empty() })>
-                                model_draft(revision: $(draft_revision.get()), provider_id: provider_id.clone(), provider_name: provider_name.clone(), candidates: candidates.clone(), selected: selected_models.clone(), draft: draft_models.clone(), search: model_search.clone(), menu_open: model_menu_open.clone(), supports_chat: supports_chat.clone(), supports_responses: supports_responses.clone(), supports_messages: supports_messages.clone(), refresh: draft_revision.clone())
+                                model_draft(revision: $(draft_revision.get()), provider_id: provider_id.clone(), provider_name: provider_name.clone(), candidates: candidates.clone(), selected: selected_models.clone(), search: model_search.clone(), menu_open: model_menu_open.clone(), supports_chat: supports_chat.clone(), supports_responses: supports_responses.clone(), supports_messages: supports_messages.clone())
                             </div>
                         </div>
                     </div>
@@ -966,7 +1042,8 @@ async fn model_editor(
                                     <input class="mt-2 w-full" type="number" min="1" max="1024" step="1" :value=$(probe_tokens.get()) @input=$(|event: Event| { probe_tokens.set(event.target.value); probe_success.set("".to_owned()); probe_failure.set("".to_owned()); })>
                                 </label>
                                 <button class=(class!(BUTTON, "h-10")) type="button" :disabled=$(probe_busy.get()) @click=$(async |_event: Event| {
-                                    raw!("if (${busy}.get().dehydrate() || ${probe_busy}.get().dehydrate()) return;", ());
+                                    if busy.get() { return; }
+                                    if probe_busy.get() { return; }
                                     busy.set(true);
                                     probe_busy.set(true);
                                     probe_success.set("".to_owned());

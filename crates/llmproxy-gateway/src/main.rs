@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let console = _console_runtime.block_on(llmproxy_console::Console::connect(
         settings.database.url(),
         settings.database.master_key(),
-        settings.listen.port(),
+        settings.listen,
     ))?;
 
     let mut server = Server::new(None)?;

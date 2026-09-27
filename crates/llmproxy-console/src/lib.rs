@@ -1,9 +1,10 @@
 mod app;
 mod assets;
-mod models;
+mod chat_stream;
 pub mod observability;
 
 use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use llmproxy_store::ProviderStore;
 use topcoat::{
@@ -25,7 +26,7 @@ impl Console {
     pub async fn connect(
         database_url: &str,
         master_key: &str,
-        port: u16,
+        listen: SocketAddr,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let store = ProviderStore::connect(database_url, master_key).await?;
         store.list().await?;
@@ -36,34 +37,47 @@ impl Console {
             store,
             prober: llmproxy_probe::ModelProber::new()?,
             csrf,
-            port,
+            port: listen.port(),
             telemetry: observability::ConsoleTelemetry::new(),
+            chat_sessions: app::ui::chat::ChatSessions::default(),
+            chat_client: reqwest::Client::builder().no_proxy().build()?,
+            gateway_origin: format!(
+                "http://{}",
+                SocketAddr::new(
+                    match listen.ip() {
+                        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                        ip => ip,
+                    },
+                    listen.port(),
+                )
+            ),
         };
-        let mut builder = Router::builder()
+        let mut builder = app::route_builder()
             .app_context(state)
             .layer(BodyLimit::max(BODY_LIMIT))
             .layer(app::protect)
             .layer(observability::request_layer())
-            .layout(app::shell)
-            .page(app::list)
-            .page(app::routes)
-            .route(app::providers_redirect)
-            .page(models::models)
-            .route(models::model_workspace)
-            .route(models::model_candidates)
-            .route(models::model_draft)
-            .route(models::load_model_candidates)
-            .route(models::save_model)
-            .route(models::save_models)
-            .route(models::delete_model)
-            .route(models::probe_saved_model)
-            .page(app::form)
-            .route(app::save)
-            .route(app::perform_action)
-            .route(app::save_provider)
-            .route(app::provider_action)
-            .route(app::preview_models)
-            .route(app::provider_list)
+            .route(app::ui::chat::chat_history)
+            .route(app::ui::chat::chat_protocol_picker)
+            .route(app::ui::chat::chat_session_list)
+            .route(app::ui::chat::begin_chat)
+            .route(app::ui::chat::send_chat)
+            .route(app::ui::chat::new_chat)
+            .route(app::ui::chat::default_protocol)
+            .route(app::ui::models::model_workspace)
+            .route(app::ui::models::model_candidates)
+            .route(app::ui::models::model_draft)
+            .route(app::ui::models::load_model_candidates)
+            .route(app::ui::models::remove_draft_model)
+            .route(app::ui::models::save_model)
+            .route(app::ui::models::save_models)
+            .route(app::ui::models::delete_model)
+            .route(app::ui::models::probe_saved_model)
+            .route(app::ui::providers::save_provider)
+            .route(app::ui::providers::provider_action)
+            .route(app::ui::providers::preview_models)
+            .route(app::ui::providers::provider_list)
             .route(assets::component_css)
             .route(assets::console_css)
             .route(assets::runtime_js)
