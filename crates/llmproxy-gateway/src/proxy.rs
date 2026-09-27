@@ -1,4 +1,5 @@
 use std::{
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -18,7 +19,7 @@ use pingora::{
 use pingora_http::{RequestHeader, ResponseHeader};
 
 use crate::{
-    model_body::{MODEL_PREFIX_LIMIT, Scan, scan_model},
+    model_body::{MODEL_PREFIX_LIMIT, Scan, rewrite_model, scan_model},
     observability::{GatewayTelemetry, RequestTelemetry},
     snapshot::{ProviderSnapshots, ResolvedProvider},
 };
@@ -39,6 +40,17 @@ pub struct RequestContext {
     body_delta: isize,
 }
 
+struct ModelPrefix {
+    prefix: Vec<u8>,
+    alias: String,
+    range: Range<usize>,
+}
+
+enum ModelRead {
+    Found(ModelPrefix),
+    Rejected(u16),
+}
+
 impl Gateway {
     pub fn new(providers: ProviderSnapshots, console: llmproxy_console::Console) -> Self {
         Self {
@@ -47,6 +59,46 @@ impl Gateway {
             console,
         }
     }
+
+    fn resolve_model_route(
+        &self,
+        protocol: Protocol,
+        alias: &str,
+    ) -> std::result::Result<(Arc<ResolvedProvider>, String), u16> {
+        let model = self.providers.select(protocol, alias).ok_or(404u16)?;
+        let provider = model.provider.as_ref().ok_or(503u16)?.clone();
+        Ok((provider, model.upstream_model_id.clone()))
+    }
+}
+
+async fn read_model(session: &mut Session) -> Result<ModelRead> {
+    // Pingora selects the peer before request_body_filter. Read only through
+    // the model field and let its retry buffer replay that prefix.
+    session.enable_retry_buffering();
+    let mut prefix = Vec::new();
+    let (alias, range) = loop {
+        let Some(chunk) = session.read_request_body().await? else {
+            return Ok(ModelRead::Rejected(400));
+        };
+        prefix.extend_from_slice(&chunk);
+        if prefix.len() > MODEL_PREFIX_LIMIT || session.retry_buffer_truncated() {
+            return Ok(ModelRead::Rejected(413));
+        }
+        match scan_model(&prefix) {
+            Scan::Found { alias, range } => break (alias, range),
+            Scan::More if prefix.len() < MODEL_PREFIX_LIMIT => {}
+            Scan::More => return Ok(ModelRead::Rejected(413)),
+            Scan::Invalid | Scan::Missing => return Ok(ModelRead::Rejected(400)),
+        }
+    };
+    if alias.is_empty() || session.get_retry_buffer().is_none() {
+        return Ok(ModelRead::Rejected(400));
+    }
+    Ok(ModelRead::Found(ModelPrefix {
+        prefix,
+        alias,
+        range,
+    }))
 }
 
 #[async_trait]
@@ -88,69 +140,38 @@ impl ProxyHttp for Gateway {
                     session.respond_error(415).await?;
                     return Ok(true);
                 }
-                // Pingora selects the peer before request_body_filter. Read only
-                // through the model field, and let its retry buffer replay that
-                // prefix while the rest of the request continues streaming.
-                session.enable_retry_buffering();
-                let mut prefix = Vec::new();
-                let (alias, range) = loop {
-                    let Some(chunk) = session.read_request_body().await? else {
+                let ModelPrefix {
+                    prefix,
+                    alias,
+                    range,
+                } = match read_model(session).await? {
+                    ModelRead::Found(model) => model,
+                    ModelRead::Rejected(status) => {
                         session.set_keepalive(None);
-                        session.respond_error(400).await?;
-                        return Ok(true);
-                    };
-                    prefix.extend_from_slice(&chunk);
-                    if prefix.len() > MODEL_PREFIX_LIMIT || session.retry_buffer_truncated() {
-                        session.set_keepalive(None);
-                        session.respond_error(413).await?;
+                        session.respond_error(status).await?;
                         return Ok(true);
                     }
-                    match scan_model(&prefix) {
-                        Scan::Found { alias, range } => break (alias, range),
-                        Scan::More if prefix.len() < MODEL_PREFIX_LIMIT => {}
-                        Scan::More => {
-                            session.set_keepalive(None);
-                            session.respond_error(413).await?;
-                            return Ok(true);
-                        }
-                        Scan::Invalid | Scan::Missing => {
-                            session.set_keepalive(None);
-                            session.respond_error(400).await?;
-                            return Ok(true);
-                        }
+                };
+                let (provider, upstream_model_id) = match self.resolve_model_route(protocol, &alias)
+                {
+                    Ok(route) => route,
+                    Err(status) => {
+                        ctx.telemetry.selected(protocol, None);
+                        session.set_keepalive(None);
+                        session.respond_error(status).await?;
+                        return Ok(true);
                     }
                 };
-                if alias.is_empty() || session.get_retry_buffer().is_none() {
-                    session.set_keepalive(None);
-                    session.respond_error(400).await?;
-                    return Ok(true);
-                }
-                let Some(model) = self.providers.select(protocol, &alias) else {
-                    ctx.telemetry.selected(protocol, None);
-                    session.set_keepalive(None);
-                    session.respond_error(404).await?;
-                    return Ok(true);
-                };
-                let Some(provider) = model.provider.as_ref() else {
-                    ctx.telemetry.selected(protocol, None);
-                    session.set_keepalive(None);
-                    session.respond_error(503).await?;
-                    return Ok(true);
-                };
-                let model_json = serde_json::to_vec(&model.upstream_model_id).map_err(|_| {
-                    Error::explain(ErrorType::InternalError, "cannot encode upstream model")
-                })?;
-                let mut rewritten =
-                    Vec::with_capacity(prefix.len() - range.len() + model_json.len());
-                rewritten.extend_from_slice(&prefix[..range.start]);
-                rewritten.extend_from_slice(&model_json);
-                rewritten.extend_from_slice(&prefix[range.end..]);
-                ctx.body_delta = rewritten.len() as isize - prefix.len() as isize;
+                let (rewritten, delta) = rewrite_model(&prefix, range, &upstream_model_id)
+                    .map_err(|_| {
+                        Error::explain(ErrorType::InternalError, "cannot encode upstream model")
+                    })?;
+                ctx.body_delta = delta;
                 ctx.original_prefix_len = prefix.len();
-                ctx.replay_prefix = Some(Bytes::from(rewritten));
+                ctx.replay_prefix = Some(rewritten);
                 // Pin one immutable provider for the full request, including SSE.
-                ctx.provider = Some(provider.clone());
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
+                ctx.provider = Some(provider);
                 Ok(false)
             }
             Route::Auto => {

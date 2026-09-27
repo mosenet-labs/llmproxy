@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use bytes::Bytes;
+
 pub const MODEL_PREFIX_LIMIT: usize = 64 * 1024;
 
 pub enum Scan {
@@ -117,9 +119,23 @@ pub fn scan_model(bytes: &[u8]) -> Scan {
     }
 }
 
+pub fn rewrite_model(
+    prefix: &[u8],
+    range: Range<usize>,
+    upstream_model_id: &str,
+) -> serde_json::Result<(Bytes, isize)> {
+    let model_json = serde_json::to_vec(upstream_model_id)?;
+    let mut rewritten = Vec::with_capacity(prefix.len() - range.len() + model_json.len());
+    rewritten.extend_from_slice(&prefix[..range.start]);
+    rewritten.extend_from_slice(&model_json);
+    rewritten.extend_from_slice(&prefix[range.end..]);
+    let delta = rewritten.len() as isize - prefix.len() as isize;
+    Ok((Bytes::from(rewritten), delta))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Scan, scan_model};
+    use super::{Scan, rewrite_model, scan_model};
 
     #[test]
     fn finds_only_top_level_model_and_its_exact_json_bytes() {
@@ -136,5 +152,19 @@ mod tests {
     fn waits_for_a_split_string_and_rejects_missing_model() {
         assert!(matches!(scan_model(br#"{"model":"par"#), Scan::More));
         assert!(matches!(scan_model(br#"{"input":[]}"#), Scan::Missing));
+    }
+
+    #[test]
+    fn rewrites_only_model_value_and_reports_length_change() {
+        let prefix = br#"{"model":"alias","input":[{"model":"untouched"}]}"#;
+        let Scan::Found { range, .. } = scan_model(prefix) else {
+            panic!("model not found");
+        };
+        let (rewritten, delta) = rewrite_model(prefix, range, "a/\"b").unwrap();
+        assert_eq!(
+            rewritten.as_ref(),
+            br#"{"model":"a/\"b","input":[{"model":"untouched"}]}"#
+        );
+        assert_eq!(delta, rewritten.len() as isize - prefix.len() as isize);
     }
 }
