@@ -37,6 +37,8 @@ impl ProviderStore {
         let provider = find(&mut tx, input.provider_id).await?;
         check_mapping_provider(&provider, &input)?;
         check_unique_alias(&mut tx, &input.alias, None).await?;
+        let upstream_model_id = input.upstream_model_id.clone();
+        let catalog_price = input.reference_price.clone();
         let mapping = ModelMapping::create()
             .alias(input.alias)
             .provider_id(input.provider_id)
@@ -59,6 +61,9 @@ impl ProviderStore {
             .updated_at(now()?)
             .exec(&mut tx)
             .await?;
+        if let Some(price) = &catalog_price {
+            pricing::seed_catalog_price(&mut tx, provider.id, &upstream_model_id, price).await?;
+        }
         let view = mapping_view(&mapping, &provider);
         tx.commit().await?;
         Ok(view)
@@ -104,6 +109,8 @@ impl ProviderStore {
             check_unique_alias(&mut tx, &input.alias, None)
                 .await
                 .map_err(|error| StoreError::Conflict(format!("「{label}」：{error}")))?;
+            let upstream_model_id = input.upstream_model_id.clone();
+            let catalog_price = input.reference_price.clone();
             let mapping = ModelMapping::create()
                 .alias(input.alias)
                 .provider_id(provider_id)
@@ -126,6 +133,10 @@ impl ProviderStore {
                 .updated_at(now()?)
                 .exec(&mut tx)
                 .await?;
+            if let Some(price) = &catalog_price {
+                pricing::seed_catalog_price(&mut tx, provider_id, &upstream_model_id, price)
+                    .await?;
+            }
             saved.push(mapping_view(&mapping, &provider));
         }
         tx.commit().await?;

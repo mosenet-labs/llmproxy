@@ -24,6 +24,8 @@
 
 模型映射补充确认：新增 Models 页面；只从已启用 Provider 的模型接口选择模型，默认别名为 `Provider名称/模型ID`；每个模型可选择多个协议，至少一个；请求严格按协议和模型别名映射，不再依赖“当前 Provider”兜底。设计见[模型映射与 Models 控制台](14-model-mapping.md)，实施任务见[M：模型映射](02-tasks.md#m模型映射)。
 
+模型价格补充需求：在 Models 中按模型管理参考价格，兼容 DeepSeek 峰谷及缓存命中、Anthropic 缓存写入/读取，以及提示词长度档位；计费项采用“计费项 + 单位 + 适用条件 + 单价”，缓存读写均属于输入。先形成设计与任务，再实施。详见[模型参考价格规则](16-model-pricing.md)和[B：模型参考价格规则](02-tasks.md#b模型参考价格规则)。
+
 最新补充：
 
 > 新增provider表单
@@ -74,3 +76,7 @@
 - [SQLite 兼容与默认数据库计划](12-sqlite-compatibility-plan.md)
 - [多协议 Provider、可配置路径与模型探测](13-provider-interfaces-and-model-discovery.md)
 - [模型映射与 Models 控制台](14-model-mapping.md)
+- [模型参考价格规则](16-model-pricing.md)
+- [节假日日历与官方通知导入](17-holiday-calendar.md)
+
+最新补充需求：新增法定节假日管理页，从中国权威网站直接导入国务院放假安排的完整区间，提供日、周、月视图；通用日历组件放在 `topcoat-ant-design`，严格使用 Topcoat API，尽量不使用原生 JavaScript。范围和任务见[节假日日历](17-holiday-calendar.md)与[H：节假日日历](02-tasks.md#h节假日日历)。

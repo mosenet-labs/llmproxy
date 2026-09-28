@@ -1,5 +1,6 @@
 use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use llmproxy_store::ModelProbeTarget;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -96,16 +97,14 @@ fn per_million(value: &serde_json::Value) -> Option<String> {
         .as_str()
         .map(str::to_owned)
         .or_else(|| value.as_number().map(ToString::to_string))?;
-    let amount = price.parse::<f64>().ok()? * 1_000_000.0;
-    if !amount.is_finite() || !(0.0..=1_000_000.0).contains(&amount) {
+    let token_price = Decimal::from_str_exact(&price)
+        .or_else(|_| Decimal::from_scientific(&price))
+        .ok()?;
+    let amount = token_price.checked_mul(Decimal::from(1_000_000))?;
+    if amount.is_sign_negative() || amount > Decimal::from(1_000_000) {
         return None;
     }
-    let formatted = format!("{amount:.6}");
-    let formatted = formatted.trim_end_matches('0').trim_end_matches('.');
-    if amount > 0.0 && formatted == "0" {
-        return None;
-    }
-    Some(formatted.to_owned())
+    Some(amount.normalize().to_string())
 }
 
 #[cfg(test)]
@@ -117,7 +116,10 @@ mod tests {
     fn converts_openrouter_token_prices_to_million_token_prices() {
         assert_eq!(per_million(&json!("0.00000015")).as_deref(), Some("0.15"));
         assert_eq!(per_million(&json!("0")).as_deref(), Some("0"));
-        assert!(per_million(&json!("0.0000000000001")).is_none());
+        assert_eq!(
+            per_million(&json!("0.0000000000001")).as_deref(),
+            Some("0.0000001")
+        );
         assert!(per_million(&json!("unknown")).is_none());
     }
 

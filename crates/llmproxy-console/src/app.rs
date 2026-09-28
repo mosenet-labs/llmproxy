@@ -6,6 +6,7 @@ use topcoat::{
 };
 
 pub(crate) mod chat_sessions;
+pub(crate) mod holiday_notice;
 pub(crate) mod model_catalog;
 pub(crate) mod ui;
 

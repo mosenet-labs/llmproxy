@@ -147,6 +147,12 @@ async fn exercise_http(database_url: &str) {
     let chat = chat.text().await.unwrap();
     assert_navigation(&chat, "/ui/chat", "Chat");
     assert!(chat.contains("暂无可聊天的模型"));
+    let holidays = client.get(format!("{base}/holidays")).send().await.unwrap();
+    assert_eq!(holidays.status(), StatusCode::OK);
+    let holidays = holidays.text().await.unwrap();
+    assert_navigation(&holidays, "/ui/holidays", "节假日");
+    assert!(holidays.contains("导入 2026 年官方安排"));
+    assert!(holidays.contains("gr-calendar"));
     for asset in ["components.css", "console.css", "runtime.js"] {
         let response = client
             .get(format!("{base}/assets/{asset}"))
@@ -190,6 +196,7 @@ async fn exercise_http(database_url: &str) {
         ("/ui/models", "Models"),
         ("/ui/chat", "Chat"),
         ("/ui/routes", "路由概览"),
+        ("/ui/holidays", "节假日"),
     ] {
         let response = client
             .post(format!("{origin}{path}"))
@@ -900,6 +907,56 @@ async fn exercise_http(database_url: &str) {
     assert!(models.contains("Chat"));
     assert!(models.contains("Responses"));
     assert!(models.contains("可用性探测"));
+    assert!(models.contains("参考价格"));
+    assert!(models.contains("In $0.15 · Out $0.6 / M · USD"));
+    let price_rules = serde_json::json!([
+        {"item":"input","conditions":{"time_band":"peak"},"unit_price":"0.30"},
+        {"item":"input","conditions":{"time_band":"off_peak"},"unit_price":"0.15"},
+        {"item":"output","conditions":{"time_band":"peak"},"unit_price":"1.20"},
+        {"item":"output","conditions":{"time_band":"off_peak"},"unit_price":"0.60"}
+    ]);
+    let windows = serde_json::json!([{"weekday":1,"start":"01:00","end":"04:00"}]);
+    let price_form = serde_json::json!([
+        csrf,
+        provider.id.to_string(),
+        "mock-model",
+        "USD",
+        "",
+        "",
+        true,
+        "UTC",
+        price_rules.to_string(),
+        windows.to_string()
+    ]);
+    let response = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/save-price-plan"
+        ))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&price_form).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(result["ok"], "「Unified Mock/mock-model」参考价格已保存");
+    let plan = store
+        .get_price_plan(provider.id, "mock-model")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.rules.len(), 4);
+    assert!(
+        client
+            .get(format!("{base}/models"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+            .contains("按条件计价")
+    );
     let chat = client
         .get(format!("{base}/chat"))
         .send()

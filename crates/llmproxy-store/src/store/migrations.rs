@@ -41,6 +41,16 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0008_model_reference_output_price.sql",
         include_str!("../../migrations/postgresql/0008_model_reference_output_price.sql"),
     ),
+    MigrationFile::new(
+        202609280003,
+        "0009_model_price_plans.sql",
+        include_str!("../../migrations/postgresql/0009_model_price_plans.sql"),
+    ),
+    MigrationFile::new(
+        202609280004,
+        "0010_holiday_dates.sql",
+        include_str!("../../migrations/postgresql/0010_holiday_dates.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -138,5 +148,35 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202609280002,
         "0019_model_reference_output_price.sql",
         include_str!("../../migrations/sqlite/0019_model_reference_output_price.sql"),
+    ),
+    MigrationFile::new(
+        202609280003,
+        "0020_model_price_plans.sql",
+        include_str!("../../migrations/sqlite/0020_model_price_plans.sql"),
+    ),
+    MigrationFile::new(
+        202609280004,
+        "0021_model_price_plans_model_idx.sql",
+        include_str!("../../migrations/sqlite/0021_model_price_plans_model_idx.sql"),
+    ),
+    MigrationFile::new(
+        202609280005,
+        "0022_model_price_plans_current_idx.sql",
+        include_str!("../../migrations/sqlite/0022_model_price_plans_current_idx.sql"),
+    ),
+    MigrationFile::new(
+        202609280006,
+        "0023_model_price_rules.sql",
+        include_str!("../../migrations/sqlite/0023_model_price_rules.sql"),
+    ),
+    MigrationFile::new(
+        202609280007,
+        "0024_model_price_rules_plan_idx.sql",
+        include_str!("../../migrations/sqlite/0024_model_price_rules_plan_idx.sql"),
+    ),
+    MigrationFile::new(
+        202609280008,
+        "0025_holiday_dates.sql",
+        include_str!("../../migrations/sqlite/0025_holiday_dates.sql"),
     ),
 ]);

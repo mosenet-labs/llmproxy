@@ -13,14 +13,21 @@ use crate::{
     StoreResult,
     crypto::KeyCipher,
     database::Backend,
-    model::{ModelMapping, Provider, RouteBinding, StoreKey, protocol},
+    model::{
+        HolidayDateRow, ModelMapping, ModelPricePlan, ModelPriceRule, Provider, RouteBinding,
+        StoreKey, protocol,
+    },
+    pricing::decimal_price,
 };
 
+mod holidays;
 mod migrations;
 mod models;
+mod pricing;
 mod providers;
 
 use migrations::{MIGRATIONS, SQLITE_MIGRATIONS};
+use pricing::backfill_legacy_prices;
 
 const KEY_VERIFIER: &str = "llmproxy.database-master-key.verifier.v1";
 const MASTER_KEY_ERROR: StoreError = StoreError::Configuration(
@@ -45,7 +52,10 @@ impl ProviderStore {
                 Provider,
                 RouteBinding,
                 StoreKey,
-                ModelMapping
+                ModelMapping,
+                ModelPricePlan,
+                ModelPriceRule,
+                HolidayDateRow
             ))
             .max_pool_size(10)
             .pool_wait_timeout(Some(Duration::from_secs(10)))
@@ -101,6 +111,7 @@ impl ProviderStore {
                 .exec(&mut lock)
                 .await?;
         }
+        backfill_legacy_prices(&mut lock).await?;
         lock.commit().await?;
         Ok(())
     }
@@ -238,11 +249,7 @@ fn validate_mapping(mut input: ModelMappingInput) -> StoreResult<ModelMappingInp
     }
     if let Some(price) = &input.reference_price {
         for amount in [&price.input_per_million, &price.output_per_million] {
-            if amount.len() > 32
-                || !amount
-                    .parse::<f64>()
-                    .is_ok_and(|value| value.is_finite() && (0.0..=1_000_000.0).contains(&value))
-            {
+            if decimal_price(amount).is_err() {
                 return Err(StoreError::Validation("模型参考价格无效".into()));
             }
         }

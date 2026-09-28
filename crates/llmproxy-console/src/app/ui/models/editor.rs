@@ -15,6 +15,7 @@ pub(super) struct Editor {
     model_id: Signal<String>,
     input_price_per_million: Signal<String>,
     output_price_per_million: Signal<String>,
+    price_summary: Signal<String>,
     model_search: Signal<String>,
     model_menu_open: Signal<bool>,
     manual_model_id: Signal<String>,
@@ -57,6 +58,7 @@ impl Editor {
             model_id: signal(cx, String::new),
             input_price_per_million: signal(cx, String::new),
             output_price_per_million: signal(cx, String::new),
+            price_summary: signal(cx, String::new),
             model_search: signal(cx, String::new),
             model_menu_open: signal(cx, || false),
             manual_model_id: signal(cx, String::new),
@@ -89,6 +91,7 @@ pub(super) fn editor_trigger(
     editor: &Editor,
     model: Option<&ModelMappingView>,
     provider: Option<&ProviderView>,
+    plan: Option<&PricePlanView>,
 ) -> Attributes {
     let (id, version, alias, provider_id, model_id, chat, responses, messages) =
         if let Some(model) = model {
@@ -128,6 +131,7 @@ pub(super) fn editor_trigger(
         model_id: selected_model,
         input_price_per_million,
         output_price_per_million,
+        price_summary,
         model_search,
         model_menu_open,
         manual_model_id,
@@ -187,6 +191,7 @@ pub(super) fn editor_trigger(
         .and_then(|model| model.reference_price.as_ref())
         .map_or("", |price| price.output_per_million.as_str())
         .to_owned();
+    let initial_price_summary = price_label(plan, false);
     attributes! { cx => aria-haspopup="dialog" aria-controls="model-dialog" @click=$(|_event: Event| {
         selected_id.set(id.to_owned());
         selected_version.set(version.to_owned());
@@ -199,6 +204,7 @@ pub(super) fn editor_trigger(
         selected_model.set(model_id.to_owned());
         input_price_per_million.set(initial_input_price.to_owned());
         output_price_per_million.set(initial_output_price.to_owned());
+        price_summary.set(initial_price_summary.to_owned());
         model_search.set("".to_owned());
         model_menu_open.set(false);
         manual_model_id.set("".to_owned());
@@ -604,6 +610,7 @@ pub(super) async fn model_editor(
         model_id,
         input_price_per_million,
         output_price_per_million,
+        price_summary,
         chat,
         responses,
         messages,
@@ -699,10 +706,10 @@ pub(super) async fn model_editor(
                             }) placeholder="搜索探测结果，或手动输入模型 ID" :disabled=$(provider_id.get().is_empty())>
                         )</div>
                         model_candidates(provider_id: $(provider_id.get()), open: $(if id.get().is_empty() { false } else { open.get() }))
-                        <div class="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]" title="导入时从 OpenRouter 模型列表读取的美元参考价；修改模型 ID 后清空">
+                        <div class="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
                             <span class="font-medium text-secondary">"参考价格 · In/Out(M)"</span>
-                            <span class="font-medium tabular-nums text-heading" :hidden=$(input_price_per_million.get().is_empty())>"$"$(input_price_per_million.get())"/$"$(output_price_per_million.get())</span>
-                            <span class="font-medium text-heading" :hidden=$(!input_price_per_million.get().is_empty())>"-"</span>
+                            <span class="font-medium tabular-nums text-heading">$(price_summary.get())</span>
+                            <span class="text-secondary">"可在模型列表的参考价格列编辑。"</span>
                         </div>
                         <div class="mt-6">form_field(config: FormFieldConfig::new("model-alias", "客户端别名"),
                             <input id="model-alias" :value=$(alias.get()) @input=$(|event: Event| { alias.set(event.target.value); alias_edited.set(true); }) placeholder="Provider名称/模型ID" maxlength="200">

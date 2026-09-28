@@ -14,3 +14,7 @@ toasty-core = "0.10.0"
 toasty-driver-sqlite = "0.10.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 dotenvy = "0.15.7"
+serde.workspace = true
+serde_json.workspace = true
+rust_decimal = "1.43.0"
+chrono = "0.4.45"

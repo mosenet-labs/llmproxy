@@ -62,6 +62,49 @@ pub(crate) struct ModelMapping {
 }
 
 #[derive(toasty::Model)]
+#[table = "model_price_plans"]
+pub(crate) struct ModelPricePlan {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub provider_id: i64,
+    pub upstream_model_id: String,
+    pub currency: String,
+    pub source_kind: String,
+    pub source_url: Option<String>,
+    pub recorded_at: i64,
+    pub effective_at: Option<i64>,
+    pub is_current: bool,
+    pub schedule_json: Option<String>,
+}
+
+#[derive(toasty::Model)]
+#[table = "model_price_rules"]
+pub(crate) struct ModelPriceRule {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub price_plan_id: i64,
+    pub item_code: String,
+    pub unit_code: String,
+    pub unit_size: i64,
+    pub conditions_json: String,
+    pub unit_price: String,
+}
+
+#[derive(toasty::Model)]
+#[table = "holiday_dates"]
+pub(crate) struct HolidayDateRow {
+    #[key]
+    pub date: String,
+    pub year: i64,
+    pub name: String,
+    pub kind: String,
+    pub source_url: String,
+    pub imported_at: i64,
+}
+
+#[derive(toasty::Model)]
 #[table = "store_keys"]
 pub(crate) struct StoreKey {
     #[key]

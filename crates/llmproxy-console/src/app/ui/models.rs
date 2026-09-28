@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use llmproxy_core::protocol::Protocol;
 use llmproxy_probe::{InferenceProbeTarget, Reason, ThinkingMode, Verdict};
-use llmproxy_store::{ModelMappingInput, ModelMappingView, ModelPrice, ProviderView, StoreError};
+use llmproxy_store::{
+    ModelMappingInput, ModelMappingView, ModelPrice, PricePlanView, ProviderView, StoreError,
+};
 use serde::{Deserialize, Serialize};
 use topcoat::{
     Result,
@@ -31,6 +33,7 @@ use crate::app::{
 
 mod actions;
 mod editor;
+mod pricing;
 
 use actions::model_delete;
 pub(crate) use actions::{
@@ -39,6 +42,11 @@ pub(crate) use actions::{
 };
 pub(crate) use editor::model_draft;
 use editor::{Editor, editor_trigger, model_editor};
+use pricing::{PriceEditor, price_editor, price_label, price_trigger};
+pub(crate) use pricing::{
+    add_price_rule, add_price_window, price_peak_windows, price_rule_rows, remove_price_rule,
+    remove_price_window, save_price_plan,
+};
 
 const BUTTON: &str = "inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-control-border bg-white px-4 text-sm font-medium leading-5 text-heading hover:border-primary-hover hover:text-primary";
 const PRIMARY: &str = "border-primary! bg-primary! text-white! shadow-sm hover:border-primary-hover! hover:bg-primary-hover!";
@@ -105,6 +113,7 @@ pub async fn model_workspace(
     let page_size = signal(cx, || "10".to_owned());
     let state = app_context::<AppState>(cx);
     let all = state.store.list_models().await?;
+    let price_plans = state.store.list_current_price_plans().await?;
     let all_providers = state.store.list().await?;
     let providers: Vec<_> = all_providers
         .iter()
@@ -154,7 +163,8 @@ pub async fn model_workspace(
     let next_page = current_page.saturating_add(1).min(page_count);
     let pages = page_numbers(current_page, page_count);
     let editor = Editor::new(cx);
-    let create = editor_trigger(cx, &editor, None, None);
+    let price_editor_state = PriceEditor::new(cx);
+    let create = editor_trigger(cx, &editor, None, None, None);
     let csrf = state.csrf.clone();
     let reset = attributes! { cx => @click=$(|_event: Event| {
         draft_query.set("".to_owned());
@@ -168,6 +178,7 @@ pub async fn model_workspace(
     }) };
     Ok(view! {
         model_editor(editor: &editor, providers: &providers, all_models: &all, csrf: csrf.as_str(), success: &success, refresh: &refresh)
+        price_editor(editor: &price_editor_state, csrf: csrf.as_str(), success: &success, refresh: &refresh)
         <section class="mb-6 flex min-h-20 items-center justify-between gap-6 max-[640px]:flex-col max-[640px]:items-start max-[640px]:gap-4">
             <div><h1 class="m-0 text-[28px] font-semibold leading-[1.35] text-heading max-[640px]:text-2xl">"Models"</h1><p class="mt-2 mb-0 text-sm text-secondary">"选择上游模型，设置客户端别名与可用协议。"</p></div>
             <button class=(class!(BUTTON, PRIMARY)) type="button" (create) :disabled=(providers.is_empty())>"＋ 新建模型"</button>
@@ -189,20 +200,25 @@ pub async fn model_workspace(
                 if !query.is_empty() || !protocol.is_empty() || !provider.is_empty() { <button class=(class!(TEXT_LINK, "px-1")) type="button" (reset.clone())>"重置"</button> }
             </form>
             if all.is_empty() {
-                <div class="border-t border-border px-6 py-14 text-center"><h3 class="m-0 text-base font-medium">"尚未添加模型"</h3><p class="mt-2 mb-0 text-sm text-secondary">"先启用 Provider，再选择或手动添加模型。"</p>if providers.is_empty() { <a class=(class!(BUTTON, PRIMARY, "mt-5")) href=(href!(super::providers::list))>"管理 Providers"</a> } else { <button class=(class!(BUTTON, PRIMARY, "mt-5")) type="button" (editor_trigger(cx, &editor, None, None))>"新建模型"</button> }</div>
+                <div class="border-t border-border px-6 py-14 text-center"><h3 class="m-0 text-base font-medium">"尚未添加模型"</h3><p class="mt-2 mb-0 text-sm text-secondary">"先启用 Provider，再选择或手动添加模型。"</p>if providers.is_empty() { <a class=(class!(BUTTON, PRIMARY, "mt-5")) href=(href!(super::providers::list))>"管理 Providers"</a> } else { <button class=(class!(BUTTON, PRIMARY, "mt-5")) type="button" (editor_trigger(cx, &editor, None, None, None))>"新建模型"</button> }</div>
             } else if filtered.is_empty() {
                 <div class="border-t border-border px-6 py-12 text-center text-sm text-secondary">"没有找到匹配的模型"</div>
             } else {
-                data_table(label: "模型列表", attrs: attributes! { class="min-w-[780px] [&_th]:px-6! [&_td]:px-6! [&_td]:py-4!" },
-                    <thead><tr><th>"模型别名"</th><th>"上游模型 ID"</th><th>"Provider"</th><th>"协议"</th><th>"状态"</th><th class="text-right!">"操作"</th></tr></thead>
+                data_table(label: "模型列表", attrs: attributes! { class="min-w-[960px] [&_th]:px-5! [&_td]:px-5! [&_td]:py-4!" },
+                    <thead><tr><th>"模型别名"</th><th>"上游模型 ID"</th><th>"Provider"</th><th>"协议"</th><th>"参考价格"</th><th>"状态"</th><th class="text-right!">"操作"</th></tr></thead>
                     <tbody>#[key(model.id)] for model in &page_models {
+                        let plan: Option<&PricePlanView> = price_plans.iter().find(|plan| plan.provider_id == model.provider_id && plan.upstream_model_id == model.upstream_model_id);
+                        let alias_count = all.iter().filter(|other| other.provider_id == model.provider_id && other.upstream_model_id == model.upstream_model_id).count();
+                        let old_price_needs_review = plan.is_none() && all.iter().any(|other| other.provider_id == model.provider_id && other.upstream_model_id == model.upstream_model_id && other.reference_price.is_some());
+                        let label = price_label(plan, old_price_needs_review);
                         <tr>
-                            <td><button class="border-0 bg-transparent p-0 text-left text-sm font-medium text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, Some(model), providers.iter().find(|p| p.id == model.provider_id)))>(model.alias.as_str())</button></td>
+                            <td><button class="border-0 bg-transparent p-0 text-left text-sm font-medium text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, Some(model), providers.iter().find(|p| p.id == model.provider_id), plan))>(model.alias.as_str())</button></td>
                             <td class="text-sm text-secondary">(model.upstream_model_id.as_str())</td>
                             <td class="text-sm text-heading">(model.provider_name.as_str())</td>
                             <td><div class="flex flex-wrap gap-1">for protocol in &model.protocols { tag(tone: TagTone::Default, (protocol_label(*protocol))) }</div></td>
+                            <td><button class="border-0 bg-transparent p-0 text-left text-[13px] font-medium tabular-nums text-primary hover:underline" type="button" (price_trigger(cx, &price_editor_state, model, plan, alias_count))>(label)</button></td>
                             <td>tag(tone: if model.provider_enabled { TagTone::Success } else { TagTone::Warning }, (if model.provider_enabled { "可用" } else { "Provider 已停用" }))</td>
-                            <td><div class="flex items-center justify-end gap-3 whitespace-nowrap"><button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, Some(model), providers.iter().find(|p| p.id == model.provider_id)))>"编辑"</button>model_delete(model: model, csrf: csrf.as_str(), success: &success, failure: &failure, refresh: &refresh)</div></td>
+                            <td><div class="flex items-center justify-end gap-3 whitespace-nowrap"><button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, Some(model), providers.iter().find(|p| p.id == model.provider_id), plan))>"编辑"</button>model_delete(model: model, csrf: csrf.as_str(), success: &success, failure: &failure, refresh: &refresh)</div></td>
                         </tr>
                     }</tbody>
                 )

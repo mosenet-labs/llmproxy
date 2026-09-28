@@ -2,7 +2,9 @@
 
 mod crypto;
 mod database;
+mod holiday;
 mod model;
+mod pricing;
 mod store;
 
 use std::fmt;
@@ -12,6 +14,11 @@ use llmproxy_core::protocol::Protocol;
 pub use llmproxy_core::protocol::MessagesAuth;
 
 pub use database::{Backend, DatabaseConfig};
+pub use holiday::{HolidayDate, HolidayKind};
+pub use pricing::{
+    PriceConditions, PriceItem, PricePlanInput, PricePlanView, PriceRule, PriceSchedule,
+    PriceSource, TimeBand, WeeklyPeakWindow,
+};
 pub use store::ProviderStore;
 
 pub type StoreResult<T> = Result<T, StoreError>;
