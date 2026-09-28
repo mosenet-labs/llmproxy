@@ -8,8 +8,9 @@ use toasty::{Connection, Db, Executor, Transaction};
 use toasty_core::driver::operation::TransactionMode;
 
 use crate::{
-    ActiveProvider, MessagesAuth, ModelMappingInput, ModelMappingView, ModelProbeTarget,
-    ModelRoute, ProbeStatus, ProviderInput, ProviderView, StoreError, StoreResult,
+    ActiveProvider, MessagesAuth, ModelMappingInput, ModelMappingView, ModelPrice,
+    ModelProbeTarget, ModelRoute, ProbeStatus, ProviderInput, ProviderView, StoreError,
+    StoreResult,
     crypto::KeyCipher,
     database::Backend,
     model::{ModelMapping, Provider, RouteBinding, StoreKey, protocol},
@@ -205,6 +206,14 @@ fn mapping_view(mapping: &ModelMapping, provider: &Provider) -> ModelMappingView
         provider_name: provider.name.clone(),
         upstream_model_id: mapping.upstream_model_id.clone(),
         protocols: mapping.protocols(),
+        reference_price: mapping
+            .input_price_per_million
+            .as_ref()
+            .zip(mapping.output_price_per_million.as_ref())
+            .map(|(input, output)| ModelPrice {
+                input_per_million: input.clone(),
+                output_per_million: output.clone(),
+            }),
         provider_enabled: provider.enabled,
         version: mapping.version,
     }
@@ -226,6 +235,17 @@ fn validate_mapping(mut input: ModelMappingInput) -> StoreResult<ModelMappingInp
     }
     if input.protocols.is_empty() {
         return Err(StoreError::Validation("请至少选择一个协议".into()));
+    }
+    if let Some(price) = &input.reference_price {
+        for amount in [&price.input_per_million, &price.output_per_million] {
+            if amount.len() > 32
+                || !amount
+                    .parse::<f64>()
+                    .is_ok_and(|value| value.is_finite() && (0.0..=1_000_000.0).contains(&value))
+            {
+                return Err(StoreError::Validation("模型参考价格无效".into()));
+            }
+        }
     }
     Ok(input)
 }
@@ -510,8 +530,20 @@ mod tests {
             provider_id: provider.id,
             upstream_model_id: "upstream-model".into(),
             protocols: vec![Protocol::OpenAiChat, Protocol::OpenAiResponses],
+            reference_price: Some(ModelPrice {
+                input_per_million: "0.15".into(),
+                output_per_million: "0.60".into(),
+            }),
         };
         let saved = store.create_model(mapping.clone()).await.unwrap();
+        let price = store
+            .get_model(saved.id)
+            .await
+            .unwrap()
+            .reference_price
+            .unwrap();
+        assert_eq!(price.input_per_million, "0.15");
+        assert_eq!(price.output_per_million, "0.60");
         assert_eq!(store.list_models().await.unwrap().len(), 1);
         assert_eq!(store.load_model_routes().await.unwrap().len(), 2);
         let batch = ["first", "second"].map(|id| ModelMappingInput {
@@ -519,6 +551,7 @@ mod tests {
             provider_id: provider.id,
             upstream_model_id: id.into(),
             protocols: vec![Protocol::OpenAiChat],
+            reference_price: None,
         });
         let imported = store.create_models(batch.to_vec()).await.unwrap();
         assert_eq!(imported.len(), 2);

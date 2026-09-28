@@ -30,7 +30,10 @@ pub async fn preview_models(cx: &Cx, payload: String) -> Result<Outcome> {
     Ok(probe_message(&name, result))
 }
 
-fn probe_message(name: &str, result: std::result::Result<Vec<String>, String>) -> Outcome {
+fn probe_message(
+    name: &str,
+    result: std::result::Result<Vec<crate::app::model_catalog::ModelCandidate>, String>,
+) -> Outcome {
     result
         .map(|models| {
             if models.is_empty() {
@@ -42,7 +45,7 @@ fn probe_message(name: &str, result: std::result::Result<Vec<String>, String>) -
                     models
                         .iter()
                         .take(10)
-                        .cloned()
+                        .map(|model| model.id.as_str())
                         .collect::<Vec<_>>()
                         .join("、")
                 )

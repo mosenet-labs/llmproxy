@@ -31,6 +31,16 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0006_messages_auth.sql",
         include_str!("../../migrations/postgresql/0006_messages_auth.sql"),
     ),
+    MigrationFile::new(
+        202609280001,
+        "0007_model_reference_price.sql",
+        include_str!("../../migrations/postgresql/0007_model_reference_price.sql"),
+    ),
+    MigrationFile::new(
+        202609280002,
+        "0008_model_reference_output_price.sql",
+        include_str!("../../migrations/postgresql/0008_model_reference_output_price.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -118,5 +128,15 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202609270001,
         "0017_messages_auth.sql",
         include_str!("../../migrations/sqlite/0017_messages_auth.sql"),
+    ),
+    MigrationFile::new(
+        202609280001,
+        "0018_model_reference_price.sql",
+        include_str!("../../migrations/sqlite/0018_model_reference_price.sql"),
+    ),
+    MigrationFile::new(
+        202609280002,
+        "0019_model_reference_output_price.sql",
+        include_str!("../../migrations/sqlite/0019_model_reference_output_price.sql"),
     ),
 ]);

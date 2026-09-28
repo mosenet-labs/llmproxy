@@ -11,6 +11,8 @@ struct ModelForm {
     chat: bool,
     responses: bool,
     messages: bool,
+    input_price_per_million: String,
+    output_price_per_million: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -20,6 +22,8 @@ struct DraftModel {
     chat: bool,
     responses: bool,
     messages: bool,
+    input_price_per_million: Option<String>,
+    output_price_per_million: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +96,13 @@ pub async fn save_models(
                 provider_id,
                 upstream_model_id: model.model_id,
                 protocols,
+                reference_price: model
+                    .input_price_per_million
+                    .zip(model.output_price_per_million)
+                    .map(|(input_per_million, output_per_million)| ModelPrice {
+                        input_per_million,
+                        output_per_million,
+                    }),
             });
         }
         let count = store.create_models(mappings).await?.len();
@@ -113,6 +124,8 @@ pub async fn save_model(
     chat: bool,
     responses: bool,
     messages: bool,
+    input_price_per_million: String,
+    output_price_per_million: String,
 ) -> Result<Outcome> {
     let input = ModelForm {
         csrf,
@@ -124,6 +137,8 @@ pub async fn save_model(
         chat,
         responses,
         messages,
+        input_price_per_million,
+        output_price_per_million,
     };
     check_csrf(cx, &input.csrf)?;
     let store = &app_context::<AppState>(cx).store;
@@ -153,6 +168,12 @@ pub async fn save_model(
             provider_id,
             upstream_model_id: input.upstream_model_id.clone(),
             protocols,
+            reference_price: (!input.input_price_per_million.is_empty()
+                && !input.output_price_per_million.is_empty())
+            .then(|| ModelPrice {
+                input_per_million: input.input_price_per_million.clone(),
+                output_per_million: input.output_price_per_million.clone(),
+            }),
         };
         let existing = if let Some(id) = input.id.as_deref() {
             Some(

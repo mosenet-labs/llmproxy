@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use llmproxy_core::protocol::Protocol;
 use llmproxy_probe::{InferenceProbeTarget, Reason, ThinkingMode, Verdict};
-use llmproxy_store::{ModelMappingInput, ModelMappingView, ProviderView, StoreError};
+use llmproxy_store::{ModelMappingInput, ModelMappingView, ModelPrice, ProviderView, StoreError};
 use serde::{Deserialize, Serialize};
 use topcoat::{
     Result,
@@ -19,12 +19,15 @@ use topcoat::{
 use topcoat_ant_design::icons::CLOSE_OUTLINED;
 use topcoat_ant_design::{
     FormFieldConfig, NativeDialogConfig, NotificationTone, SearchOption, TagTone, UiLanguage,
-    data_table, form_field, native_dialog, native_dialog_close_attributes, notification,
-    popconfirm, popconfirm_trigger_attributes, search_multi_select, table_page_size_select,
-    table_pagination, tag,
+    anchored_menu_trigger_attributes, data_table, form_field, native_dialog,
+    native_dialog_close_attributes, notification, popconfirm, popconfirm_trigger_attributes,
+    search_multi_select, table_page_size_select, table_pagination, tag,
 };
 
-use crate::app::{AppState, check_csrf, model_catalog::query_models};
+use crate::app::{
+    AppState, check_csrf,
+    model_catalog::{ModelCandidate, query_models},
+};
 
 mod actions;
 mod editor;
@@ -227,19 +230,20 @@ pub async fn model_workspace(
 #[shard("/ui/_topcoat/runtime/shards/model-candidates")]
 pub async fn model_candidates(cx: &Cx, provider_id: String, open: bool) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
-    let result: std::result::Result<Vec<String>, String> = if !open || provider_id.is_empty() {
-        Ok(Vec::new())
-    } else {
-        match provider_id.parse::<i64>() {
-            Ok(id) => match state.store.probe_enabled_target(id).await {
-                Ok(target) => query_models(target).await,
-                Err(error) => Err(error.to_string()),
-            },
-            Err(_) => Err("请选择 Provider".to_owned()),
-        }
-    };
+    let result: std::result::Result<Vec<ModelCandidate>, String> =
+        if !open || provider_id.is_empty() {
+            Ok(Vec::new())
+        } else {
+            match provider_id.parse::<i64>() {
+                Ok(id) => match state.store.probe_enabled_target(id).await {
+                    Ok(target) => query_models(target).await,
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(_) => Err("请选择 Provider".to_owned()),
+            }
+        };
     Ok(view! {
-        <datalist id="model-candidates">if let Ok(candidates) = &result { for candidate in candidates { <option value=(candidate.as_str())></option> } }</datalist>
+        <datalist id="model-candidates">if let Ok(candidates) = &result { for candidate in candidates { <option value=(candidate.id.as_str())></option> } }</datalist>
         if open && !provider_id.is_empty() { <p class="mt-2 mb-0 text-[13px] text-secondary" role="status">(match &result { Ok(candidates) => format!("探测到 {} 个模型，可搜索选择或直接填写模型 ID。", candidates.len()), Err(error) => format!("模型探测失败：{error}；仍可直接填写模型 ID。") })</p> }
     })
 }

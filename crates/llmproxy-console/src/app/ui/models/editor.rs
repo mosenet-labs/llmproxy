@@ -13,6 +13,8 @@ pub(super) struct Editor {
     provider_query: Signal<String>,
     provider_menu_open: Signal<bool>,
     model_id: Signal<String>,
+    input_price_per_million: Signal<String>,
+    output_price_per_million: Signal<String>,
     model_search: Signal<String>,
     model_menu_open: Signal<bool>,
     manual_model_id: Signal<String>,
@@ -53,6 +55,8 @@ impl Editor {
             provider_query: signal(cx, String::new),
             provider_menu_open: signal(cx, || false),
             model_id: signal(cx, String::new),
+            input_price_per_million: signal(cx, String::new),
+            output_price_per_million: signal(cx, String::new),
             model_search: signal(cx, String::new),
             model_menu_open: signal(cx, || false),
             manual_model_id: signal(cx, String::new),
@@ -122,6 +126,8 @@ pub(super) fn editor_trigger(
         provider_query,
         provider_menu_open,
         model_id: selected_model,
+        input_price_per_million,
+        output_price_per_million,
         model_search,
         model_menu_open,
         manual_model_id,
@@ -164,6 +170,14 @@ pub(super) fn editor_trigger(
     } else {
         ""
     };
+    let initial_input_price = model
+        .and_then(|model| model.reference_price.as_ref())
+        .map_or("", |price| price.input_per_million.as_str())
+        .to_owned();
+    let initial_output_price = model
+        .and_then(|model| model.reference_price.as_ref())
+        .map_or("", |price| price.output_per_million.as_str())
+        .to_owned();
     attributes! { cx => aria-haspopup="dialog" aria-controls="model-dialog" @click=$(|_event: Event| {
         selected_id.set(id.to_owned());
         selected_version.set(version.to_owned());
@@ -174,6 +188,8 @@ pub(super) fn editor_trigger(
         provider_query.set(provider_name.to_owned());
         provider_menu_open.set(false);
         selected_model.set(model_id.to_owned());
+        input_price_per_million.set(initial_input_price.to_owned());
+        output_price_per_million.set(initial_output_price.to_owned());
         model_search.set("".to_owned());
         model_menu_open.set(false);
         manual_model_id.set("".to_owned());
@@ -219,6 +235,8 @@ async fn provider_search(
         provider_query,
         provider_menu_open,
         model_id,
+        input_price_per_million,
+        output_price_per_million,
         alias,
         alias_edited,
         chat,
@@ -277,6 +295,8 @@ async fn provider_search(
                             provider_query.set(option_name.to_owned());
                             provider_menu_open.set(false);
                             model_id.set("".to_owned());
+                            input_price_per_million.set("".to_owned());
+                            output_price_per_million.set("".to_owned());
                             if !alias_edited.get() { alias.set("".to_owned()); }
                             chat.set(default_chat);
                             responses.set(default_responses);
@@ -318,6 +338,13 @@ async fn provider_search(
     })
 }
 
+fn price_summary(input: Option<&str>, output: Option<&str>) -> String {
+    match input.zip(output) {
+        Some((input, output)) => format!("${input}/${output}"),
+        None => "-".to_owned(),
+    }
+}
+
 #[topcoat::view::component]
 async fn draft_model_row(
     cx: &Cx,
@@ -332,6 +359,7 @@ async fn draft_model_row(
     default_chat: bool,
     default_responses: bool,
     default_messages: bool,
+    price: Option<&ModelCandidate>,
 ) -> Result<impl View> {
     let initial_alias =
         serde_json::from_str::<Vec<(String, String)>>(&draft_aliases.get_untracked())
@@ -348,20 +376,32 @@ async fn draft_model_row(
     let responses = signal(cx, || default_responses);
     let messages = signal(cx, || default_messages);
     let row_id = model_id.to_owned();
+    let input_price = price.and_then(|price| price.input_price_per_million.as_deref());
+    let output_price = price.and_then(|price| price.output_price_per_million.as_deref());
+    let price_label = price_summary(input_price, output_price);
+    let menu_id = format!("model-protocols-{index}");
+    let menu_anchor = format!("position-anchor: --gr-{menu_id}");
     Ok(view! {
-        <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_32px] items-start gap-3 py-3 max-[760px]:grid-cols-[minmax(0,1fr)_32px]">
+        <div class="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1.2fr)_minmax(126px,.7fr)_minmax(146px,.8fr)_32px] items-center gap-2.5 py-2 max-[760px]:grid-cols-[minmax(0,1fr)_32px]">
             <input type="hidden" name="model_id" value=(model_id)>
-            <div class="min-w-0 pt-2 text-sm break-all text-heading max-[760px]:col-span-1 max-[760px]:pt-0"><span class="hidden text-xs text-secondary max-[760px]:block">"模型 ID"</span>(model_id)</div>
-            <div class="min-w-0 max-[760px]:col-span-1 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{index}"))>"客户端别名"</label><input id=(format!("alias-{index}")) name=(format!("alias-{index}")) class="w-full" type="text" :value=$(alias.get()) maxlength="200" aria-label=(format!("{model_id} 的客户端别名")) @input=$(|event: Event| {
+            if let Some(value) = input_price { <input type="hidden" name=(format!("input-price-{index}")) value=(value)> }
+            if let Some(value) = output_price { <input type="hidden" name=(format!("output-price-{index}")) value=(value)> }
+            <div class="min-w-0 truncate text-sm text-heading max-[760px]:col-span-1" title=(model_id)><span class="hidden text-xs text-secondary max-[760px]:block">"模型 ID"</span>(model_id)</div>
+            <div class="min-w-0 max-[760px]:col-span-2 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{index}"))>"客户端别名"</label><input id=(format!("alias-{index}")) name=(format!("alias-{index}")) class="h-8 w-full text-[13px]" type="text" :value=$(alias.get()) maxlength="200" aria-label=(format!("{model_id} 的客户端别名")) @input=$(|event: Event| {
                 alias.set(event.target.value);
                 draft_aliases.set(raw!("(() => { const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); entries.set(${row_id}.dehydrate(), ${event}.target.value.dehydrate()); return cx.hydrate(JSON.stringify([...entries])); })()", "[]".to_owned()));
             })></div>
-            <div class="flex min-w-0 flex-wrap gap-x-3 gap-y-1 pt-2 text-xs text-heading max-[760px]:col-span-1 max-[760px]:row-start-3 max-[760px]:pt-0">
-                <span class="hidden w-full text-xs text-secondary max-[760px]:block">"支持协议"</span>
-                if supports_chat { <label class="inline-flex items-center gap-1"><input type="checkbox" name=(format!("chat-{index}")) :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label> }
-                if supports_responses { <label class="inline-flex items-center gap-1"><input type="checkbox" name=(format!("responses-{index}")) :checked=$(responses.get()) @change=$(|event: Event| responses.set(event.target.checked))>"Responses"</label> }
-                if supports_messages { <label class="inline-flex items-center gap-1"><input type="checkbox" name=(format!("messages-{index}")) :checked=$(messages.get()) @change=$(|event: Event| messages.set(event.target.checked))>"Messages"</label> }
+            <div class="min-w-0 max-[760px]:row-start-3"><span class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block">"协议"</span>
+                <button class="flex h-8 w-full items-center justify-between gap-2 rounded-md border border-control-border bg-white px-2.5 text-left text-[13px] text-heading hover:border-primary-hover focus-visible:outline-2 focus-visible:outline-primary" type="button" aria-label=(format!("{model_id} 的协议")) (anchored_menu_trigger_attributes(cx, &menu_id))>
+                        <span class="truncate">$(if chat.get() { if responses.get() { if messages.get() { "Chat +2" } else { "Chat +1" } } else if messages.get() { "Chat +1" } else { "Chat" } } else if responses.get() { if messages.get() { "Responses +1" } else { "Responses" } } else if messages.get() { "Messages" } else { "选择协议" })</span><span class="text-secondary" aria-hidden="true">"⌄"</span>
+                </button>
+                <div id=(menu_id.as_str()) class="gr-anchored-menu fixed inset-auto m-0 mt-1.5 min-w-[150px] rounded-md border border-border bg-white p-1.5 text-heading shadow-lg" popover="auto" role="group" aria-label=(format!("{model_id} 支持的协议")) style=(menu_anchor)>
+                        if supports_chat { <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-primary-soft"><input type="checkbox" name=(format!("chat-{index}")) :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label> }
+                        if supports_responses { <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-primary-soft"><input type="checkbox" name=(format!("responses-{index}")) :checked=$(responses.get()) @change=$(|event: Event| responses.set(event.target.checked))>"Responses"</label> }
+                        if supports_messages { <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-primary-soft"><input type="checkbox" name=(format!("messages-{index}")) :checked=$(messages.get()) @change=$(|event: Event| messages.set(event.target.checked))>"Messages"</label> }
+                </div>
             </div>
+            <div class="min-w-0 truncate text-[13px] tabular-nums text-heading max-[760px]:row-start-3" title=(price_label.as_str())><span class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block">"In/Out(M)"</span>(price_label.as_str())</div>
             <button class="inline-flex size-8 shrink-0 items-center justify-center self-center rounded-full border border-control-border bg-white p-0 text-muted shadow-sm transition-colors duration-150 hover:border-[#ffccc7] hover:bg-[#fff2f0] hover:text-[#cf1322] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#91caff] max-[760px]:col-start-2 max-[760px]:row-start-1" type="button" aria-label=(format!("移除 {model_id}")) title="移除模型" @click=$(async |_event: Event| {
                 selected.set(remove_draft_model(selected.get(), row_id.to_owned()).await);
                 draft_aliases.set(raw!("(() => { const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); entries.delete(${row_id}.dehydrate()); return cx.hydrate(JSON.stringify([...entries])); })()", "[]".to_owned()));
@@ -391,7 +431,8 @@ pub async fn model_draft(
     let supports_chat = protocols.contains("openai_chat");
     let supports_responses = protocols.contains("openai_responses");
     let supports_messages = protocols.contains("anthropic_messages");
-    let available: Vec<String> = serde_json::from_str(&candidates.get()).unwrap_or_default();
+    let available: Vec<ModelCandidate> =
+        serde_json::from_str(&candidates.get()).unwrap_or_default();
     let discovered_count = available.len();
     let selected_ids: Vec<String> = serde_json::from_str(&selected.get()).unwrap_or_default();
     let mut chosen = HashSet::new();
@@ -447,11 +488,11 @@ pub async fn model_draft(
     }
     let mut seen = HashSet::new();
     let mut options: Vec<SearchOption> = available
-        .into_iter()
-        .filter(|id| seen.insert(id.clone()))
-        .map(|id| SearchOption {
-            value: id.clone(),
-            label: id,
+        .iter()
+        .filter(|candidate| seen.insert(candidate.id.clone()))
+        .map(|candidate| SearchOption {
+            value: candidate.id.clone(),
+            label: candidate.id.clone(),
         })
         .collect();
     for id in &rows {
@@ -505,8 +546,8 @@ pub async fn model_draft(
             if !rows.is_empty() {
                 <div class="col-span-full mt-2">
                     <h3 class="mb-3 text-sm font-semibold text-heading">(format!("待导入模型（{}）", rows.len()))</h3>
-                    <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_32px] gap-3 border-b border-border pb-2 text-xs font-medium text-secondary max-[760px]:hidden">
-                        <span>"模型 ID"</span><span>"客户端别名"</span><span>"支持协议"</span><span class="sr-only">"操作"</span>
+                    <div class="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1.2fr)_minmax(126px,.7fr)_minmax(146px,.8fr)_32px] gap-2.5 border-b border-border pb-2 text-xs font-medium text-secondary max-[760px]:hidden">
+                        <span>"模型 ID"</span><span>"客户端别名"</span><span>"协议"</span><span title="输入/输出，每百万 token 的美元参考价">"In/Out(M)"</span><span class="sr-only">"操作"</span>
                     </div>
                     <div class="divide-y divide-border">
                         #[key((provider_key.as_str(), row_id.as_str()))] for (index, row_id) in rows.iter().enumerate() {
@@ -522,6 +563,7 @@ pub async fn model_draft(
                                 default_chat: only_one && has_chat,
                                 default_responses: only_one && has_responses,
                                 default_messages: only_one && has_messages,
+                                price: available.iter().find(|candidate| candidate.id == *row_id),
                             )
                         }
                     </div>
@@ -554,6 +596,8 @@ pub(super) async fn model_editor(
         provider_name,
         provider_query,
         model_id,
+        input_price_per_million,
+        output_price_per_million,
         chat,
         responses,
         messages,
@@ -614,7 +658,7 @@ pub(super) async fn model_editor(
                 error.set("".to_owned());
                 // Topcoat renders each draft row with signals; its runtime
                 // cannot collect a dynamic form list without FormData.
-                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(${csrf}, ${id}.get(), ${version}.get(), ${alias}.get(), ${provider_id}.get(), ${model_id}.get(), ${chat}.get(), ${responses}.get(), ${messages}.get()) : (() => { const form = new FormData(document.getElementById('model-editor-form')); const rows = form.getAll('model_id').map((model_id, index) => ({model_id, alias: form.get('alias-' + index) || '', chat: form.has('chat-' + index), responses: form.has('responses-' + index), messages: form.has('messages-' + index)})); return ${save_models}.call(${csrf}, ${provider_id}.get(), cx.hydrate(JSON.stringify(rows))); })()).catch(() => ${unavailable})", unavailable.clone());
+                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(${csrf}, ${id}.get(), ${version}.get(), ${alias}.get(), ${provider_id}.get(), ${model_id}.get(), ${chat}.get(), ${responses}.get(), ${messages}.get(), ${input_price_per_million}.get(), ${output_price_per_million}.get()) : (() => { const form = new FormData(document.getElementById('model-editor-form')); const rows = form.getAll('model_id').map((model_id, index) => ({model_id, alias: form.get('alias-' + index) || '', chat: form.has('chat-' + index), responses: form.has('responses-' + index), messages: form.has('messages-' + index), input_price_per_million: form.get('input-price-' + index), output_price_per_million: form.get('output-price-' + index)})); return ${save_models}.call(${csrf}, ${provider_id}.get(), cx.hydrate(JSON.stringify(rows))); })()).catch(() => ${unavailable})", unavailable.clone());
                 busy.set(false);
                 if result.is_ok() { open.set(false); success.set(result.unwrap()); refresh.increment(); }
                 else { error.set(result.unwrap_err()); }
@@ -633,6 +677,10 @@ pub(super) async fn model_editor(
                     <div :hidden=$(id.get().is_empty())>
                         <div class="mt-6">form_field(config: FormFieldConfig::new("model-id", "上游模型 ID").required(),
                             <input id="model-id" list="model-candidates" autocomplete="off" :value=$(model_id.get()) @input=$(|event: Event| {
+                                if model_id.get() != event.target.value {
+                                    input_price_per_million.set("".to_owned());
+                                    output_price_per_million.set("".to_owned());
+                                }
                                 model_id.set(event.target.value);
                                 if !alias_edited.get() {
                                     alias.set("".to_owned());
@@ -645,6 +693,11 @@ pub(super) async fn model_editor(
                             }) placeholder="搜索探测结果，或手动输入模型 ID" :disabled=$(provider_id.get().is_empty())>
                         )</div>
                         model_candidates(provider_id: $(provider_id.get()), open: $(if id.get().is_empty() { false } else { open.get() }))
+                        <div class="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]" title="导入时从 OpenRouter 模型列表读取的美元参考价；修改模型 ID 后清空">
+                            <span class="font-medium text-secondary">"参考价格 · In/Out(M)"</span>
+                            <span class="font-medium tabular-nums text-heading" :hidden=$(input_price_per_million.get().is_empty())>"$"$(input_price_per_million.get())"/$"$(output_price_per_million.get())</span>
+                            <span class="font-medium text-heading" :hidden=$(!input_price_per_million.get().is_empty())>"-"</span>
+                        </div>
                         <div class="mt-6">form_field(config: FormFieldConfig::new("model-alias", "客户端别名"),
                             <input id="model-alias" :value=$(alias.get()) @input=$(|event: Event| { alias.set(event.target.value); alias_edited.set(true); }) placeholder="Provider名称/模型ID" maxlength="200">
                         )</div>

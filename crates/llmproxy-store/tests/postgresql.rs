@@ -443,6 +443,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
         provider_id: mixed.id,
         upstream_model_id: "model-a".into(),
         protocols: vec![Protocol::OpenAiResponses],
+        reference_price: None,
     };
     let mapping = store.create_model(mapping_input.clone()).await.unwrap();
     assert_eq!(store.load_model_routes().await.unwrap().len(), 1);

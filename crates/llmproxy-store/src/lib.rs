@@ -193,11 +193,18 @@ pub struct ModelProbeTarget {
 }
 
 #[derive(Clone, Debug)]
+pub struct ModelPrice {
+    pub input_per_million: String,
+    pub output_per_million: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct ModelMappingInput {
     pub alias: String,
     pub provider_id: i64,
     pub upstream_model_id: String,
     pub protocols: Vec<Protocol>,
+    pub reference_price: Option<ModelPrice>,
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +215,7 @@ pub struct ModelMappingView {
     pub provider_name: String,
     pub upstream_model_id: String,
     pub protocols: Vec<Protocol>,
+    pub reference_price: Option<ModelPrice>,
     pub provider_enabled: bool,
     pub version: u64,
 }

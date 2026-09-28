@@ -863,7 +863,9 @@ async fn exercise_http(database_url: &str) {
         "mock-model",
         true,
         true,
-        false
+        false,
+        "0.15",
+        "0.60"
     ]);
     let response = client
         .post(format!("{base}/_topcoat/runtime/procedures/save-model"))
@@ -875,6 +877,17 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(response.status(), StatusCode::OK);
     let result: serde_json::Value = response.json().await.unwrap();
     assert_eq!(result["ok"], "「Unified Mock/mock-model」已创建");
+    let saved_price = store
+        .list_models()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|model| model.alias == "Unified Mock/mock-model")
+        .unwrap()
+        .reference_price
+        .unwrap();
+    assert_eq!(saved_price.input_per_million, "0.15");
+    assert_eq!(saved_price.output_per_million, "0.60");
     let models = client
         .get(format!("{base}/models"))
         .send()

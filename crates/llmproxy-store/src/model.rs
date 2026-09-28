@@ -54,6 +54,8 @@ pub(crate) struct ModelMapping {
     pub openai_chat: bool,
     pub openai_responses: bool,
     pub anthropic_messages: bool,
+    pub input_price_per_million: Option<String>,
+    pub output_price_per_million: Option<String>,
     #[version]
     pub version: u64,
     pub updated_at: i64,

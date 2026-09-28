@@ -1,11 +1,21 @@
 use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use llmproxy_store::ModelProbeTarget;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ModelCandidate {
+    pub id: String,
+    pub input_price_per_million: Option<String>,
+    pub output_price_per_million: Option<String>,
+}
+
 pub(crate) async fn query_models(
     target: ModelProbeTarget,
-) -> std::result::Result<Vec<String>, String> {
+) -> std::result::Result<Vec<ModelCandidate>, String> {
+    let openrouter = target.host.eq_ignore_ascii_case("openrouter.ai")
+        || target.host.to_ascii_lowercase().ends_with(".openrouter.ai");
     let scheme = if target.tls { "https" } else { "http" };
     let url = format!("{scheme}://{}:{}{}", target.host, target.port, target.path);
     let client = reqwest::Client::builder()
@@ -44,8 +54,8 @@ pub(crate) async fn query_models(
         .await
         .map_err(|_| "读取上游响应失败".to_owned())?
     {
-        if body.len() + chunk.len() > 1024 * 1024 {
-            return Err("模型列表响应超过 1 MiB".to_owned());
+        if body.len() + chunk.len() > 8 * 1024 * 1024 {
+            return Err("模型列表响应超过 8 MiB".to_owned());
         }
         body.extend_from_slice(&chunk);
     }
@@ -57,9 +67,79 @@ pub(crate) async fn query_models(
         .ok_or_else(|| "上游响应缺少 data 模型列表".to_owned())?;
     Ok(data
         .iter()
-        .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
-        .filter(|id| !id.is_empty() && id.len() <= 200)
+        .filter_map(|model| parse_candidate(model, openrouter))
         .take(5000)
-        .map(str::to_owned)
         .collect())
+}
+
+fn parse_candidate(model: &serde_json::Value, openrouter: bool) -> Option<ModelCandidate> {
+    let id = model.get("id")?.as_str()?;
+    if id.is_empty() || id.len() > 200 {
+        return None;
+    }
+    let prices = openrouter.then(|| model.get("pricing")).flatten();
+    let input = prices
+        .and_then(|price| price.get("prompt"))
+        .and_then(per_million);
+    let output = prices
+        .and_then(|price| price.get("completion"))
+        .and_then(per_million);
+    Some(ModelCandidate {
+        id: id.to_owned(),
+        input_price_per_million: input.clone().filter(|_| output.is_some()),
+        output_price_per_million: output.filter(|_| input.is_some()),
+    })
+}
+
+fn per_million(value: &serde_json::Value) -> Option<String> {
+    let price = value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_number().map(ToString::to_string))?;
+    let amount = price.parse::<f64>().ok()? * 1_000_000.0;
+    if !amount.is_finite() || !(0.0..=1_000_000.0).contains(&amount) {
+        return None;
+    }
+    let formatted = format!("{amount:.6}");
+    let formatted = formatted.trim_end_matches('0').trim_end_matches('.');
+    if amount > 0.0 && formatted == "0" {
+        return None;
+    }
+    Some(formatted.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_candidate, per_million};
+    use serde_json::json;
+
+    #[test]
+    fn converts_openrouter_token_prices_to_million_token_prices() {
+        assert_eq!(per_million(&json!("0.00000015")).as_deref(), Some("0.15"));
+        assert_eq!(per_million(&json!("0")).as_deref(), Some("0"));
+        assert!(per_million(&json!("0.0000000000001")).is_none());
+        assert!(per_million(&json!("unknown")).is_none());
+    }
+
+    #[test]
+    fn only_uses_complete_openrouter_pricing() {
+        let model =
+            json!({"id":"vendor/model", "pricing":{"prompt":"0.00000015", "completion":"0"}});
+        let candidate = parse_candidate(&model, true).unwrap();
+        assert_eq!(candidate.input_price_per_million.as_deref(), Some("0.15"));
+        assert_eq!(candidate.output_price_per_million.as_deref(), Some("0"));
+        assert!(
+            parse_candidate(&model, false)
+                .unwrap()
+                .input_price_per_million
+                .is_none()
+        );
+        let partial = json!({"id":"vendor/model", "pricing":{"prompt":"0.00000015"}});
+        assert!(
+            parse_candidate(&partial, true)
+                .unwrap()
+                .input_price_per_million
+                .is_none()
+        );
+    }
 }

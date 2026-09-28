@@ -44,6 +44,18 @@ impl ProviderStore {
             .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
             .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
             .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+            .input_price_per_million(
+                input
+                    .reference_price
+                    .as_ref()
+                    .map(|price| price.input_per_million.clone()),
+            )
+            .output_price_per_million(
+                input
+                    .reference_price
+                    .as_ref()
+                    .map(|price| price.output_per_million.clone()),
+            )
             .updated_at(now()?)
             .exec(&mut tx)
             .await?;
@@ -99,6 +111,18 @@ impl ProviderStore {
                 .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
                 .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
                 .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+                .input_price_per_million(
+                    input
+                        .reference_price
+                        .as_ref()
+                        .map(|price| price.input_per_million.clone()),
+                )
+                .output_price_per_million(
+                    input
+                        .reference_price
+                        .as_ref()
+                        .map(|price| price.output_per_million.clone()),
+                )
                 .updated_at(now()?)
                 .exec(&mut tx)
                 .await?;
@@ -131,6 +155,18 @@ impl ProviderStore {
             .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
             .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
             .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+            .input_price_per_million(
+                input
+                    .reference_price
+                    .as_ref()
+                    .map(|price| price.input_per_million.clone()),
+            )
+            .output_price_per_million(
+                input
+                    .reference_price
+                    .as_ref()
+                    .map(|price| price.output_per_million.clone()),
+            )
             .updated_at(now()?)
             .exec(&mut tx)
             .await?;

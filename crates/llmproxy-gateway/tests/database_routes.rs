@@ -44,6 +44,7 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
                 Protocol::OpenAiResponses,
                 Protocol::AnthropicMessages,
             ],
+            reference_price: None,
         })
         .await
         .unwrap();
@@ -267,6 +268,7 @@ async fn exercise_gateway(url: &str) {
             provider_id: old.id,
             upstream_model_id: "upstream-old".into(),
             protocols: vec![Protocol::OpenAiChat],
+            reference_price: None,
         })
         .await
         .unwrap();
@@ -324,6 +326,7 @@ async fn exercise_gateway(url: &str) {
                 provider_id: new.id,
                 upstream_model_id: "upstream-new".into(),
                 protocols: vec![Protocol::OpenAiChat],
+                reference_price: None,
             },
         )
         .await

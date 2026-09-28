@@ -157,6 +157,7 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
                 provider_id: provider.id,
                 upstream_model_id: "chat-model".into(),
                 protocols: vec![Protocol::OpenAiChat],
+                reference_price: None,
             })
             .await
             .unwrap();

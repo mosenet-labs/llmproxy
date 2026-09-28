@@ -111,6 +111,7 @@ impl TestDatabase {
                         provider_id: record.id,
                         upstream_model_id: "mock".into(),
                         protocols: vec![PROTOCOLS[index]],
+                        reference_price: None,
                     })
                     .await
                     .map_err(|_| "map test model")?;
