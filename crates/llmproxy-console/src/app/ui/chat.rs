@@ -118,12 +118,12 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                 <header class="flex h-14 shrink-0 items-center border-b border-[#eef0f3] px-7 max-[640px]:px-4"><div><h1 class="m-0 text-[16px] font-semibold leading-5 text-heading">"Chat"</h1><p class="m-0 text-[11px] text-muted">"通过网关与已接入模型对话"</p></div></header>
                 if available {
                     <div id="chat-scroll" class="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto px-8 py-8 max-[640px]:px-4 max-[640px]:py-5">
-                        <div class="mx-auto flex min-h-full w-full max-w-[820px] shrink-0 flex-col">
+                        <div class="mx-auto flex min-h-full w-full max-w-[1200px] shrink-0 flex-col">
                             chat_history(session: $(session), refresh: $(refresh))
                         </div>
                     </div>
                     <div class="bg-white px-7 pt-3 pb-3 max-[640px]:px-4">
-                        <div class="mx-auto max-w-[820px]">chat_sender(id: "chat-draft", draft: &draft, submit_attrs: submit, busy: Some(&busy), max_length: Some(4000), language: UiLanguage::ChineseSimplified, attrs: attributes! { class="chat-composer" },
+                        <div class="mx-auto max-w-[1200px]">chat_sender(id: "chat-draft", draft: &draft, submit_attrs: submit, busy: Some(&busy), max_length: Some(4000), language: UiLanguage::ChineseSimplified, attrs: attributes! { class="chat-composer" },
                             <div class="chat-composer-model flex min-w-0 items-center">
                                 select(attrs: attributes! { cx => id="chat-model" aria-label="选择聊天模型" class="min-w-0 max-w-[320px]" :value=$(model_id.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
                                     busy.set(true);

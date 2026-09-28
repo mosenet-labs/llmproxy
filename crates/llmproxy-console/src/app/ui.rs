@@ -62,8 +62,8 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                         <div class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden">"本地开发环境"</div>
                     </aside>
                     <div class="flex min-w-0 flex-col">
-                        <header class=(if chat_page { "h-12 shrink-0 border-b border-[#e9edf2] bg-white text-xs text-[#788496] max-[640px]:hidden" } else { "h-16 shrink-0 border-b border-border bg-white text-sm text-secondary max-[640px]:hidden" })><div class="mx-auto flex size-full max-w-[1480px] items-center px-7 [&_strong]:font-medium [&_strong]:text-heading"><span>"控制台"<span class="mx-2.5 text-[#b9c3ce]">"/"</span><strong>(page_title)</strong></span></div></header>
-                        <main id="main" class=(if chat_page { "mx-auto w-full max-w-[1480px] min-h-0 flex-1 p-4 max-[640px]:p-3" } else { "mx-auto w-full max-w-[1480px] flex-1 p-7 pb-12 max-[640px]:px-4 max-[640px]:pt-6 max-[640px]:pb-8" })>(slot)</main>
+                        <header class=(if chat_page { "h-12 shrink-0 border-b border-[#e9edf2] bg-white text-xs text-[#788496] max-[640px]:hidden" } else { "h-16 shrink-0 border-b border-border bg-white text-sm text-secondary max-[640px]:hidden" })><div class="flex size-full items-center px-7 [&_strong]:font-medium [&_strong]:text-heading"><span>"控制台"<span class="mx-2.5 text-[#b9c3ce]">"/"</span><strong>(page_title)</strong></span></div></header>
+                        <main id="main" class=(if chat_page { "w-full min-h-0 flex-1 p-4 max-[640px]:p-3" } else { "w-full flex-1 p-7 pb-12 max-[640px]:px-4 max-[640px]:pt-6 max-[640px]:pb-8" })>(slot)</main>
                     </div>
                 </div>
             </body>
