@@ -8,7 +8,7 @@ use std::{
 };
 
 use llmproxy_core::protocol::{MessagesAuth, Protocol};
-use llmproxy_store::{ProviderInput, ProviderPaths, ProviderStore};
+use llmproxy_store::{HolidayDate, HolidayKind, ProviderInput, ProviderPaths, ProviderStore};
 use reqwest::{Client, Response, StatusCode, redirect::Policy};
 
 const MASTER_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
@@ -908,7 +908,8 @@ async fn exercise_http(database_url: &str) {
     assert!(models.contains("Responses"));
     assert!(models.contains("可用性探测"));
     assert!(models.contains("参考价格"));
-    assert!(models.contains("In $0.15 · Out $0.6 / M · USD"));
+    assert!(models.contains("In: $0.15/M"));
+    assert!(models.contains("Out: $0.60/M"));
     let price_rules = serde_json::json!([
         {"item":"input","conditions":{"time_band":"peak"},"unit_price":"0.30"},
         {"item":"input","conditions":{"time_band":"off_peak"},"unit_price":"0.15"},
@@ -925,6 +926,7 @@ async fn exercise_http(database_url: &str) {
         "",
         true,
         "UTC",
+        false,
         price_rules.to_string(),
         windows.to_string()
     ]);
@@ -946,17 +948,72 @@ async fn exercise_http(database_url: &str) {
         .unwrap()
         .unwrap();
     assert_eq!(plan.rules.len(), 4);
-    assert!(
-        client
-            .get(format!("{base}/models"))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
-            .contains("按条件计价")
+    assert!(!plan.schedule.as_ref().unwrap().china_holidays_off_peak);
+    let preview = |date: &str, holiday_override: bool| {
+        serde_json::json!(["UTC", windows.to_string(), holiday_override, date])
+    };
+    let response = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/preview-price-band"
+        ))
+        .json(&preview("2026-09-28T09:30", false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"],
+        "峰时"
     );
+    let response = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/preview-price-band"
+        ))
+        .json(&preview("2026-09-28T09:30", true))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"]
+            .as_str()
+            .unwrap()
+            .contains("尚未导入")
+    );
+    store
+        .replace_holidays(
+            2026,
+            vec![HolidayDate {
+                date: "2026-10-05".into(),
+                name: "国庆节".into(),
+                kind: HolidayKind::Holiday,
+                source_url: "https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm"
+                    .into(),
+            }],
+        )
+        .await
+        .unwrap();
+    let response = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/preview-price-band"
+        ))
+        .json(&preview("2026-10-05T09:30", true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"],
+        "谷时（中国放假安排）"
+    );
+    let models = client
+        .get(format!("{base}/models"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(models.contains("In: $0.15–$0.30/M"));
+    assert!(models.contains("Out: $0.60–$1.20/M"));
     let chat = client
         .get(format!("{base}/chat"))
         .send()

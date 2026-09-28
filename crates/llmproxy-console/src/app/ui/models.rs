@@ -42,10 +42,10 @@ pub(crate) use actions::{
 };
 pub(crate) use editor::model_draft;
 use editor::{Editor, editor_trigger, model_editor};
-use pricing::{PriceEditor, price_editor, price_label, price_trigger};
+use pricing::{PriceEditor, price_editor, price_label, price_lines, price_trigger};
 pub(crate) use pricing::{
-    add_price_rule, add_price_window, price_peak_windows, price_rule_rows, remove_price_rule,
-    remove_price_window, save_price_plan,
+    add_price_rule, add_price_window, deepseek_peak_windows, preview_price_band, price_matrix_rows,
+    price_peak_windows, price_rule_rows, remove_price_rule, remove_price_window, save_price_plan,
 };
 
 const BUTTON: &str = "inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-control-border bg-white px-4 text-sm font-medium leading-5 text-heading hover:border-primary-hover hover:text-primary";
@@ -204,19 +204,24 @@ pub async fn model_workspace(
             } else if filtered.is_empty() {
                 <div class="border-t border-border px-6 py-12 text-center text-sm text-secondary">"没有找到匹配的模型"</div>
             } else {
-                data_table(label: "模型列表", attrs: attributes! { class="min-w-[960px] [&_th]:px-5! [&_td]:px-5! [&_td]:py-4!" },
+                data_table(label: "模型列表", attrs: attributes! { class="min-w-[960px] [&_th]:px-5! [&_td]:px-5! [&_td]:py-4! [&_td:nth-child(5)]:py-2!" },
                     <thead><tr><th>"模型别名"</th><th>"上游模型 ID"</th><th>"Provider"</th><th>"协议"</th><th>"参考价格"</th><th>"状态"</th><th class="text-right!">"操作"</th></tr></thead>
                     <tbody>#[key(model.id)] for model in &page_models {
                         let plan: Option<&PricePlanView> = price_plans.iter().find(|plan| plan.provider_id == model.provider_id && plan.upstream_model_id == model.upstream_model_id);
                         let alias_count = all.iter().filter(|other| other.provider_id == model.provider_id && other.upstream_model_id == model.upstream_model_id).count();
                         let old_price_needs_review = plan.is_none() && all.iter().any(|other| other.provider_id == model.provider_id && other.upstream_model_id == model.upstream_model_id && other.reference_price.is_some());
                         let label = price_label(plan, old_price_needs_review);
+                        let price_lines = plan.and_then(price_lines);
                         <tr>
                             <td><button class="border-0 bg-transparent p-0 text-left text-sm font-medium text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, Some(model), providers.iter().find(|p| p.id == model.provider_id), plan))>(model.alias.as_str())</button></td>
                             <td class="text-sm text-secondary">(model.upstream_model_id.as_str())</td>
                             <td class="text-sm text-heading">(model.provider_name.as_str())</td>
                             <td><div class="flex flex-wrap gap-1">for protocol in &model.protocols { tag(tone: TagTone::Default, (protocol_label(*protocol))) }</div></td>
-                            <td><button class="border-0 bg-transparent p-0 text-left text-[13px] font-medium tabular-nums text-primary hover:underline" type="button" (price_trigger(cx, &price_editor_state, model, plan, alias_count))>(label)</button></td>
+                            <td><button class="border-0 bg-transparent p-0 text-left text-xs leading-4 font-medium tabular-nums text-primary hover:underline" type="button" aria-label=(label.as_str()) (price_trigger(cx, &price_editor_state, model, plan, alias_count))>
+                                if let Some(lines) = price_lines {
+                                    for line in lines { <span class="block whitespace-nowrap">(line)</span> }
+                                } else { <span class="text-[13px] leading-5">(label)</span> }
+                            </button></td>
                             <td>tag(tone: if model.provider_enabled { TagTone::Success } else { TagTone::Warning }, (if model.provider_enabled { "可用" } else { "Provider 已停用" }))</td>
                             <td><div class="flex items-center justify-end gap-3 whitespace-nowrap"><button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, Some(model), providers.iter().find(|p| p.id == model.provider_id), plan))>"编辑"</button>model_delete(model: model, csrf: csrf.as_str(), success: &success, failure: &failure, refresh: &refresh)</div></td>
                         </tr>

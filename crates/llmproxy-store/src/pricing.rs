@@ -1,7 +1,8 @@
+use chrono::{DateTime, Datelike, FixedOffset, Timelike, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{StoreError, StoreResult};
+use crate::{HolidayDate, HolidayKind, StoreError, StoreResult};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +95,54 @@ pub struct WeeklyPeakWindow {
 pub struct PriceSchedule {
     pub timezone: String,
     pub peak_windows: Vec<WeeklyPeakWindow>,
+    #[serde(default)]
+    pub china_holidays_off_peak: bool,
+}
+
+/// Resolve a price schedule at a UTC instant. `None` means the annual Chinese
+/// holiday calendar is required but has not been imported.
+pub fn resolve_time_band(
+    schedule: &PriceSchedule,
+    instant: DateTime<Utc>,
+    china_holidays: Option<&[HolidayDate]>,
+) -> StoreResult<Option<TimeBand>> {
+    validate_schedule(schedule)?;
+    let china_offset = FixedOffset::east_opt(8 * 3600).expect("valid China UTC offset");
+    let local = if schedule.timezone == "Asia/Shanghai" {
+        instant.with_timezone(&china_offset).fixed_offset()
+    } else {
+        instant.fixed_offset()
+    };
+    let weekday = local.weekday().number_from_monday() as u8;
+    let minutes = local.hour() * 60 + local.minute();
+    let in_peak_window = schedule.peak_windows.iter().any(|window| {
+        window.weekday == weekday
+            && clock_minutes(&window.start).is_some_and(|start| minutes >= u32::from(start))
+            && clock_minutes(&window.end).is_some_and(|end| minutes < u32::from(end))
+    });
+    if !in_peak_window {
+        return Ok(Some(TimeBand::OffPeak));
+    }
+    if !schedule.china_holidays_off_peak {
+        return Ok(Some(TimeBand::Peak));
+    }
+    let Some(holidays) = china_holidays.filter(|days| !days.is_empty()) else {
+        return Ok(None);
+    };
+    let china_date = instant
+        .with_timezone(&china_offset)
+        .date_naive()
+        .to_string();
+    Ok(Some(
+        if holidays
+            .iter()
+            .any(|day| day.date == china_date && day.kind == HolidayKind::Holiday)
+        {
+            TimeBand::OffPeak
+        } else {
+            TimeBand::Peak
+        },
+    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -280,6 +329,7 @@ fn validate_schedule(schedule: &PriceSchedule) -> StoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn plan(rules: Vec<PriceRule>) -> PricePlanInput {
         PricePlanInput {
@@ -347,6 +397,7 @@ mod tests {
                 start: "01:00".into(),
                 end: "04:00".into(),
             }],
+            china_holidays_off_peak: false,
         });
         assert!(validate_price(priced.clone()).is_ok());
         let mut china_timezone = priced.clone();
@@ -372,5 +423,73 @@ mod tests {
         assert!(validate_price(priced.clone()).is_ok());
         priced.schedule.as_mut().unwrap().peak_windows[1].start = "03:00".into();
         assert!(validate_price(priced).is_err());
+    }
+
+    #[test]
+    fn chinese_holidays_override_weekday_peak_windows() {
+        let schedule = PriceSchedule {
+            timezone: "Asia/Shanghai".into(),
+            peak_windows: (1..=5)
+                .flat_map(|weekday| {
+                    [("09:00", "12:00"), ("14:00", "18:00")]
+                        .into_iter()
+                        .map(move |(start, end)| WeeklyPeakWindow {
+                            weekday,
+                            start: start.into(),
+                            end: end.into(),
+                        })
+                })
+                .collect(),
+            china_holidays_off_peak: true,
+        };
+        let instant = |day, hour| Utc.with_ymd_and_hms(2026, 10, day, hour, 0, 0).unwrap();
+        let holidays = [HolidayDate {
+            date: "2026-10-02".into(),
+            name: "国庆节".into(),
+            kind: HolidayKind::Holiday,
+            source_url: "https://www.gov.cn/".into(),
+        }];
+        // 01:00 UTC is 09:00 China time on a Friday in the holiday interval.
+        assert_eq!(
+            resolve_time_band(&schedule, instant(2, 1), Some(&holidays)).unwrap(),
+            Some(TimeBand::OffPeak)
+        );
+        assert_eq!(
+            resolve_time_band(&schedule, instant(2, 1), None).unwrap(),
+            None
+        );
+        // 04:00 UTC is the excluded 12:00 boundary; calendar data is unnecessary.
+        assert_eq!(
+            resolve_time_band(&schedule, instant(2, 4), None).unwrap(),
+            Some(TimeBand::OffPeak)
+        );
+        assert_eq!(
+            resolve_time_band(&schedule, instant(3, 1), None).unwrap(),
+            Some(TimeBand::OffPeak)
+        );
+        let regular = Utc.with_ymd_and_hms(2026, 9, 28, 1, 0, 0).unwrap();
+        assert_eq!(
+            resolve_time_band(&schedule, regular, Some(&holidays)).unwrap(),
+            Some(TimeBand::Peak)
+        );
+        let adjusted = [HolidayDate {
+            date: "2026-09-28".into(),
+            name: "调休上班".into(),
+            kind: HolidayKind::AdjustedWorkday,
+            source_url: "https://www.gov.cn/".into(),
+        }];
+        assert_eq!(
+            resolve_time_band(&schedule, regular, Some(&adjusted)).unwrap(),
+            Some(TimeBand::Peak)
+        );
+    }
+
+    #[test]
+    fn old_schedules_default_to_no_holiday_override() {
+        let schedule: PriceSchedule = serde_json::from_str(
+            r#"{"timezone":"UTC","peak_windows":[{"weekday":1,"start":"01:00","end":"04:00"}]}"#,
+        )
+        .unwrap();
+        assert!(!schedule.china_holidays_off_peak);
     }
 }

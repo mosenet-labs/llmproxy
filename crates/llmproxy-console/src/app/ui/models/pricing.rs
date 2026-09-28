@@ -1,9 +1,10 @@
 use super::*;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use llmproxy_store::{
-    PriceConditions, PriceItem, PricePlanInput, PriceRule, PriceSchedule, PriceSource, TimeBand,
-    WeeklyPeakWindow,
+    HolidayKind, PriceConditions, PriceItem, PricePlanInput, PriceRule, PriceSchedule, PriceSource,
+    TimeBand, WeeklyPeakWindow, resolve_time_band,
 };
+use rust_decimal::Decimal;
 
 pub(super) struct PriceEditor {
     open: Signal<bool>,
@@ -21,8 +22,12 @@ pub(super) struct PriceEditor {
     effective_at: Signal<String>,
     use_schedule: Signal<bool>,
     timezone: Signal<String>,
+    china_holidays_off_peak: Signal<bool>,
+    matrix_mode: Signal<bool>,
     rules_json: Signal<String>,
     windows_json: Signal<String>,
+    preview_at: Signal<String>,
+    preview_result: Signal<String>,
     rules_revision: Signal<f64>,
     windows_revision: Signal<f64>,
 }
@@ -45,12 +50,130 @@ impl PriceEditor {
             effective_at: signal(cx, String::new),
             use_schedule: signal(cx, || false),
             timezone: signal(cx, || "UTC".to_owned()),
+            china_holidays_off_peak: signal(cx, || false),
+            matrix_mode: signal(cx, || false),
             rules_json: signal(cx, || "[]".to_owned()),
             windows_json: signal(cx, || "[]".to_owned()),
+            preview_at: signal(cx, current_china_time),
+            preview_result: signal(cx, String::new),
             rules_revision: signal(cx, || 0.0),
             windows_revision: signal(cx, || 0.0),
         }
     }
+}
+
+fn china_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 3600).expect("valid China UTC offset")
+}
+
+fn current_china_time() -> String {
+    Utc::now()
+        .with_timezone(&china_offset())
+        .format("%Y-%m-%dT%H:%M")
+        .to_string()
+}
+
+fn matrix_rule_indices(rules: &[PriceRule]) -> Option<[usize; 6]> {
+    if rules.len() != 6 {
+        return None;
+    }
+    let mut indices: [Option<usize>; 6] = [None; 6];
+    for (index, rule) in rules.iter().enumerate() {
+        if rule.conditions.cache_ttl_seconds.is_some()
+            || rule.conditions.prompt_tokens_min.is_some()
+            || rule.conditions.prompt_tokens_max.is_some()
+        {
+            return None;
+        }
+        let item = match rule.item {
+            PriceItem::InputCacheRead => 0,
+            PriceItem::Input => 2,
+            PriceItem::Output => 4,
+            PriceItem::InputCacheWrite => return None,
+        };
+        let band = match rule.conditions.time_band {
+            Some(TimeBand::OffPeak) => 0,
+            Some(TimeBand::Peak) => 1,
+            None => return None,
+        };
+        if indices[item + band].replace(index).is_some() {
+            return None;
+        }
+    }
+    indices
+        .into_iter()
+        .collect::<Option<Vec<_>>>()?
+        .try_into()
+        .ok()
+}
+
+fn matrix_rules(prices: [String; 6]) -> Vec<PriceRule> {
+    let mut rules = Vec::with_capacity(6);
+    for (index, item) in [
+        PriceItem::InputCacheRead,
+        PriceItem::Input,
+        PriceItem::Output,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (band, time_band) in [TimeBand::OffPeak, TimeBand::Peak].into_iter().enumerate() {
+            rules.push(PriceRule {
+                item,
+                conditions: PriceConditions {
+                    time_band: Some(time_band),
+                    ..Default::default()
+                },
+                unit_price: prices[index * 2 + band].clone(),
+            });
+        }
+    }
+    rules
+}
+
+#[derive(Clone, Copy)]
+struct WeekdayWindows {
+    weekday: u8,
+    morning: Option<usize>,
+    afternoon: Option<usize>,
+}
+
+fn weekday_label(weekday: u8) -> &'static str {
+    match weekday {
+        1 => "周一",
+        2 => "周二",
+        3 => "周三",
+        4 => "周四",
+        5 => "周五",
+        6 => "周六",
+        _ => "周日",
+    }
+}
+
+fn grouped_weekday_windows(windows: &[WeeklyPeakWindow]) -> Option<Vec<WeekdayWindows>> {
+    let mut days: [WeekdayWindows; 7] = std::array::from_fn(|index| WeekdayWindows {
+        weekday: index as u8 + 1,
+        morning: None,
+        afternoon: None,
+    });
+    for (index, window) in windows.iter().enumerate() {
+        let day = days.get_mut(usize::from(window.weekday.checked_sub(1)?))?;
+        let slot = if window.start.as_str() < "12:00" && window.end.as_str() <= "12:00" {
+            &mut day.morning
+        } else if window.start.as_str() >= "12:00" {
+            &mut day.afternoon
+        } else {
+            return None;
+        };
+        if slot.replace(index).is_some() {
+            return None;
+        }
+    }
+    Some(
+        days.into_iter()
+            .filter(|day| day.morning.is_some() || day.afternoon.is_some())
+            .collect(),
+    )
 }
 
 fn blank_rule() -> PriceRule {
@@ -66,27 +189,56 @@ pub(super) fn price_label(plan: Option<&PricePlanView>, old_price_needs_review: 
         return if old_price_needs_review {
             "旧价格待确认".into()
         } else {
-            "— 设置价格".into()
+            "设置价格".into()
         };
     };
-    if plan.schedule.is_some() || plan.rules.len() != 2 {
-        return "按条件计价".into();
+    price_lines(plan).map_or_else(|| "按条件计价".into(), |lines| lines.join(" · "))
+}
+
+fn display_price(value: &str) -> String {
+    match value.split_once('.') {
+        None => format!("{value}.00"),
+        Some((_, fraction)) if fraction.len() == 1 => format!("{value}0"),
+        _ => value.to_owned(),
     }
-    let simple = |item| {
-        plan.rules
-            .iter()
-            .find(|rule| rule.item == item && rule.conditions == PriceConditions::default())
+}
+
+pub(super) fn price_lines(plan: &PricePlanView) -> Option<Vec<String>> {
+    let symbol = match plan.currency.as_str() {
+        "USD" => "$",
+        "CNY" => "¥",
+        _ => return None,
     };
-    match (simple(PriceItem::Input), simple(PriceItem::Output)) {
-        (Some(input), Some(output)) => {
-            let symbol = if plan.currency == "USD" { "$" } else { "" };
+    let prices = plan
+        .rules
+        .iter()
+        .map(|rule| Some((rule.item, Decimal::from_str_exact(&rule.unit_price).ok()?)))
+        .collect::<Option<Vec<_>>>()?;
+    let mut lines = Vec::with_capacity(2);
+    for (label, input) in [("In", true), ("Out", false)] {
+        let mut values = prices
+            .iter()
+            .filter(|(item, _)| (*item != PriceItem::Output) == input)
+            .map(|(_, price)| *price);
+        let Some(first) = values.next() else {
+            continue;
+        };
+        let (low, high) = values.fold((first, first), |(low, high), price| {
+            (low.min(price), high.max(price))
+        });
+        let same_price = low == high;
+        let low = display_price(&low.normalize().to_string());
+        let amount = if same_price {
+            format!("{symbol}{low}")
+        } else {
             format!(
-                "In {symbol}{} · Out {symbol}{} / M · {}",
-                input.unit_price, output.unit_price, plan.currency
+                "{symbol}{low}–{symbol}{}",
+                display_price(&high.normalize().to_string())
             )
-        }
-        _ => "按条件计价".into(),
+        };
+        lines.push(format!("{label}: {amount}/M"));
     }
+    (!lines.is_empty()).then_some(lines)
 }
 
 pub(super) fn price_trigger(
@@ -126,6 +278,9 @@ pub(super) fn price_trigger(
         .and_then(|plan| plan.schedule.as_ref())
         .map_or("UTC", |schedule| schedule.timezone.as_str())
         .to_owned();
+    let china_holidays_off_peak = plan
+        .and_then(|plan| plan.schedule.as_ref())
+        .is_some_and(|schedule| schedule.china_holidays_off_peak);
     let rules = plan.map_or_else(
         || {
             let mut output = blank_rule();
@@ -135,10 +290,12 @@ pub(super) fn price_trigger(
         |plan| plan.rules.clone(),
     );
     let rules_json = serde_json::to_string(&rules).expect("price rules are serializable");
+    let matrix_mode = matrix_rule_indices(&rules).is_some();
     let windows = plan
         .and_then(|plan| plan.schedule.as_ref())
         .map_or_else(Vec::new, |schedule| schedule.peak_windows.clone());
     let windows_json = serde_json::to_string(&windows).expect("price windows are serializable");
+    let preview_at = current_china_time();
     let PriceEditor {
         open,
         busy,
@@ -155,8 +312,12 @@ pub(super) fn price_trigger(
         effective_at: selected_effective_at,
         use_schedule: selected_schedule,
         timezone: selected_timezone,
+        china_holidays_off_peak: selected_holidays,
+        matrix_mode: selected_matrix,
         rules_json: selected_rules,
         windows_json: selected_windows,
+        preview_at: selected_preview_at,
+        preview_result: selected_preview_result,
         rules_revision,
         windows_revision,
     } = editor;
@@ -173,8 +334,12 @@ pub(super) fn price_trigger(
         selected_effective_at.set(effective_at.to_owned());
         selected_schedule.set(use_schedule);
         selected_timezone.set(timezone.to_owned());
+        selected_holidays.set(china_holidays_off_peak);
+        selected_matrix.set(matrix_mode);
         selected_rules.set(rules_json.to_owned());
         selected_windows.set(windows_json.to_owned());
+        selected_preview_at.set(preview_at.to_owned());
+        selected_preview_result.set("".to_owned());
         rules_revision.increment();
         windows_revision.increment();
         error.set("".to_owned());
@@ -205,10 +370,30 @@ pub async fn remove_price_rule(json: String, index: usize) -> Result<String> {
 pub async fn add_price_window(json: String) -> Result<String> {
     let mut windows: Vec<WeeklyPeakWindow> = serde_json::from_str(&json)?;
     if windows.len() < 100 {
+        for weekday in 1..=7 {
+            for (start, end) in [("09:00", "12:00"), ("14:00", "18:00")] {
+                let used = windows.iter().any(|window| {
+                    window.weekday == weekday
+                        && if start == "09:00" {
+                            window.start.as_str() < "12:00"
+                        } else {
+                            window.start.as_str() >= "12:00"
+                        }
+                });
+                if !used {
+                    windows.push(WeeklyPeakWindow {
+                        weekday,
+                        start: start.into(),
+                        end: end.into(),
+                    });
+                    return Ok(serde_json::to_string(&windows)?);
+                }
+            }
+        }
         windows.push(WeeklyPeakWindow {
             weekday: 1,
-            start: "01:00".into(),
-            end: "04:00".into(),
+            start: "00:00".into(),
+            end: "01:00".into(),
         });
     }
     Ok(serde_json::to_string(&windows)?)
@@ -223,6 +408,80 @@ pub async fn remove_price_window(json: String, index: usize) -> Result<String> {
     Ok(serde_json::to_string(&windows)?)
 }
 
+#[procedure("/ui/_topcoat/runtime/procedures/deepseek-peak-windows")]
+pub async fn deepseek_peak_windows() -> Result<String> {
+    let windows: Vec<_> = (1..=5)
+        .flat_map(|weekday| {
+            [("09:00", "12:00"), ("14:00", "18:00")]
+                .into_iter()
+                .map(move |(start, end)| WeeklyPeakWindow {
+                    weekday,
+                    start: start.into(),
+                    end: end.into(),
+                })
+        })
+        .collect();
+    Ok(serde_json::to_string(&windows)?)
+}
+
+#[procedure("/ui/_topcoat/runtime/procedures/preview-price-band")]
+pub async fn preview_price_band(
+    cx: &Cx,
+    timezone: String,
+    windows_json: String,
+    china_holidays_off_peak: bool,
+    preview_at: String,
+) -> Result<Outcome> {
+    let result: std::result::Result<String, StoreError> = async {
+        let local = NaiveDateTime::parse_from_str(&preview_at, "%Y-%m-%dT%H:%M")
+            .map_err(|_| StoreError::Validation("请选择有效的中国日期和时间".into()))?;
+        let instant = china_offset()
+            .from_local_datetime(&local)
+            .single()
+            .ok_or_else(|| StoreError::Validation("预览时间无效".into()))?
+            .with_timezone(&Utc);
+        let year = i64::from(local.date().year());
+        let holidays = if china_holidays_off_peak {
+            app_context::<AppState>(cx)
+                .store
+                .list_holidays(year)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let schedule = PriceSchedule {
+            timezone,
+            peak_windows: serde_json::from_str(&windows_json)
+                .map_err(|_| StoreError::Validation("峰时窗口格式无效".into()))?,
+            china_holidays_off_peak,
+        };
+        let band = resolve_time_band(
+            &schedule,
+            instant,
+            (!holidays.is_empty()).then_some(holidays.as_slice()),
+        )?;
+        let holiday_override = if band == Some(TimeBand::OffPeak)
+            && holidays
+                .iter()
+                .any(|day| day.date == local.date().to_string() && day.kind == HolidayKind::Holiday)
+        {
+            let mut weekly_schedule = schedule.clone();
+            weekly_schedule.china_holidays_off_peak = false;
+            resolve_time_band(&weekly_schedule, instant, None)? == Some(TimeBand::Peak)
+        } else {
+            false
+        };
+        Ok(match band {
+            Some(TimeBand::Peak) => "峰时".into(),
+            Some(TimeBand::OffPeak) if holiday_override => "谷时（中国放假安排）".into(),
+            Some(TimeBand::OffPeak) => "谷时".into(),
+            None => format!("无法判断：{year} 年中国放假安排尚未导入"),
+        })
+    }
+    .await;
+    Ok(result.map_err(|error| error.to_string()))
+}
+
 #[procedure("/ui/_topcoat/runtime/procedures/save-price-plan")]
 pub async fn save_price_plan(
     cx: &Cx,
@@ -234,6 +493,7 @@ pub async fn save_price_plan(
     effective_at: String,
     use_schedule: bool,
     timezone: String,
+    china_holidays_off_peak: bool,
     rules_json: String,
     windows_json: String,
 ) -> Result<Outcome> {
@@ -271,6 +531,7 @@ pub async fn save_price_plan(
                 schedule: use_schedule.then_some(PriceSchedule {
                     timezone,
                     peak_windows: windows,
+                    china_holidays_off_peak,
                 }),
                 rules,
             })
@@ -300,6 +561,7 @@ fn window_field(
     cx: &Cx,
     windows: &Signal<String>,
     error: &Signal<String>,
+    preview_result: &Signal<String>,
     index: usize,
     field: &str,
 ) -> Attributes {
@@ -308,6 +570,7 @@ fn window_field(
         let next = raw!("(() => { const rows = JSON.parse(String(${windows}.get())); const field = ${field}.dehydrate(); const value = String(${_event}.target.value.dehydrate()); rows[Number(${index}.toString())][field] = field === 'weekday' ? Number(value) : value; return cx.hydrate(JSON.stringify(rows)); })()", previous);
         windows.set(next);
         error.set("".to_owned());
+        preview_result.set("".to_owned());
     }) }
 }
 
@@ -358,35 +621,97 @@ pub async fn price_rule_rows(
     })
 }
 
+#[shard("/ui/_topcoat/runtime/shards/price-matrix-rows")]
+pub async fn price_matrix_rows(
+    cx: &Cx,
+    revision: f64,
+    rules: Signal<String>,
+    error: Signal<String>,
+) -> Result<impl View> {
+    let _ = revision;
+    let rows: Vec<PriceRule> = serde_json::from_str(&rules.get_untracked())?;
+    let labels = matrix_rule_indices(&rows).map_or_else(Vec::new, |indices| {
+        vec![
+            ("输入 · 缓存命中", indices[0], indices[1]),
+            ("输入 · 缓存未命中", indices[2], indices[3]),
+            ("输出", indices[4], indices[5]),
+        ]
+    });
+    Ok(view! {
+        <div class="overflow-x-auto rounded-md border border-border">
+            <div class="grid min-w-[560px] grid-cols-[minmax(160px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)] gap-3 border-b border-border bg-surface px-4 py-2 text-xs font-medium text-secondary"><span>"计费项"</span><span>"谷时价 / 百万 token"</span><span>"峰时价 / 百万 token"</span></div>
+            for (label, off_peak, peak) in labels {
+                <div class="grid min-w-[560px] grid-cols-[minmax(160px,1fr)_minmax(150px,1fr)_minmax(150px,1fr)] items-center gap-3 border-b border-border px-4 py-2 text-sm last:border-b-0">
+                    <span>(label)</span>
+                    <input class="h-9 min-w-0 w-full tabular-nums" type="text" inputmode="decimal" aria-label=(format!("{label}谷时价")) placeholder="—" value=(rows[off_peak].unit_price.as_str()) (rule_field(cx, &rules, &error, off_peak, "unit_price"))>
+                    <input class="h-9 min-w-0 w-full tabular-nums" type="text" inputmode="decimal" aria-label=(format!("{label}峰时价")) placeholder="—" value=(rows[peak].unit_price.as_str()) (rule_field(cx, &rules, &error, peak, "unit_price"))>
+                </div>
+            }
+        </div>
+    })
+}
+
 #[shard("/ui/_topcoat/runtime/shards/price-peak-windows")]
 pub async fn price_peak_windows(
     cx: &Cx,
     revision: f64,
     windows: Signal<String>,
     error: Signal<String>,
+    preview_result: Signal<String>,
     rerender: Signal<f64>,
 ) -> Result<impl View> {
     let _ = revision;
     let rows: Vec<WeeklyPeakWindow> = serde_json::from_str(&windows.get_untracked())?;
+    let grouped = grouped_weekday_windows(&rows);
     Ok(view! {
-        <div class="space-y-2">
-            #[key(index)] for (index, row) in rows.iter().enumerate() {
-                <div class="grid grid-cols-[minmax(130px,1fr)_minmax(110px,1fr)_minmax(110px,1fr)_32px] items-center gap-2 max-[560px]:grid-cols-[1fr_1fr_32px]">
-                    <select class="h-9 min-w-0 text-sm max-[560px]:col-span-2" aria-label=(format!("第 {} 个窗口的星期", index + 1)) (window_field(cx, &windows, &error, index, "weekday"))>
-                        for (day, label) in [(1, "周一"), (2, "周二"), (3, "周三"), (4, "周四"), (5, "周五"), (6, "周六"), (7, "周日")] {
-                            <option value=(day.to_string()) selected=(row.weekday == day)>(label)</option>
+        if let Some(days) = grouped {
+            <div class="overflow-x-auto rounded-md border border-border">
+                <div class="grid min-w-[720px] grid-cols-[68px_minmax(270px,1fr)_minmax(270px,1fr)] gap-3 border-b border-border bg-surface px-3 py-2 text-xs font-medium text-secondary"><span>"星期"</span><span>"上午"</span><span>"下午"</span></div>
+                for day in days {
+                    let day_label = weekday_label(day.weekday);
+                    <div class="grid min-w-[720px] grid-cols-[68px_minmax(270px,1fr)_minmax(270px,1fr)] items-center gap-3 border-b border-border px-3 py-2 last:border-b-0">
+                        <span class="text-sm font-medium text-heading">(day_label)</span>
+                        for (period, slot) in [("上午", day.morning), ("下午", day.afternoon)] {
+                            <div class="flex min-w-0 items-center gap-2">
+                                if let Some(index) = slot {
+                                    <input class="h-9 min-w-0 w-full text-sm" type="time" aria-label=(format!("{day_label}{period}开始时间")) value=(rows[index].start.as_str()) (window_field(cx, &windows, &error, &preview_result, index, "start"))>
+                                    <span class="shrink-0 text-xs text-muted">"—"</span>
+                                    <input class="h-9 min-w-0 w-full text-sm" type="time" aria-label=(format!("{day_label}{period}结束时间")) value=(rows[index].end.as_str()) (window_field(cx, &windows, &error, &preview_result, index, "end"))>
+                                    <button class="flex size-7 shrink-0 items-center justify-center rounded border-0 bg-transparent text-secondary hover:bg-[#fff2f0] hover:text-[#cf1322]" type="button" aria-label=(format!("移除{day_label}{period}峰时窗口")) @click=$(async |_event: Event| {
+                                        windows.set(remove_price_window(windows.get(), index).await);
+                                        error.set("".to_owned());
+                                        preview_result.set("".to_owned());
+                                        rerender.increment();
+                                    })>"×"</button>
+                                } else {
+                                    <span class="text-xs text-muted">"未设置"</span>
+                                }
+                            </div>
                         }
-                    </select>
-                    <input class="h-9 min-w-0 w-full text-sm" type="time" aria-label=(format!("第 {} 个窗口的开始时间", index + 1)) value=(row.start.as_str()) (window_field(cx, &windows, &error, index, "start"))>
-                    <input class="h-9 min-w-0 w-full text-sm" type="time" aria-label=(format!("第 {} 个窗口的结束时间", index + 1)) value=(row.end.as_str()) (window_field(cx, &windows, &error, index, "end"))>
-                    <button class="flex size-8 items-center justify-center rounded border-0 bg-transparent text-secondary hover:bg-[#fff2f0] hover:text-[#cf1322]" type="button" aria-label=(format!("移除第 {} 个峰时窗口", index + 1)) @click=$(async |_event: Event| {
-                        windows.set(remove_price_window(windows.get(), index).await);
-                        error.set("".to_owned());
-                        rerender.increment();
-                    })>"×"</button>
-                </div>
-            }
-        </div>
+                    </div>
+                }
+            </div>
+        } else {
+            <div class="space-y-2">
+                #[key(index)] for (index, row) in rows.iter().enumerate() {
+                    <div class="grid grid-cols-[minmax(130px,1fr)_minmax(110px,1fr)_minmax(110px,1fr)_32px] items-center gap-2 max-[560px]:grid-cols-[1fr_1fr_32px]">
+                        <select class="h-9 min-w-0 text-sm max-[560px]:col-span-2" aria-label=(format!("第 {} 个窗口的星期", index + 1)) (window_field(cx, &windows, &error, &preview_result, index, "weekday"))>
+                            for (weekday, label) in [(1, "周一"), (2, "周二"), (3, "周三"), (4, "周四"), (5, "周五"), (6, "周六"), (7, "周日")] {
+                                <option value=(weekday.to_string()) selected=(row.weekday == weekday)>(label)</option>
+                            }
+                        </select>
+                        <input class="h-9 min-w-0 w-full text-sm" type="time" aria-label=(format!("第 {} 个窗口的开始时间", index + 1)) value=(row.start.as_str()) (window_field(cx, &windows, &error, &preview_result, index, "start"))>
+                        <input class="h-9 min-w-0 w-full text-sm" type="time" aria-label=(format!("第 {} 个窗口的结束时间", index + 1)) value=(row.end.as_str()) (window_field(cx, &windows, &error, &preview_result, index, "end"))>
+                        <button class="flex size-8 items-center justify-center rounded border-0 bg-transparent text-secondary hover:bg-[#fff2f0] hover:text-[#cf1322]" type="button" aria-label=(format!("移除第 {} 个峰时窗口", index + 1)) @click=$(async |_event: Event| {
+                            windows.set(remove_price_window(windows.get(), index).await);
+                            error.set("".to_owned());
+                            preview_result.set("".to_owned());
+                            rerender.increment();
+                        })>"×"</button>
+                    </div>
+                }
+            </div>
+        }
     })
 }
 
@@ -414,11 +739,31 @@ pub(super) async fn price_editor(
         effective_at,
         use_schedule,
         timezone,
+        china_holidays_off_peak,
+        matrix_mode,
         rules_json,
         windows_json,
+        preview_at,
+        preview_result,
         rules_revision,
         windows_revision,
     } = editor;
+    let calendar_year = Utc::now().with_timezone(&china_offset()).year();
+    let calendar_imported = !app_context::<AppState>(cx)
+        .store
+        .list_holidays(i64::from(calendar_year))
+        .await?
+        .is_empty();
+    let calendar_status = if calendar_imported {
+        format!("已导入 {calendar_year} 年放假安排")
+    } else {
+        format!("{calendar_year} 年放假安排尚未导入")
+    };
+    let mut output = blank_rule();
+    output.item = PriceItem::Output;
+    let blank_rules_json = serde_json::to_string(&vec![blank_rule(), output])?;
+    let blank_matrix_json =
+        serde_json::to_string(&matrix_rules(std::array::from_fn(|_| String::new())))?;
     let close = native_dialog_close_attributes(cx, "price-dialog");
     Ok(view! {
         native_dialog(config: NativeDialogConfig::new("price-dialog", "参考价格"),
@@ -432,6 +777,7 @@ pub(super) async fn price_editor(
                 let result = save_price_plan(
                     csrf.to_owned(), provider_id.get(), model_id.get(), currency.get(),
                     source_url.get(), effective_at.get(), use_schedule.get(), timezone.get(),
+                    china_holidays_off_peak.get(),
                     rules_json.get(), windows_json.get(),
                 ).await;
                 busy.set(false);
@@ -439,7 +785,7 @@ pub(super) async fn price_editor(
                 else { error.set(result.unwrap_err()); rules_revision.increment(); windows_revision.increment(); }
             })>
                 <div class="min-h-[300px] overflow-y-auto p-6">
-                    <div class="mb-4 rounded-md border border-[#ffccc7] bg-[#fff2f0] px-4 py-3 text-sm text-[#cf1322]" role="alert" :hidden=$(if error.get().is_empty() { true } else { error.get().starts_with("第 ") })>$(error.get())</div>
+                    <div class="mb-4 rounded-md border border-[#ffccc7] bg-[#fff2f0] px-4 py-3 text-sm text-[#cf1322]" role="alert" :hidden=$(if error.get().is_empty() { true } else if matrix_mode.get() { false } else { error.get().starts_with("第 ") })>$(error.get())</div>
                     <div class="flex flex-wrap items-start justify-between gap-3">
                         <div><h3 class="m-0 text-base font-semibold text-heading">$(provider_name.get())" / "$(model_id.get())</h3><p class="mt-1 mb-0 text-xs text-secondary">$(alias_count.get())" 个客户端别名共用此价格。仅作为参考价格展示。"</p></div>
                         <span class="rounded border border-border bg-surface px-2.5 py-1 text-xs text-secondary">$(if version.get().is_empty() { "新价格" } else { "当前版本" })" "$(version.get())" · "$(source.get())" "$(recorded_at.get())</span>
@@ -449,17 +795,53 @@ pub(super) async fn price_editor(
                         <label class="text-xs font-medium text-heading">"生效时间（UTC，可选）"<input class="mt-2 h-9 w-full" type="datetime-local" :value=$(effective_at.get()) @input=$(|event: Event| { effective_at.set(event.target.value); error.set("".to_owned()); })></label>
                         <label class="text-xs font-medium text-heading">"来源 URL（可选）"<input class="mt-2 h-9 w-full" type="url" placeholder="https://…" :value=$(source_url.get()) @input=$(|event: Event| { source_url.set(event.target.value); error.set("".to_owned()); })></label>
                     </div>
-                    <div class="mt-6 flex items-center justify-between gap-3"><div><h4 class="m-0 text-sm font-semibold">"价格规则"</h4><p class="mt-1 mb-0 text-xs text-secondary">"每条单价均为每 100 万 token；缓存读取仍属于输入。空白条件表示不限。"</p></div><button class=(BUTTON) type="button" @click=$(async |_event: Event| { rules_json.set(add_price_rule(rules_json.get()).await); error.set("".to_owned()); rules_revision.increment(); })>"＋ 添加规则"</button></div>
-                    <div class="mt-3">price_rule_rows(revision: $(rules_revision.get()), rules: rules_json.clone(), error: error.clone(), rerender: rules_revision.clone())</div>
+                    <div class="mt-6 flex flex-wrap items-center justify-between gap-3">
+                        <div><h4 class="m-0 text-sm font-semibold">"价格规则"</h4><p class="mt-1 mb-0 text-xs text-secondary">"单价均为每 100 万 token；缓存命中属于输入。"</p></div>
+                        <button class=(BUTTON) type="button" :hidden=$(matrix_mode.get()) @click=$(async |_event: Event| { rules_json.set(add_price_rule(rules_json.get()).await); error.set("".to_owned()); rules_revision.increment(); })>"＋ 添加规则"</button>
+                    </div>
+                    <div class="mt-3" :hidden=$(matrix_mode.get())>price_rule_rows(revision: $(rules_revision.get()), rules: rules_json.clone(), error: error.clone(), rerender: rules_revision.clone())</div>
+                    <button class="mt-2 border-0 bg-transparent p-0 text-xs text-primary hover:underline" type="button" :hidden=$(if matrix_mode.get() { true } else { !use_schedule.get() }) @click=$(|_event: Event| {
+                        rules_json.set(blank_matrix_json.to_owned());
+                        matrix_mode.set(true);
+                        rules_revision.increment();
+                        error.set("".to_owned());
+                    })>"清空现有规则并改用 3×2 峰谷价格表"</button>
+                    <div class="mt-3" :hidden=$(!matrix_mode.get())>price_matrix_rows(revision: $(rules_revision.get()), rules: rules_json.clone(), error: error.clone())</div>
                     <div class="mt-6 border-t border-border pt-5">
-                        <label class="flex items-center gap-2 text-sm font-medium text-heading"><input type="checkbox" :checked=$(use_schedule.get()) @change=$(|event: Event| { use_schedule.set(event.target.checked); error.set("".to_owned()); })>"使用峰谷时段"</label>
-                        <p class="mt-1 mb-0 text-xs text-secondary">"只有规则使用峰时或谷时条件时才需要。跨天窗口拆成两天录入。"</p>
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                            <label class="flex items-center gap-2 text-sm font-medium text-heading"><input type="checkbox" :checked=$(use_schedule.get()) @change=$(|event: Event| { use_schedule.set(event.target.checked); preview_result.set("".to_owned()); error.set("".to_owned()); })>"使用峰谷时段"</label>
+                            <button class=(BUTTON) type="button" @click=$(async |_event: Event| {
+                                windows_json.set(deepseek_peak_windows().await);
+                                timezone.set("Asia/Shanghai".to_owned());
+                                china_holidays_off_peak.set(true);
+                                use_schedule.set(true);
+                                if rules_json.get() == blank_rules_json { rules_json.set(blank_matrix_json.to_owned()); matrix_mode.set(true); rules_revision.increment(); }
+                                windows_revision.increment();
+                                preview_result.set("".to_owned());
+                                error.set("".to_owned());
+                            })>"套用 DeepSeek 时段"</button>
+                        </div>
+                        <p class="mt-1 mb-0 text-xs text-secondary">"DeepSeek 预设峰时：中国时间周一至周五 09:00–12:00、14:00–18:00。预设不会覆盖已有单价。"</p>
                         <div class="mt-4" :hidden=$(!use_schedule.get())>
-                            <div class="mb-3 flex flex-wrap items-end justify-between gap-3">
-                                <label class="text-xs font-medium text-heading">"峰谷时区"<select class="mt-1 block h-9 w-[220px] max-w-full" :value=$(timezone.get()) @change=$(|event: Event| { timezone.set(event.target.value); error.set("".to_owned()); })><option value="UTC">"UTC"</option><option value="Asia/Shanghai">"中国时区（UTC+8）"</option></select></label>
-                                <button class=(BUTTON) type="button" @click=$(async |_event: Event| { windows_json.set(add_price_window(windows_json.get()).await); error.set("".to_owned()); windows_revision.increment(); })>"＋ 添加峰时窗口"</button>
+                            <label class="text-xs font-medium text-heading">"峰谷时区"<select class="mt-1 block h-9 w-[220px] max-w-full" :value=$(timezone.get()) @change=$(|event: Event| { timezone.set(event.target.value); preview_result.set("".to_owned()); error.set("".to_owned()); })><option value="UTC">"UTC"</option><option value="Asia/Shanghai">"中国时区（UTC+8）"</option></select></label>
+                            <label class="mt-4 flex items-center gap-2 text-sm text-heading"><input type="checkbox" :checked=$(china_holidays_off_peak.get()) @change=$(|event: Event| { china_holidays_off_peak.set(event.target.checked); preview_result.set("".to_owned()); error.set("".to_owned()); })>"中国放假安排全天按谷时"</label>
+                            <p class="mt-1 mb-0 text-xs text-secondary">(calendar_status.as_str())" · "<a class="text-primary hover:underline" href="/ui/holidays">"查看日历"</a>"。调休上班的周末仍按上述星期窗口判定。"</p>
+                            <details class="mt-4 rounded-md border border-border px-3 py-2">
+                                <summary class="cursor-pointer text-sm font-medium text-heading">"编辑每周峰时窗口"</summary>
+                                <div class="mt-3 flex justify-end"><button class=(BUTTON) type="button" @click=$(async |_event: Event| { windows_json.set(add_price_window(windows_json.get()).await); preview_result.set("".to_owned()); error.set("".to_owned()); windows_revision.increment(); })>"＋ 添加峰时窗口"</button></div>
+                                <p class="my-2 text-xs text-secondary">"跨天窗口拆成两天录入。"</p>
+                                <div class="max-h-80 overflow-y-auto pr-1">price_peak_windows(revision: $(windows_revision.get()), windows: windows_json.clone(), error: error.clone(), preview_result: preview_result.clone(), rerender: windows_revision.clone())</div>
+                            </details>
+                            <div class="mt-4 flex flex-wrap items-end gap-3 rounded-md bg-surface p-3">
+                                <label class="text-xs font-medium text-heading">"预览时间（中国时间）"<input class="mt-1 block h-9 w-[220px] max-w-full" type="datetime-local" :value=$(preview_at.get()) @input=$(|event: Event| { preview_at.set(event.target.value); preview_result.set("".to_owned()); })></label>
+                                <button class=(BUTTON) type="button" @click=$(async |_event: Event| {
+                                    preview_result.set("判定中…".to_owned());
+                                    let result = preview_price_band(timezone.get(), windows_json.get(), china_holidays_off_peak.get(), preview_at.get()).await;
+                                    if result.is_ok() { preview_result.set(result.unwrap()); }
+                                    else { preview_result.set(result.unwrap_err()); }
+                                })>"预览时段"</button>
+                                <span class="pb-2 text-sm font-medium text-heading" role="status">$(preview_result.get())</span>
                             </div>
-                            price_peak_windows(revision: $(windows_revision.get()), windows: windows_json.clone(), error: error.clone(), rerender: windows_revision.clone())
                         </div>
                     </div>
                 </div>
@@ -467,4 +849,159 @@ pub(super) async fn price_editor(
             </form>
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn price_labels_use_currency_symbols_without_rounding() {
+        let mut plan = PricePlanView {
+            id: 1,
+            provider_id: 1,
+            upstream_model_id: "model".into(),
+            currency: "USD".into(),
+            source: PriceSource::Manual,
+            source_url: None,
+            recorded_at: 0,
+            effective_at: None,
+            schedule: None,
+            rules: vec![
+                PriceRule {
+                    item: PriceItem::Input,
+                    conditions: PriceConditions::default(),
+                    unit_price: "0.8".into(),
+                },
+                PriceRule {
+                    item: PriceItem::Output,
+                    conditions: PriceConditions::default(),
+                    unit_price: "2".into(),
+                },
+            ],
+        };
+        assert_eq!(price_label(None, false), "设置价格");
+        assert_eq!(
+            price_lines(&plan),
+            Some(vec!["In: $0.80/M".into(), "Out: $2.00/M".into()])
+        );
+        plan.currency = "CNY".into();
+        plan.rules[0].unit_price = "0.003".into();
+        assert_eq!(
+            price_lines(&plan),
+            Some(vec!["In: ¥0.003/M".into(), "Out: ¥2.00/M".into()])
+        );
+    }
+
+    #[test]
+    fn conditional_prices_show_numeric_ranges() {
+        let mut plan = PricePlanView {
+            id: 1,
+            provider_id: 1,
+            upstream_model_id: "model".into(),
+            currency: "CNY".into(),
+            source: PriceSource::Manual,
+            source_url: None,
+            recorded_at: 0,
+            effective_at: None,
+            schedule: Some(PriceSchedule {
+                timezone: "Asia/Shanghai".into(),
+                peak_windows: vec![WeeklyPeakWindow {
+                    weekday: 1,
+                    start: "09:00".into(),
+                    end: "12:00".into(),
+                }],
+                china_holidays_off_peak: true,
+            }),
+            rules: vec![
+                PriceRule {
+                    item: PriceItem::Input,
+                    conditions: PriceConditions {
+                        time_band: Some(TimeBand::Peak),
+                        ..Default::default()
+                    },
+                    unit_price: "10".into(),
+                },
+                PriceRule {
+                    item: PriceItem::Input,
+                    conditions: PriceConditions {
+                        time_band: Some(TimeBand::OffPeak),
+                        ..Default::default()
+                    },
+                    unit_price: "2".into(),
+                },
+                PriceRule {
+                    item: PriceItem::InputCacheRead,
+                    conditions: PriceConditions::default(),
+                    unit_price: "0.5".into(),
+                },
+                PriceRule {
+                    item: PriceItem::Output,
+                    conditions: PriceConditions::default(),
+                    unit_price: "3".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            price_lines(&plan),
+            Some(vec!["In: ¥0.50–¥10.00/M".into(), "Out: ¥3.00/M".into()])
+        );
+        assert_eq!(
+            price_label(Some(&plan), false),
+            "In: ¥0.50–¥10.00/M · Out: ¥3.00/M"
+        );
+        plan.rules.retain(|rule| rule.item == PriceItem::Output);
+        assert_eq!(price_lines(&plan), Some(vec!["Out: ¥3.00/M".into()]));
+    }
+
+    #[test]
+    fn matrix_fields_follow_the_rule_conditions() {
+        let mut rules = matrix_rules([
+            "0.003".into(),
+            "0.006".into(),
+            "0.15".into(),
+            "0.30".into(),
+            "0.60".into(),
+            "1.20".into(),
+        ]);
+        rules.swap(0, 5);
+        assert_eq!(matrix_rule_indices(&rules), Some([5, 1, 2, 3, 4, 0]));
+        rules[0].conditions.prompt_tokens_min = Some(1);
+        assert_eq!(matrix_rule_indices(&rules), None);
+    }
+
+    #[test]
+    fn weekly_windows_group_morning_and_afternoon_by_day() {
+        let mut windows: Vec<_> = (1..=5)
+            .flat_map(|weekday| {
+                [("09:00", "12:00"), ("14:00", "18:00")]
+                    .into_iter()
+                    .map(move |(start, end)| WeeklyPeakWindow {
+                        weekday,
+                        start: start.into(),
+                        end: end.into(),
+                    })
+            })
+            .collect();
+        let grouped = grouped_weekday_windows(&windows).unwrap();
+        assert_eq!(grouped.len(), 5);
+        assert_eq!(
+            (grouped[0].morning, grouped[0].afternoon),
+            (Some(0), Some(1))
+        );
+        assert_eq!(
+            (grouped[4].morning, grouped[4].afternoon),
+            (Some(8), Some(9))
+        );
+
+        windows.remove(1);
+        let grouped = grouped_weekday_windows(&windows).unwrap();
+        assert_eq!((grouped[0].morning, grouped[0].afternoon), (Some(0), None));
+        windows.push(WeeklyPeakWindow {
+            weekday: 1,
+            start: "10:00".into(),
+            end: "11:00".into(),
+        });
+        assert!(grouped_weekday_windows(&windows).is_none());
+    }
 }

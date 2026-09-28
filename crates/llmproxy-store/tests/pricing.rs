@@ -104,6 +104,7 @@ async fn exercise(store: &ProviderStore, url: &str) {
                 start: "01:00".into(),
                 end: "04:00".into(),
             }],
+            china_holidays_off_peak: true,
         }),
         rules,
     };
@@ -111,6 +112,7 @@ async fn exercise(store: &ProviderStore, url: &str) {
     assert!(saved.id > catalog.id);
     assert_eq!(saved.currency, "USD");
     assert_eq!(saved.rules.len(), 6);
+    assert!(saved.schedule.as_ref().unwrap().china_holidays_off_peak);
     assert_eq!(store.list_current_price_plans().await.unwrap().len(), 1);
     store
         .create_model(mapping(

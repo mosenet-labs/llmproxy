@@ -17,7 +17,7 @@ pub use database::{Backend, DatabaseConfig};
 pub use holiday::{HolidayDate, HolidayKind};
 pub use pricing::{
     PriceConditions, PriceItem, PricePlanInput, PricePlanView, PriceRule, PriceSchedule,
-    PriceSource, TimeBand, WeeklyPeakWindow,
+    PriceSource, TimeBand, WeeklyPeakWindow, resolve_time_band,
 };
 pub use store::ProviderStore;
 
