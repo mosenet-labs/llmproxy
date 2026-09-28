@@ -18,6 +18,7 @@ pub(super) struct Editor {
     manual_model_id: Signal<String>,
     manual_open: Signal<bool>,
     selected_models: Signal<String>,
+    draft_aliases: Signal<String>,
     candidates: Signal<String>,
     candidate_status: Signal<String>,
     chat: Signal<bool>,
@@ -26,6 +27,7 @@ pub(super) struct Editor {
     supports_chat: Signal<bool>,
     supports_responses: Signal<bool>,
     supports_messages: Signal<bool>,
+    supported_protocols: Signal<String>,
     probe_protocol: Signal<String>,
     probe_tokens: Signal<String>,
     probe_busy: Signal<bool>,
@@ -56,6 +58,7 @@ impl Editor {
             manual_model_id: signal(cx, String::new),
             manual_open: signal(cx, || false),
             selected_models: signal(cx, || "[]".to_owned()),
+            draft_aliases: signal(cx, || "[]".to_owned()),
             candidates: signal(cx, || "[]".to_owned()),
             candidate_status: signal(cx, String::new),
             chat: signal(cx, || false),
@@ -64,6 +67,7 @@ impl Editor {
             supports_chat: signal(cx, || false),
             supports_responses: signal(cx, || false),
             supports_messages: signal(cx, || false),
+            supported_protocols: signal(cx, String::new),
             probe_protocol: signal(cx, String::new),
             probe_tokens: signal(cx, || "1".to_owned()),
             probe_busy: signal(cx, || false),
@@ -123,6 +127,7 @@ pub(super) fn editor_trigger(
         manual_model_id,
         manual_open,
         selected_models,
+        draft_aliases,
         candidates,
         candidate_status,
         chat: selected_chat,
@@ -131,6 +136,7 @@ pub(super) fn editor_trigger(
         supports_chat,
         supports_responses,
         supports_messages,
+        supported_protocols,
         probe_protocol,
         probe_tokens,
         probe_busy,
@@ -173,6 +179,7 @@ pub(super) fn editor_trigger(
         manual_model_id.set("".to_owned());
         manual_open.set(false);
         selected_models.set("[]".to_owned());
+        draft_aliases.set("[]".to_owned());
         candidates.set("[]".to_owned());
         candidate_status.set("".to_owned());
         selected_chat.set(chat);
@@ -181,6 +188,10 @@ pub(super) fn editor_trigger(
         supports_chat.set(supported_chat);
         supports_responses.set(supported_responses);
         supports_messages.set(supported_messages);
+        supported_protocols.set("".to_owned());
+        if supported_chat { supported_protocols.push_str("openai_chat|"); }
+        if supported_responses { supported_protocols.push_str("openai_responses|"); }
+        if supported_messages { supported_protocols.push_str("anthropic_messages|"); }
         probe_protocol.set(initial_probe_protocol.to_owned());
         probe_tokens.set("1".to_owned());
         probe_busy.set(false);
@@ -216,7 +227,9 @@ async fn provider_search(
         supports_chat,
         supports_responses,
         supports_messages,
+        supported_protocols,
         selected_models,
+        draft_aliases,
         candidates,
         candidate_status,
         model_search,
@@ -271,7 +284,12 @@ async fn provider_search(
                             supports_chat.set(has_chat);
                             supports_responses.set(has_responses);
                             supports_messages.set(has_messages);
+                            supported_protocols.set("".to_owned());
+                            if has_chat { supported_protocols.push_str("openai_chat|"); }
+                            if has_responses { supported_protocols.push_str("openai_responses|"); }
+                            if has_messages { supported_protocols.push_str("anthropic_messages|"); }
                             selected_models.set("[]".to_owned());
+                            draft_aliases.set("[]".to_owned());
                             candidates.set("[]".to_owned());
                             candidate_status.set("".to_owned());
                             model_search.set("".to_owned());
@@ -307,6 +325,7 @@ async fn draft_model_row(
     index: usize,
     provider_name: &str,
     selected: Signal<String>,
+    draft_aliases: Signal<String>,
     supports_chat: bool,
     supports_responses: bool,
     supports_messages: bool,
@@ -314,7 +333,17 @@ async fn draft_model_row(
     default_responses: bool,
     default_messages: bool,
 ) -> Result<impl View> {
-    let alias = signal(cx, || format!("{provider_name}/{model_id}"));
+    let initial_alias =
+        serde_json::from_str::<Vec<(String, String)>>(&draft_aliases.get_untracked())
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|(id, _)| id == model_id)
+                    .map(|(_, alias)| alias)
+            })
+            .unwrap_or_else(|| format!("{provider_name}/{model_id}"));
+    let alias = signal(cx, || initial_alias);
     let chat = signal(cx, || default_chat);
     let responses = signal(cx, || default_responses);
     let messages = signal(cx, || default_messages);
@@ -323,7 +352,10 @@ async fn draft_model_row(
         <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_32px] items-start gap-3 py-3 max-[760px]:grid-cols-[minmax(0,1fr)_32px]">
             <input type="hidden" name="model_id" value=(model_id)>
             <div class="min-w-0 pt-2 text-sm break-all text-heading max-[760px]:col-span-1 max-[760px]:pt-0"><span class="hidden text-xs text-secondary max-[760px]:block">"模型 ID"</span>(model_id)</div>
-            <div class="min-w-0 max-[760px]:col-span-1 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{index}"))>"客户端别名"</label><input id=(format!("alias-{index}")) name=(format!("alias-{index}")) class="w-full" type="text" :value=$(alias.get()) maxlength="200" aria-label=(format!("{model_id} 的客户端别名")) @input=$(|event: Event| alias.set(event.target.value))></div>
+            <div class="min-w-0 max-[760px]:col-span-1 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{index}"))>"客户端别名"</label><input id=(format!("alias-{index}")) name=(format!("alias-{index}")) class="w-full" type="text" :value=$(alias.get()) maxlength="200" aria-label=(format!("{model_id} 的客户端别名")) @input=$(|event: Event| {
+                alias.set(event.target.value);
+                draft_aliases.set(raw!("(() => { const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); entries.set(${row_id}.dehydrate(), ${event}.target.value.dehydrate()); return cx.hydrate(JSON.stringify([...entries])); })()", "[]".to_owned()));
+            })></div>
             <div class="flex min-w-0 flex-wrap gap-x-3 gap-y-1 pt-2 text-xs text-heading max-[760px]:col-span-1 max-[760px]:row-start-3 max-[760px]:pt-0">
                 <span class="hidden w-full text-xs text-secondary max-[760px]:block">"支持协议"</span>
                 if supports_chat { <label class="inline-flex items-center gap-1"><input type="checkbox" name=(format!("chat-{index}")) :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label> }
@@ -332,6 +364,7 @@ async fn draft_model_row(
             </div>
             <button class="inline-flex size-8 shrink-0 items-center justify-center self-center rounded-full border border-control-border bg-white p-0 text-muted shadow-sm transition-colors duration-150 hover:border-[#ffccc7] hover:bg-[#fff2f0] hover:text-[#cf1322] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#91caff] max-[760px]:col-start-2 max-[760px]:row-start-1" type="button" aria-label=(format!("移除 {model_id}")) title="移除模型" @click=$(async |_event: Event| {
                 selected.set(remove_draft_model(selected.get(), row_id.to_owned()).await);
+                draft_aliases.set(raw!("(() => { const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); entries.delete(${row_id}.dehydrate()); return cx.hydrate(JSON.stringify([...entries])); })()", "[]".to_owned()));
             })>icon(data: CLOSE_OUTLINED, size: 14)</button>
         </div>
     })
@@ -345,15 +378,19 @@ pub async fn model_draft(
     candidates: Signal<String>,
     candidate_status: Signal<String>,
     selected: Signal<String>,
+    draft_aliases: Signal<String>,
+    existing_models_json: String,
     search: Signal<String>,
     menu_open: Signal<bool>,
     manual_model_id: Signal<String>,
     manual_open: Signal<bool>,
-    supports_chat: Signal<bool>,
-    supports_responses: Signal<bool>,
-    supports_messages: Signal<bool>,
+    supported_protocols: Signal<String>,
 ) -> Result<impl View> {
     let _ = cx;
+    let protocols = supported_protocols.get();
+    let supports_chat = protocols.contains("openai_chat");
+    let supports_responses = protocols.contains("openai_responses");
+    let supports_messages = protocols.contains("anthropic_messages");
     let available: Vec<String> = serde_json::from_str(&candidates.get()).unwrap_or_default();
     let discovered_count = available.len();
     let selected_ids: Vec<String> = serde_json::from_str(&selected.get()).unwrap_or_default();
@@ -362,6 +399,52 @@ pub async fn model_draft(
         .into_iter()
         .filter(|id| chosen.insert(id.clone()))
         .collect();
+    let existing_models: Vec<(String, String, String, String)> =
+        serde_json::from_str(&existing_models_json)?;
+    let aliases: Vec<(String, String)> = serde_json::from_str(&draft_aliases.get())?;
+    let duplicate_model_ids: Vec<_> = rows
+        .iter()
+        .filter(|model_id| {
+            existing_models
+                .iter()
+                .any(|(_, saved_provider, saved_model, _)| {
+                    saved_provider == &provider_id.get() && saved_model == *model_id
+                })
+        })
+        .map(|model_id| format!("「{model_id}」"))
+        .collect();
+    let initial_model_note = if duplicate_model_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "模型 ID {} 已在当前 Provider 中导入；使用其他客户端别名仍可继续。",
+            duplicate_model_ids.join("、")
+        )
+    };
+    let mut initial_alias_warning = String::new();
+    let mut seen_aliases = HashSet::new();
+    for model_id in &rows {
+        let alias = aliases
+            .iter()
+            .find(|(id, _)| id == model_id)
+            .map(|(_, alias)| alias.trim())
+            .filter(|alias| !alias.is_empty())
+            .map_or_else(
+                || format!("{}/{}", provider_name.get(), model_id),
+                str::to_owned,
+            );
+        if existing_models
+            .iter()
+            .any(|(_, _, _, saved)| saved == &alias)
+        {
+            initial_alias_warning = format!("客户端别名「{alias}」已存在，请修改后再导入");
+            break;
+        }
+        if !seen_aliases.insert(alias.clone()) {
+            initial_alias_warning = format!("本次导入的客户端别名「{alias}」重复");
+            break;
+        }
+    }
     let mut seen = HashSet::new();
     let mut options: Vec<SearchOption> = available
         .into_iter()
@@ -379,20 +462,16 @@ pub async fn model_draft(
             });
         }
     }
-    let only_one = [
-        supports_chat.get(),
-        supports_responses.get(),
-        supports_messages.get(),
-    ]
-    .into_iter()
-    .filter(|enabled| *enabled)
-    .count()
+    let only_one = [supports_chat, supports_responses, supports_messages]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
         == 1;
     let provider_key = provider_id.get();
     let provider_label = provider_name.get();
-    let has_chat = supports_chat.get();
-    let has_responses = supports_responses.get();
-    let has_messages = supports_messages.get();
+    let has_chat = supports_chat;
+    let has_responses = supports_responses;
+    let has_messages = supports_messages;
     Ok(view! {
             <div class="min-w-0">
                 <label class="mb-2 block text-sm font-semibold text-heading" for="model-select-input">"选择上游模型"<span class="ml-1 text-[#ff4d4f]">"*"</span></label>
@@ -436,6 +515,7 @@ pub async fn model_draft(
                                 index: index,
                                 provider_name: provider_label.as_str(),
                                 selected: selected.clone(),
+                                draft_aliases: draft_aliases.clone(),
                                 supports_chat: has_chat,
                                 supports_responses: has_responses,
                                 supports_messages: has_messages,
@@ -445,6 +525,8 @@ pub async fn model_draft(
                             )
                         }
                     </div>
+                    <p class="mt-2 mb-0 text-xs text-[#ad6800] empty:hidden" role="status">$({ let _selected = selected.get(); raw!("(() => { const saved = JSON.parse(${existing_models_json}.dehydrate()); const selected = JSON.parse(String(${selected}.get())); const provider = String(${provider_id}.get()); const duplicates = selected.filter((modelId) => saved.some((record) => record[1] === provider && record[2] === modelId)); return duplicates.length ? '模型 ID ' + duplicates.map((modelId) => '「' + modelId + '」').join('、') + ' 已在当前 Provider 中导入；使用其他客户端别名仍可继续。' : ''; })()", initial_model_note.clone()) })</p>
+                    <p class="mt-2 mb-0 text-xs text-[#cf1322] empty:hidden" role="alert">$({ let _selected = selected.get(); let _aliases = draft_aliases.get(); raw!("(() => { const saved = JSON.parse(${existing_models_json}.dehydrate()); const selected = JSON.parse(String(${selected}.get())); const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); const provider = String(${provider_name}.get()); const seen = new Set(); const modelIds = new Set(); for (const modelId of selected) { if (modelIds.has(modelId)) continue; modelIds.add(modelId); const current = String(entries.get(modelId) ?? '').trim() || provider + '/' + modelId; if (saved.some((record) => record[3] === current)) return '客户端别名「' + current + '」已存在，请修改后再导入'; if (seen.has(current)) return '本次导入的客户端别名「' + current + '」重复'; seen.add(current); } return ''; })()", initial_alias_warning.clone()) })</p>
                 </div>
             }
     })
@@ -455,6 +537,7 @@ pub(super) async fn model_editor(
     cx: &Cx,
     editor: &Editor,
     providers: &[ProviderView],
+    all_models: &[ModelMappingView],
     csrf: &str,
     success: &Signal<String>,
     refresh: &Signal<f64>,
@@ -477,8 +560,10 @@ pub(super) async fn model_editor(
         supports_chat,
         supports_responses,
         supports_messages,
+        supported_protocols,
         candidates,
         selected_models,
+        draft_aliases,
         model_search,
         model_menu_open,
         manual_model_id,
@@ -497,6 +582,19 @@ pub(super) async fn model_editor(
     let close = native_dialog_close_attributes(cx, "model-dialog");
     let unavailable: Outcome = Err("保存请求失败，请刷新后重试".into());
     let probe_unavailable: Outcome = Err("探测请求失败，请重试".into());
+    let existing_models_json = serde_json::to_string(
+        &all_models
+            .iter()
+            .map(|model| {
+                (
+                    model.id.to_string(),
+                    model.provider_id.to_string(),
+                    model.upstream_model_id.as_str(),
+                    model.alias.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )?;
     Ok(view! {
         native_dialog(config: NativeDialogConfig::new("model-dialog", "模型配置"),
             open: Some(open), busy: busy, language: UiLanguage::ChineseSimplified,
@@ -529,7 +627,7 @@ pub(super) async fn model_editor(
                             provider_search(providers: providers, editor: editor)
                         </div>
                         <div class="contents" :hidden=$(!id.get().is_empty())>
-                            model_draft(provider_id: provider_id.clone(), provider_name: provider_name.clone(), candidates: candidates.clone(), candidate_status: candidate_status.clone(), selected: selected_models.clone(), search: model_search.clone(), menu_open: model_menu_open.clone(), manual_model_id: manual_model_id.clone(), manual_open: manual_open.clone(), supports_chat: supports_chat.clone(), supports_responses: supports_responses.clone(), supports_messages: supports_messages.clone())
+                            model_draft(provider_id: provider_id.clone(), provider_name: provider_name.clone(), candidates: candidates.clone(), candidate_status: candidate_status.clone(), selected: selected_models.clone(), draft_aliases: draft_aliases.clone(), existing_models_json: existing_models_json.clone(), search: model_search.clone(), menu_open: model_menu_open.clone(), manual_model_id: manual_model_id.clone(), manual_open: manual_open.clone(), supported_protocols: supported_protocols.clone())
                         </div>
                     </div>
                     <div :hidden=$(id.get().is_empty())>
@@ -550,6 +648,7 @@ pub(super) async fn model_editor(
                         <div class="mt-6">form_field(config: FormFieldConfig::new("model-alias", "客户端别名"),
                             <input id="model-alias" :value=$(alias.get()) @input=$(|event: Event| { alias.set(event.target.value); alias_edited.set(true); }) placeholder="Provider名称/模型ID" maxlength="200">
                         )</div>
+                        <p class="mt-2 mb-0 text-xs text-[#cf1322] empty:hidden" role="alert">$({ let _alias = alias.get(); let _model_id = model_id.get(); raw!("(() => { const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); if (!current) return ''; const ownId = String(${id}.get()); return JSON.parse(${existing_models_json}.dehydrate()).some((record) => record[0] !== ownId && record[3] === current) ? '客户端别名「' + current + '」已存在，请修改后再保存' : ''; })()", String::new()) })</p>
                         <h3 class="mt-6 mb-3 text-sm font-semibold">"选择可用协议（至少一个）"</h3>
                         <div class="flex flex-wrap gap-4 text-sm text-heading">
                             <label class="flex items-center gap-2" :hidden=$(!supports_chat.get())><input type="checkbox" :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label>
@@ -589,7 +688,7 @@ pub(super) async fn model_editor(
                         </div>
                     </div>
                 </div>
-                <footer class="flex justify-end gap-3 border-t border-border bg-[#fafafa] px-6 py-4"><button class=(BUTTON) type="button" (close) :disabled=$(busy.get())>"取消"</button><button class=(class!(BUTTON, PRIMARY)) type="submit" :disabled=$(busy.get())>$(if id.get().is_empty() { "导入模型" } else { "保存模型" })</button></footer>
+                <footer class="flex justify-end gap-3 border-t border-border bg-[#fafafa] px-6 py-4"><button class=(BUTTON) type="button" (close) :disabled=$(busy.get())>"取消"</button><button class=(class!(BUTTON, PRIMARY, "disabled:cursor-not-allowed!")) type="submit" :disabled=$(if busy.get() { true } else { raw!("(() => { const saved = JSON.parse(${existing_models_json}.dehydrate()); const ownId = String(${id}.get()); const provider = String(${provider_name}.get()); if (ownId) { const current = String(${alias}.get()).trim() || provider + '/' + String(${model_id}.get()); return saved.some((record) => record[0] !== ownId && record[3] === current); } const selected = JSON.parse(String(${selected_models}.get())); const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); const seen = new Set(); const modelIds = new Set(); for (const modelId of selected) { if (modelIds.has(modelId)) continue; modelIds.add(modelId); const current = String(entries.get(modelId) ?? '').trim() || provider + '/' + modelId; if (saved.some((record) => record[3] === current) || seen.has(current)) return true; seen.add(current); } return false; })()", false) })>$(if id.get().is_empty() { "导入模型" } else { "保存模型" })</button></footer>
             </form>
         )
     })

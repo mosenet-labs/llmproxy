@@ -164,7 +164,7 @@ pub async fn model_workspace(
         refresh.increment();
     }) };
     Ok(view! {
-        model_editor(editor: &editor, providers: &providers, csrf: csrf.as_str(), success: &success, refresh: &refresh)
+        model_editor(editor: &editor, providers: &providers, all_models: &all, csrf: csrf.as_str(), success: &success, refresh: &refresh)
         <section class="mb-6 flex min-h-20 items-center justify-between gap-6 max-[640px]:flex-col max-[640px]:items-start max-[640px]:gap-4">
             <div><h1 class="m-0 text-[28px] font-semibold leading-[1.35] text-heading max-[640px]:text-2xl">"Models"</h1><p class="mt-2 mb-0 text-sm text-secondary">"选择上游模型，设置客户端别名与可用协议。"</p></div>
             <button class=(class!(BUTTON, PRIMARY)) type="button" (create) :disabled=(providers.is_empty())>"＋ 新建模型"</button>
