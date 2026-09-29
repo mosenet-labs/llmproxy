@@ -1,3 +1,4 @@
+// 仅在选择上游前扫描正文前缀中的顶层 model；完整 JSON 由 parse 模块解析。
 use std::ops::Range;
 
 use bytes::Bytes;

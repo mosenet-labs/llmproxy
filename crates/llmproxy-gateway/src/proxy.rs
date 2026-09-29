@@ -1,5 +1,4 @@
 use std::{
-    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -20,9 +19,9 @@ use pingora::{
 use pingora_http::{RequestHeader, ResponseHeader};
 
 use crate::{
-    model_body::{MODEL_PREFIX_LIMIT, Scan, rewrite_model, scan_model},
     observability::{GatewayTelemetry, RequestTelemetry},
     snapshot::{ProviderSnapshots, ResolvedProvider},
+    transform::{BodyTransform, ModelRead, RequestBody, response_kind},
 };
 
 const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -42,22 +41,10 @@ pub struct RequestContext {
     protocol: Option<Protocol>,
     provider: Option<Arc<ResolvedProvider>>,
     console: bool,
-    replay_prefix: Option<Bytes>,
-    original_prefix_len: usize,
-    body_delta: isize,
     gemini_model_id: Option<String>,
     gemini_stream: bool,
-}
-
-struct ModelPrefix {
-    prefix: Vec<u8>,
-    alias: String,
-    range: Range<usize>,
-}
-
-enum ModelRead {
-    Found(ModelPrefix),
-    Rejected(u16),
+    request_body: RequestBody,
+    response_body: BodyTransform,
 }
 
 impl Gateway {
@@ -80,36 +67,6 @@ impl Gateway {
     }
 }
 
-async fn read_model(session: &mut Session) -> Result<ModelRead> {
-    // Pingora selects the peer before request_body_filter. Read only through
-    // the model field and let its retry buffer replay that prefix.
-    session.enable_retry_buffering();
-    let mut prefix = Vec::new();
-    let (alias, range) = loop {
-        let Some(chunk) = session.read_request_body().await? else {
-            return Ok(ModelRead::Rejected(400));
-        };
-        prefix.extend_from_slice(&chunk);
-        if prefix.len() > MODEL_PREFIX_LIMIT || session.retry_buffer_truncated() {
-            return Ok(ModelRead::Rejected(413));
-        }
-        match scan_model(&prefix) {
-            Scan::Found { alias, range } => break (alias, range),
-            Scan::More if prefix.len() < MODEL_PREFIX_LIMIT => {}
-            Scan::More => return Ok(ModelRead::Rejected(413)),
-            Scan::Invalid | Scan::Missing => return Ok(ModelRead::Rejected(400)),
-        }
-    };
-    if alias.is_empty() || session.get_retry_buffer().is_none() {
-        return Ok(ModelRead::Rejected(400));
-    }
-    Ok(ModelRead::Found(ModelPrefix {
-        prefix,
-        alias,
-        range,
-    }))
-}
-
 #[async_trait]
 impl ProxyHttp for Gateway {
     type CTX = RequestContext;
@@ -120,15 +77,15 @@ impl ProxyHttp for Gateway {
             protocol: None,
             provider: None,
             console: false,
-            replay_prefix: None,
-            original_prefix_len: 0,
-            body_delta: 0,
             gemini_model_id: None,
             gemini_stream: false,
+            request_body: RequestBody::new(),
+            response_body: BodyTransform::default(),
         }
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        // WEB控制台
         if crate::console::matches(session.req_header().uri.path()) {
             ctx.console = true;
             crate::console::serve(&self.console, session).await?;
@@ -169,12 +126,9 @@ impl ProxyHttp for Gateway {
                     session.respond_error(415).await?;
                     return Ok(true);
                 }
-                let ModelPrefix {
-                    prefix,
-                    alias,
-                    range,
-                } = match read_model(session).await? {
-                    ModelRead::Found(model) => model,
+                // 持续读取从session中读取request body数据直到读取model为止
+                let alias = match ctx.request_body.read_model(session).await? {
+                    ModelRead::Found(alias) => alias,
                     ModelRead::Rejected(status) => {
                         session.set_keepalive(None);
                         session.respond_error(status).await?;
@@ -191,13 +145,11 @@ impl ProxyHttp for Gateway {
                         return Ok(true);
                     }
                 };
-                let (rewritten, delta) = rewrite_model(&prefix, range, &upstream_model_id)
+                ctx.request_body
+                    .select_model(&upstream_model_id)
                     .map_err(|_| {
                         Error::explain(ErrorType::InternalError, "cannot encode upstream model")
                     })?;
-                ctx.body_delta = delta;
-                ctx.original_prefix_len = prefix.len();
-                ctx.replay_prefix = Some(rewritten);
                 // Pin one immutable provider for the full request, including SSE.
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
                 ctx.provider = Some(provider);
@@ -350,12 +302,14 @@ impl ProxyHttp for Gateway {
                 .ok_or_else(|| {
                     Error::explain(ErrorType::InvalidHTTPHeader, "invalid content length")
                 })?;
-            let adjusted = length.checked_add_signed(ctx.body_delta).ok_or_else(|| {
-                Error::explain(
-                    ErrorType::InvalidHTTPHeader,
-                    "invalid rewritten content length",
-                )
-            })?;
+            let adjusted = length
+                .checked_add_signed(ctx.request_body.body_delta())
+                .ok_or_else(|| {
+                    Error::explain(
+                        ErrorType::InvalidHTTPHeader,
+                        "invalid rewritten content length",
+                    )
+                })?;
             request.insert_header("content-length", adjusted.to_string())?;
         }
         request.remove_header("content-md5");
@@ -386,19 +340,10 @@ impl ProxyHttp for Gateway {
         &self,
         _session: &mut Session,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if let Some(rewritten) = ctx.replay_prefix.take() {
-            if body.as_ref().map(Bytes::len) != Some(ctx.original_prefix_len) {
-                return Err(Error::explain(
-                    ErrorType::InternalError,
-                    "request body replay prefix mismatch",
-                ));
-            }
-            *body = Some(rewritten);
-        }
-        Ok(())
+        ctx.request_body.push(body, end_of_stream)
     }
 
     async fn upstream_response_filter(
@@ -408,6 +353,17 @@ impl ProxyHttp for Gateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         ctx.telemetry.response_headers(response.status.as_u16());
+        // 在正文回调开始前，根据上游响应头选择分帧方式。
+        ctx.response_body.replace_kind(response_kind(
+            response
+                .headers
+                .get("content-type")
+                .map(|value| value.as_bytes()),
+            response
+                .headers
+                .get("content-encoding")
+                .map(|value| value.as_bytes()),
+        ));
         // This is a copy of the upstream header, before downstream framing is
         // selected. The upstream reader keeps its original framing information.
         let mut nominated = Vec::new();
@@ -457,6 +413,17 @@ impl ProxyHttp for Gateway {
             response.remove_header(name);
         }
         Ok(())
+    }
+
+    fn upstream_response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        ctx.response_body.push(body, end_of_stream);
+        Ok(None)
     }
 
     fn fail_to_connect(
