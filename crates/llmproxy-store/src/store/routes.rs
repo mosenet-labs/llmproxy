@@ -183,6 +183,7 @@ pub(super) fn protocol_from_str(value: &str) -> StoreResult<Protocol> {
         "openai_chat" => Ok(Protocol::OpenAiChat),
         "openai_responses" => Ok(Protocol::OpenAiResponses),
         "anthropic_messages" => Ok(Protocol::AnthropicMessages),
+        "gemini" => Ok(Protocol::Gemini),
         _ => Err(StoreError::Internal),
     }
 }

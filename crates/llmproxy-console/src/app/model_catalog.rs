@@ -18,7 +18,14 @@ pub(crate) async fn query_models(
     let openrouter = target.host.eq_ignore_ascii_case("openrouter.ai")
         || target.host.to_ascii_lowercase().ends_with(".openrouter.ai");
     let scheme = if target.tls { "https" } else { "http" };
-    let url = format!("{scheme}://{}:{}{}", target.host, target.port, target.path);
+    let mut url = reqwest::Url::parse(&format!(
+        "{scheme}://{}:{}{}",
+        target.host, target.port, target.path
+    ))
+    .map_err(|_| "无效的模型列表地址".to_owned())?;
+    if target.protocol == Protocol::Gemini {
+        url.query_pairs_mut().append_pair("pageSize", "1000");
+    }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -41,6 +48,7 @@ pub(crate) async fn query_models(
                     .unwrap_or(DEFAULT_ANTHROPIC_VERSION),
             )
         }
+        Protocol::Gemini => request.header("x-goog-api-key", &target.secret),
     };
     let mut response = request
         .send()
@@ -62,15 +70,46 @@ pub(crate) async fn query_models(
     }
     let value: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| "上游没有返回有效 JSON".to_owned())?;
+    let field = if target.protocol == Protocol::Gemini {
+        "models"
+    } else {
+        "data"
+    };
     let data = value
-        .get("data")
+        .get(field)
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "上游响应缺少 data 模型列表".to_owned())?;
+        .ok_or_else(|| format!("上游响应缺少 {field} 模型列表"))?;
     Ok(data
         .iter()
-        .filter_map(|model| parse_candidate(model, openrouter))
+        .filter_map(|model| {
+            if target.protocol == Protocol::Gemini {
+                parse_gemini_candidate(model)
+            } else {
+                parse_candidate(model, openrouter)
+            }
+        })
         .take(5000)
         .collect())
+}
+
+fn parse_gemini_candidate(model: &serde_json::Value) -> Option<ModelCandidate> {
+    let id = model.get("name")?.as_str()?.strip_prefix("models/")?;
+    if id.is_empty() || id.len() > 200 || id.contains('/') {
+        return None;
+    }
+    if !model
+        .get("supportedGenerationMethods")?
+        .as_array()?
+        .iter()
+        .any(|method| method == "generateContent")
+    {
+        return None;
+    }
+    Some(ModelCandidate {
+        id: id.to_owned(),
+        input_price_per_million: None,
+        output_price_per_million: None,
+    })
 }
 
 fn parse_candidate(model: &serde_json::Value, openrouter: bool) -> Option<ModelCandidate> {
@@ -109,7 +148,7 @@ fn per_million(value: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_candidate, per_million};
+    use super::{parse_candidate, parse_gemini_candidate, per_million};
     use serde_json::json;
 
     #[test]
@@ -143,5 +182,13 @@ mod tests {
                 .input_price_per_million
                 .is_none()
         );
+    }
+
+    #[test]
+    fn parses_gemini_generation_models() {
+        let model =
+            json!({"name":"models/gemini-test","supportedGenerationMethods":["generateContent"]});
+        assert_eq!(parse_gemini_candidate(&model).unwrap().id, "gemini-test");
+        assert!(parse_gemini_candidate(&json!({"name":"models/embedding-test","supportedGenerationMethods":["embedContent"]})).is_none());
     }
 }

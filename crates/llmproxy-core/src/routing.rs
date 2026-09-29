@@ -1,16 +1,38 @@
+use percent_encoding::percent_decode_str;
 use serde_json::Value;
 
 use crate::protocol::Protocol;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Route {
     Proxy(Protocol),
+    Gemini { alias: String, stream: bool },
     Auto,
     MethodNotAllowed,
     NotFound,
 }
 
 pub fn match_route(method: &str, path: &str) -> Route {
+    if let Some(model_path) = path.strip_prefix("/v1beta/models/") {
+        for (suffix, stream) in [
+            (":generateContent", false),
+            (":streamGenerateContent", true),
+        ] {
+            if let Some(encoded_alias) = model_path.strip_suffix(suffix)
+                && !encoded_alias.is_empty()
+                && let Ok(alias) = percent_decode_str(encoded_alias).decode_utf8()
+            {
+                return if method == "POST" {
+                    Route::Gemini {
+                        alias: alias.into_owned(),
+                        stream,
+                    }
+                } else {
+                    Route::MethodNotAllowed
+                };
+            }
+        }
+    }
     let route = match path {
         "/v1/chat/completions" => Route::Proxy(Protocol::OpenAiChat),
         "/v1/responses" => Route::Proxy(Protocol::OpenAiResponses),
@@ -66,6 +88,23 @@ mod tests {
             Route::Proxy(Protocol::OpenAiChat)
         );
         assert_eq!(match_route("POST", "/v1/auto"), Route::Auto);
+        assert_eq!(
+            match_route(
+                "POST",
+                "/v1beta/models/public%2Fgemini:streamGenerateContent"
+            ),
+            Route::Gemini {
+                alias: "public/gemini".into(),
+                stream: true
+            }
+        );
+        assert_eq!(
+            match_route("POST", "/v1beta/models/public/gemini:generateContent"),
+            Route::Gemini {
+                alias: "public/gemini".into(),
+                stream: false
+            }
+        );
         assert_eq!(match_route("GET", "/v1/messages"), Route::MethodNotAllowed);
         assert_eq!(match_route("POST", "/v1/unknown"), Route::NotFound);
     }

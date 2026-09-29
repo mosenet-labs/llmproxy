@@ -10,6 +10,7 @@ use llmproxy_core::{
     protocol::{MessagesAuth, Protocol},
     routing::{Route, match_route},
 };
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use pingora::{
     Error, ErrorSource, ErrorType, Result,
     protocols::Digest,
@@ -23,6 +24,12 @@ use crate::{
     observability::{GatewayTelemetry, RequestTelemetry},
     snapshot::{ProviderSnapshots, ResolvedProvider},
 };
+
+const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 pub struct Gateway {
     providers: ProviderSnapshots,
@@ -38,6 +45,8 @@ pub struct RequestContext {
     replay_prefix: Option<Bytes>,
     original_prefix_len: usize,
     body_delta: isize,
+    gemini_model_id: Option<String>,
+    gemini_stream: bool,
 }
 
 struct ModelPrefix {
@@ -114,6 +123,8 @@ impl ProxyHttp for Gateway {
             replay_prefix: None,
             original_prefix_len: 0,
             body_delta: 0,
+            gemini_model_id: None,
+            gemini_stream: false,
         }
     }
 
@@ -130,6 +141,24 @@ impl ProxyHttp for Gateway {
         ctx.telemetry.begin(method, path);
 
         match route {
+            Route::Gemini { alias, stream } => {
+                let protocol = Protocol::Gemini;
+                ctx.protocol = Some(protocol);
+                let (provider, upstream_model_id) = match self.resolve_model_route(protocol, &alias)
+                {
+                    Ok(route) => route,
+                    Err(status) => {
+                        ctx.telemetry.selected(protocol, None);
+                        session.respond_error(status).await?;
+                        return Ok(true);
+                    }
+                };
+                ctx.telemetry.selected(protocol, Some(provider.authority()));
+                ctx.provider = Some(provider);
+                ctx.gemini_model_id = Some(upstream_model_id);
+                ctx.gemini_stream = stream;
+                Ok(false)
+            }
             Route::Proxy(protocol) => {
                 ctx.protocol = Some(protocol);
                 let content_encoding = session.get_header_bytes("content-encoding");
@@ -273,9 +302,36 @@ impl ProxyHttp for Gateway {
             .provider
             .as_ref()
             .expect("request_filter selected provider");
-        let path = match request.uri.query() {
-            Some(query) => format!("{}?{query}", provider.upstream_path),
-            None => provider.upstream_path.clone(),
+        let base_path = if protocol == Protocol::Gemini {
+            let model = ctx
+                .gemini_model_id
+                .as_deref()
+                .expect("Gemini route selected model");
+            let model = model.strip_prefix("models/").unwrap_or(model);
+            let encoded = utf8_percent_encode(model, MODEL_SEGMENT);
+            let method = if ctx.gemini_stream {
+                "streamGenerateContent"
+            } else {
+                "generateContent"
+            };
+            format!(
+                "{}/{}:{method}",
+                provider.upstream_path.trim_end_matches('/'),
+                encoded
+            )
+        } else {
+            provider.upstream_path.clone()
+        };
+        let query = request.uri.query().unwrap_or_default();
+        let path = if ctx.gemini_stream && !query.split('&').any(|part| part == "alt=sse") {
+            format!(
+                "{base_path}?{query}{}alt=sse",
+                if query.is_empty() { "" } else { "&" }
+            )
+        } else if query.is_empty() {
+            base_path
+        } else {
+            format!("{base_path}?{query}")
         };
         request.set_uri(
             path.parse().map_err(|_| {
@@ -284,6 +340,7 @@ impl ProxyHttp for Gateway {
         );
         request.remove_header("authorization");
         request.remove_header("x-api-key");
+        request.remove_header("x-goog-api-key");
         request.insert_header("host", provider.authority())?;
         if let Some(length) = request.headers.get("content-length") {
             let length = length
@@ -317,6 +374,9 @@ impl ProxyHttp for Gateway {
             }
             Protocol::OpenAiChat | Protocol::OpenAiResponses => {
                 request.insert_header("authorization", format!("Bearer {}", provider.secret))?;
+            }
+            Protocol::Gemini => {
+                request.insert_header("x-goog-api-key", provider.secret.as_str())?;
             }
         }
         Ok(())

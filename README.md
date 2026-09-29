@@ -1,6 +1,6 @@
 # llmproxy
 
-基于 Pingora 的 LLM Provider 代理。一个进程在同一端口提供三个原生协议入口，以及 Topcoat 构建的 Providers、Models、Model Routes 控制台。网关按模型标识或显式路由名称选择上游模型与 Provider，支持 HTTP/SSE 转发。`/v1/auto` 的协议自动识别仍待实现。
+基于 Pingora 的 LLM Provider 代理。一个进程在同一端口提供四种原生协议入口，以及 Topcoat 构建的 Providers、Models、Model Routes 控制台。网关按模型标识或显式路由名称选择上游模型与 Provider，支持 HTTP/SSE 转发。`/v1/auto` 的协议自动识别仍待实现。
 
 ## 快速开始
 
@@ -10,7 +10,9 @@
 bash scripts/dev.sh up
 ```
 
-默认监听 `127.0.0.1:3200`。打开 `http://127.0.0.1:3200/ui/providers` 新增并启用 Provider，配置其支持的协议、上游路径和模型探测接口（默认 `/models`）；然后到 `/ui/models` 添加具体模型并设置至少一个协议。模型标识可直接用于客户端请求。到 `/ui/routes` 可创建新的对外模型名，添加不同 Provider 的候选模型并调整顺序。客户端在对应协议请求体的顶层 `model` 字段填写模型标识或路由名称，网关将其改写成所选上游模型 ID。控制台保存后，新请求约一秒内使用新配置；没有模型和路由时服务可启动，但代理请求不会自动选择 Provider。
+默认监听 `127.0.0.1:3200`。打开 `http://127.0.0.1:3200/ui/providers` 新增并启用 Provider，配置其支持的协议、上游路径和模型探测接口（默认 `/models`）；然后到 `/ui/models` 添加具体模型并设置至少一个协议。模型标识可直接用于客户端请求。到 `/ui/routes` 可创建新的对外模型名，添加不同 Provider 的候选模型并调整顺序。OpenAI 和 Anthropic 请求在请求体顶层 `model` 字段填写模型标识或路由名称，网关将其改写成所选上游模型 ID；Gemini 请求在路径中填写。控制台保存后，新请求约一秒内使用新配置；没有模型和路由时服务可启动，但代理请求不会自动选择 Provider。
+
+Gemini 原生接入：在 Providers 中选择 Gemini，上游地址填写 `https://generativelanguage.googleapis.com`，Gemini 上游模型路径前缀填写 `/v1beta/models`，模型列表路径填写 `/v1beta/models`，API Key 使用 Google AI Studio 的 Gemini API Key。保存后在 Models 中关联 Gemini 模型。客户端路径中的 `{model}` 使用模型标识或 Model Route 名称；请求体和响应保持 Gemini 原生格式。
 
 缺省使用 `./data/llmproxy.sqlite3`，首次启动生成相邻的 `.key` 文件；备份时须保存这两个文件。已有 `.env` 若设置 `LLMPROXY_DATABASE_URL`，将优先使用该地址。SQLite 和 PostgreSQL 均在启动时检查并执行待应用的迁移；使用 PostgreSQL 时还须设置固定的 `LLMPROXY_MASTER_KEY`。运行方式和遥测配置见[本地运行](docs/03-development.md)。
 
@@ -19,6 +21,8 @@ bash scripts/dev.sh up
 | `POST /v1/chat/completions` | OpenAI Chat 透传 |
 | `POST /v1/responses` | OpenAI Responses 透传 |
 | `POST /v1/messages` | Anthropic Messages 透传 |
+| `POST /v1beta/models/{model}:generateContent` | Gemini 原生普通响应透传 |
+| `POST /v1beta/models/{model}:streamGenerateContent` | Gemini 原生 SSE 透传 |
 | `POST /v1/auto` | 待实现，目前返回 `501` |
 | `/ui/providers`、`/ui/models`、`/ui/routes` | Provider、具体模型与 Model Routes 管理；`/ui` 跳转至 Providers |
 

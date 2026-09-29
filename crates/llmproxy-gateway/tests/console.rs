@@ -877,6 +877,7 @@ async fn exercise_http(database_url: &str) {
         true,
         true,
         false,
+        false,
         "0.15",
         "0.60"
     ]);

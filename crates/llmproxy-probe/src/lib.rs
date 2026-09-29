@@ -111,6 +111,8 @@ async fn run_probe(
         ThinkingControl::VendorLow
     } else if target.protocol == Protocol::OpenAiResponses {
         ThinkingControl::StandardDisabled
+    } else if target.protocol == Protocol::Gemini {
+        ThinkingControl::StandardLow
     } else {
         ThinkingControl::VendorDisabled
     };
@@ -261,6 +263,9 @@ async fn run_probe(
                         && value["incomplete_details"]["reason"] == "max_output_tokens"))
         }
         Protocol::AnthropicMessages => value["type"] == "message" && value["content"].is_array(),
+        Protocol::Gemini => value["candidates"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
     };
     if !valid {
         return result(
@@ -277,6 +282,11 @@ async fn run_probe(
         Protocol::OpenAiResponses | Protocol::AnthropicMessages => {
             token_usage(&value["usage"], "input_tokens", "output_tokens")
         }
+        Protocol::Gemini => token_usage(
+            &value["usageMetadata"],
+            "promptTokenCount",
+            "candidatesTokenCount",
+        ),
     };
     if thinking.mode() == ThinkingMode::DisabledRequested
         && response_contains_reasoning(target.protocol, &value)
@@ -327,6 +337,10 @@ async fn send_once(
             "max_tokens": max_output_tokens,
             "stream": false,
         }),
+        Protocol::Gemini => json!({
+            "contents": [{"role": "user", "parts": [{"text": "你好"}]}],
+            "generationConfig": {"maxOutputTokens": max_output_tokens},
+        }),
     };
     if target.protocol == Protocol::OpenAiChat {
         body[chat_limit_field] = json!(max_output_tokens);
@@ -360,9 +374,19 @@ async fn send_once(
         | (Protocol::OpenAiResponses, ThinkingControl::VendorLow)
         | (Protocol::AnthropicMessages, ThinkingControl::StandardDisabled)
         | (Protocol::AnthropicMessages, ThinkingControl::StandardLow) => unreachable!(),
+        (Protocol::Gemini, ThinkingControl::StandardLow) => {}
+        (Protocol::Gemini, _) => unreachable!(),
+    }
+    let mut url = target.url.clone();
+    if target.protocol == Protocol::Gemini {
+        let model = model_id.strip_prefix("models/").unwrap_or(model_id);
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| (Reason::InvalidRequest, None))?;
+        segments.push(&format!("{model}:generateContent"));
     }
     let request = client
-        .post(target.url.clone())
+        .post(url)
         .timeout(timeout)
         .header("accept", "application/json")
         .json(&body);
@@ -378,6 +402,7 @@ async fn send_once(
                 target.anthropic_version.as_deref().unwrap_or("2023-06-01"),
             )
         }
+        Protocol::Gemini => request.header("x-goog-api-key", &target.secret),
     };
     let mut response = match request.send().await {
         Ok(response) => response,
@@ -455,6 +480,7 @@ fn response_contains_reasoning(protocol: Protocol, value: &Value) -> bool {
         Protocol::OpenAiChat => &value["usage"]["completion_tokens_details"],
         Protocol::OpenAiResponses => &value["usage"]["output_tokens_details"],
         Protocol::AnthropicMessages => &value["usage"],
+        Protocol::Gemini => &value["usageMetadata"],
     };
     if details["reasoning_tokens"]
         .as_u64()
@@ -476,6 +502,7 @@ fn response_contains_reasoning(protocol: Protocol, value: &Value) -> bool {
         Protocol::AnthropicMessages => value["content"]
             .as_array()
             .is_some_and(|content| content.iter().any(|item| item["type"] == "thinking")),
+        Protocol::Gemini => false,
     }
 }
 
@@ -646,6 +673,7 @@ mod tests {
                     assert_eq!(payload["messages"][0]["content"], "你好");
                     assert_eq!(payload["thinking"]["type"], "disabled");
                 }
+                Protocol::Gemini => unreachable!(),
             }
             if protocol == Protocol::AnthropicMessages {
                 assert!(
@@ -655,6 +683,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn probes_gemini_native_model_path_and_response() {
+        let (result, request) = fake_upstream(
+            Protocol::Gemini,
+            200,
+            r#"{"candidates":[{"content":{"parts":[{"text":"你好"}]}}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":1}}"#,
+        ).await;
+        assert_eq!(result.verdict, Verdict::Available);
+        assert_eq!(
+            result.usage,
+            Some(TokenUsage {
+                input: 8,
+                output: 1
+            })
+        );
+        assert!(request.contains("POST /infer/test-model:generateContent HTTP/1.1"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-goog-api-key: test-secret")
+        );
+        let payload: Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(payload["contents"][0]["parts"][0]["text"], "你好");
+        assert_eq!(payload["generationConfig"]["maxOutputTokens"], 1);
     }
 
     #[tokio::test]

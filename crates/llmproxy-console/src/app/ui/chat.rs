@@ -23,6 +23,7 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::OpenAiChat => "Chat",
         Protocol::OpenAiResponses => "Responses",
         Protocol::AnthropicMessages => "Messages",
+        Protocol::Gemini => "Gemini",
     }
 }
 
@@ -31,6 +32,7 @@ fn selected_protocol(protocol: &str) -> std::result::Result<Protocol, String> {
         "openai_chat" => Protocol::OpenAiChat,
         "openai_responses" => Protocol::OpenAiResponses,
         "anthropic_messages" => Protocol::AnthropicMessages,
+        "gemini" => Protocol::Gemini,
         _ => return Err("请选择有效的协议".to_owned()),
     })
 }
@@ -355,7 +357,7 @@ pub async fn chat_session_list(
                     draft.set("".to_owned());
                 })>
                     <span class="w-full truncate text-[12px] font-medium leading-5">(title)</span>
-                    <span class="mt-0.5 w-full truncate text-[11px] text-[#8a94a3]">(format!("{} · {}", alias, match kind.as_str() { "openai_chat" => "Chat", "openai_responses" => "Responses", "anthropic_messages" => "Messages", _ => "" }))</span>
+                    <span class="mt-0.5 w-full truncate text-[11px] text-[#8a94a3]">(format!("{} · {}", alias, match kind.as_str() { "openai_chat" => "Chat", "openai_responses" => "Responses", "anthropic_messages" => "Messages", "gemini" => "Gemini", _ => "" }))</span>
                 </button>
             }
         </nav>

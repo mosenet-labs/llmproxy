@@ -50,10 +50,11 @@ const FIELD_HINT: &str = "mt-2 mb-0 text-[13px] leading-relaxed text-secondary";
 const CHECKBOX: &str = "group inline-flex cursor-pointer items-center gap-2 whitespace-nowrap border-0 bg-transparent p-0 text-sm text-heading";
 const CHECKBOX_MARK: &str = "grid size-4 shrink-0 place-items-center rounded-[3px] border border-control-border bg-white text-[11px] leading-none text-white group-aria-[checked=true]:border-primary group-aria-[checked=true]:bg-primary";
 
-pub(super) const PROTOCOLS: [Protocol; 3] = [
+pub(super) const PROTOCOLS: [Protocol; 4] = [
     Protocol::OpenAiChat,
     Protocol::OpenAiResponses,
     Protocol::AnthropicMessages,
+    Protocol::Gemini,
 ];
 
 pub(super) fn protocol_label(protocol: Protocol) -> &'static str {
@@ -61,6 +62,7 @@ pub(super) fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::OpenAiChat => "OpenAI Chat",
         Protocol::OpenAiResponses => "OpenAI Responses",
         Protocol::AnthropicMessages => "Anthropic Messages",
+        Protocol::Gemini => "Gemini",
     }
 }
 
@@ -69,6 +71,7 @@ fn protocol_compact_label(protocol: Protocol) -> &'static str {
         Protocol::OpenAiChat => "Chat",
         Protocol::OpenAiResponses => "Resp",
         Protocol::AnthropicMessages => "Msg",
+        Protocol::Gemini => "Gemini",
     }
 }
 
@@ -363,6 +366,10 @@ pub struct ProviderForm {
     anthropic_messages: bool,
     #[serde(default)]
     anthropic_messages_path: String,
+    #[serde(default)]
+    gemini: bool,
+    #[serde(default)]
+    gemini_path: String,
     upstream_url: String,
     #[serde(default)]
     enabled: bool,
@@ -402,6 +409,8 @@ impl Default for ProviderForm {
             openai_responses_path: Protocol::OpenAiResponses.upstream_path().to_owned(),
             anthropic_messages: false,
             anthropic_messages_path: Protocol::AnthropicMessages.upstream_path().to_owned(),
+            gemini: false,
+            gemini_path: Protocol::Gemini.upstream_path().to_owned(),
             upstream_url: String::new(),
             enabled: true,
             api_key: String::new(),
@@ -441,6 +450,11 @@ impl From<ProviderView> for ProviderForm {
                 .paths
                 .anthropic_messages
                 .unwrap_or_else(|| Protocol::AnthropicMessages.upstream_path().to_owned()),
+            gemini: provider.paths.gemini.is_some(),
+            gemini_path: provider
+                .paths
+                .gemini
+                .unwrap_or_else(|| Protocol::Gemini.upstream_path().to_owned()),
             enabled: provider.enabled,
             api_key: String::new(),
             models_path: provider.models_path,
@@ -468,6 +482,7 @@ impl ProviderForm {
             Protocol::OpenAiChat => self.openai_chat,
             Protocol::OpenAiResponses => self.openai_responses,
             Protocol::AnthropicMessages => self.anthropic_messages,
+            Protocol::Gemini => self.gemini,
         };
         if !selected {
             return Err("模型探测协议必须是已选择的接口协议".to_owned());
@@ -515,6 +530,7 @@ impl ProviderForm {
                 anthropic_messages: self
                     .anthropic_messages
                     .then(|| self.anthropic_messages_path.clone()),
+                gemini: self.gemini.then(|| self.gemini_path.clone()),
             },
             host,
             port,

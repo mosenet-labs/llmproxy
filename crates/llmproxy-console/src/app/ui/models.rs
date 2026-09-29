@@ -59,6 +59,7 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::OpenAiChat => "Chat",
         Protocol::OpenAiResponses => "Responses",
         Protocol::AnthropicMessages => "Messages",
+        Protocol::Gemini => "Gemini",
     }
 }
 
@@ -194,7 +195,7 @@ pub async fn model_workspace(
                 refresh.increment();
             })>
                 <input class="h-9 w-[300px] max-w-full rounded-md border border-control-border px-3 text-sm focus:border-primary max-[640px]:w-full" type="search" name="q" aria-label="搜索模型" placeholder="搜索标识、上游模型或 Provider" :value=$(draft_query.get()) @input=$(|event: Event| draft_query.set(event.target.value))>
-                <select name="protocol" aria-label="按协议筛选模型" :value=$(draft_protocol.get()) @change=$(|event: Event| draft_protocol.set(event.target.value))><option value="">"全部协议"</option>for kind in [Protocol::OpenAiChat, Protocol::OpenAiResponses, Protocol::AnthropicMessages] { <option value=(kind.as_str()) selected=(draft_protocol.get_untracked() == kind.as_str())>(protocol_label(kind))</option> }</select>
+                <select name="protocol" aria-label="按协议筛选模型" :value=$(draft_protocol.get()) @change=$(|event: Event| draft_protocol.set(event.target.value))><option value="">"全部协议"</option>for kind in [Protocol::OpenAiChat, Protocol::OpenAiResponses, Protocol::AnthropicMessages, Protocol::Gemini] { <option value=(kind.as_str()) selected=(draft_protocol.get_untracked() == kind.as_str())>(protocol_label(kind))</option> }</select>
                 <select name="provider" aria-label="按 Provider 筛选模型" :value=$(draft_provider.get()) @change=$(|event: Event| draft_provider.set(event.target.value))><option value="">"全部 Provider"</option>for option in &filter_providers { <option value=(option.id.to_string()) selected=(draft_provider.get_untracked() == option.id.to_string())>(option.name.as_str())</option> }</select>
                 <button class=(BUTTON) type="submit">"查询"</button>
                 if !query.is_empty() || !protocol.is_empty() || !provider.is_empty() { <button class=(class!(TEXT_LINK, "px-1")) type="button" (reset.clone())>"重置"</button> }

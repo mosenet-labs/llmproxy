@@ -11,6 +11,7 @@ struct ModelForm {
     chat: bool,
     responses: bool,
     messages: bool,
+    gemini: bool,
     input_price_per_million: String,
     output_price_per_million: String,
 }
@@ -22,6 +23,8 @@ struct DraftModel {
     chat: bool,
     responses: bool,
     messages: bool,
+    #[serde(default)]
+    gemini: bool,
     input_price_per_million: Option<String>,
     output_price_per_million: Option<String>,
 }
@@ -87,6 +90,9 @@ pub async fn save_models(
             if model.messages {
                 protocols.push(Protocol::AnthropicMessages);
             }
+            if model.gemini {
+                protocols.push(Protocol::Gemini);
+            }
             mappings.push(ModelMappingInput {
                 alias: if model.alias.trim().is_empty() {
                     format!("{}/{}", provider.name, model.model_id)
@@ -124,6 +130,7 @@ pub async fn save_model(
     chat: bool,
     responses: bool,
     messages: bool,
+    gemini: bool,
     input_price_per_million: String,
     output_price_per_million: String,
 ) -> Result<Outcome> {
@@ -137,6 +144,7 @@ pub async fn save_model(
         chat,
         responses,
         messages,
+        gemini,
         input_price_per_million,
         output_price_per_million,
     };
@@ -156,6 +164,9 @@ pub async fn save_model(
         }
         if input.messages {
             protocols.push(Protocol::AnthropicMessages);
+        }
+        if input.gemini {
+            protocols.push(Protocol::Gemini);
         }
         let provider = store.get(provider_id).await?;
         let alias = if input.alias.trim().is_empty() {
@@ -241,6 +252,7 @@ pub async fn probe_saved_model(
             "openai_chat" => Protocol::OpenAiChat,
             "openai_responses" => Protocol::OpenAiResponses,
             "anthropic_messages" => Protocol::AnthropicMessages,
+            "gemini" => Protocol::Gemini,
             _ => return Err("请选择有效的探测协议".to_owned()),
         };
         let max_output_tokens = max_output_tokens

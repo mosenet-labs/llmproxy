@@ -199,6 +199,7 @@ pub async fn save_route(
         "openai_chat" => Protocol::OpenAiChat,
         "openai_responses" => Protocol::OpenAiResponses,
         "anthropic_messages" => Protocol::AnthropicMessages,
+        "gemini" => Protocol::Gemini,
         _ => return Ok(Err("请选择路由协议".into())),
     };
     let input = ModelRouteInput {

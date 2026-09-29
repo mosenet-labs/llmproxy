@@ -59,6 +59,7 @@ impl ProviderStore {
             .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
             .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
             .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+            .gemini(input.protocols.contains(&Protocol::Gemini))
             .input_price_per_million(
                 input
                     .reference_price
@@ -134,6 +135,7 @@ impl ProviderStore {
                 .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
                 .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
                 .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+                .gemini(input.protocols.contains(&Protocol::Gemini))
                 .input_price_per_million(
                     input
                         .reference_price
@@ -204,6 +206,7 @@ impl ProviderStore {
             .openai_chat(input.protocols.contains(&Protocol::OpenAiChat))
             .openai_responses(input.protocols.contains(&Protocol::OpenAiResponses))
             .anthropic_messages(input.protocols.contains(&Protocol::AnthropicMessages))
+            .gemini(input.protocols.contains(&Protocol::Gemini))
             .input_price_per_million(
                 input
                     .reference_price

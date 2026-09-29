@@ -1877,6 +1877,7 @@ dependencies = [
  "llmproxy-probe",
  "llmproxy-store",
  "opentelemetry",
+ "percent-encoding",
  "regex",
  "reqwest",
  "rust_decimal",
@@ -1897,6 +1898,7 @@ dependencies = [
 name = "llmproxy-core"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "serde",
  "serde_json",
 ]
@@ -1917,6 +1919,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry_sdk",
+ "percent-encoding",
  "pingora",
  "pingora-http",
  "reqwest",

@@ -81,7 +81,31 @@ impl ProviderStore {
 
     pub async fn migrate(&self) -> StoreResult<()> {
         if self.backend.is_sqlite() {
-            SQLITE_MIGRATIONS.apply(&self.db).await?;
+            let Backend::Sqlite(path) = &self.backend else {
+                unreachable!()
+            };
+            let migration_url = format!("sqlite:{}", path.display());
+            let migration_db = Db::builder()
+                .max_pool_size(1)
+                .connect(&migration_url)
+                .await?;
+            let mut migration_connection = migration_db.connection().await?;
+            toasty::sql::query("PRAGMA foreign_keys=OFF")
+                .exec(&mut migration_connection)
+                .await?;
+            drop(migration_connection);
+            SQLITE_MIGRATIONS.apply(&migration_db).await?;
+            let mut migration_connection = migration_db.connection().await?;
+            if !toasty::sql::query("PRAGMA foreign_key_check")
+                .exec(&mut migration_connection)
+                .await?
+                .is_empty()
+            {
+                return Err(StoreError::Internal);
+            }
+            toasty::sql::query("PRAGMA foreign_keys=ON")
+                .exec(&mut migration_connection)
+                .await?;
         }
         let mut connection = self.connection().await?;
         let mut lock = self.transaction(&mut connection, true).await?;
@@ -384,6 +408,7 @@ fn validate(mut input: ProviderInput, creating: bool) -> StoreResult<ProviderInp
         input.paths.openai_chat.as_deref(),
         input.paths.openai_responses.as_deref(),
         input.paths.anthropic_messages.as_deref(),
+        input.paths.gemini.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -499,6 +524,100 @@ mod tests {
     ]);
 
     #[tokio::test]
+    async fn sqlite_gemini_upgrade_preserves_existing_model_routes() {
+        let directory = std::env::temp_dir().join(format!(
+            "llmproxy-gemini-upgrade-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+        let store = ProviderStore::connect(&url, &STANDARD.encode([22; 32]))
+            .await
+            .unwrap();
+        let mut conn = store.db.connection().await.unwrap();
+        toasty::sql::query("CREATE TABLE __toasty_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)").exec(&mut conn).await.unwrap();
+        for migration in SQLITE_MIGRATIONS.migrations().iter().take(41) {
+            toasty::sql::query(migration.sql())
+                .exec(&mut conn)
+                .await
+                .unwrap();
+            toasty::sql::query(format!(
+                "INSERT INTO __toasty_migrations VALUES ({}, '{}', '2026-09-29')",
+                migration.id(),
+                migration.name()
+            ))
+            .exec(&mut conn)
+            .await
+            .unwrap();
+        }
+        let secret = store.cipher.encrypt("legacy-secret").unwrap();
+        toasty::sql::query(format!("INSERT INTO providers (id, name, host, port, tls, encrypted_key, enabled, connect_timeout_ms, read_timeout_ms, write_timeout_ms, updated_at, openai_chat_path) VALUES (1, 'Legacy', 'example.com', 443, 1, '{secret}', 1, 1000, 1000, 1000, 1, '/v1/chat/completions')")).exec(&mut conn).await.unwrap();
+        toasty::sql::query("INSERT INTO model_mappings (id, alias, provider_id, upstream_model_id, openai_chat, openai_responses, anthropic_messages, updated_at) VALUES (1, 'legacy-model', 1, 'old-id', 1, 0, 0, 1)").exec(&mut conn).await.unwrap();
+        toasty::sql::query("INSERT INTO model_routes (id, name, protocol, updated_at) VALUES (1, 'legacy-route', 'openai_chat', 1)").exec(&mut conn).await.unwrap();
+        toasty::sql::query("INSERT INTO model_route_targets (id, route_id, model_id, position) VALUES (1, 1, 1, 1)").exec(&mut conn).await.unwrap();
+        drop(conn);
+        store.migrate().await.unwrap();
+        assert_eq!(
+            store.get_model(1).await.unwrap().upstream_model_id,
+            "old-id"
+        );
+        assert_eq!(
+            store
+                .load_model_routes()
+                .await
+                .unwrap()
+                .iter()
+                .find(|route| route.alias == "legacy-route")
+                .unwrap()
+                .upstream_model_id,
+            "old-id"
+        );
+        let provider = store
+            .create(ProviderInput {
+                name: "Google".into(),
+                paths: crate::ProviderPaths::single(Protocol::Gemini),
+                host: "generativelanguage.googleapis.com".into(),
+                port: 443,
+                tls: true,
+                api_key: "gemini-secret".into(),
+                enabled: true,
+                models_path: "/v1beta/models".into(),
+                models_protocol: Protocol::Gemini,
+                anthropic_version: None,
+                messages_auth: MessagesAuth::ApiKey,
+                connect_timeout_ms: 1000,
+                read_timeout_ms: 1000,
+                write_timeout_ms: 1000,
+            })
+            .await
+            .unwrap();
+        store
+            .create_model(ModelMappingInput {
+                alias: "gemini-model".into(),
+                provider_id: provider.id,
+                upstream_model_id: "gemini-test".into(),
+                protocols: vec![Protocol::Gemini],
+                reference_price: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .load_model_routes()
+                .await
+                .unwrap()
+                .iter()
+                .any(|route| route.alias == "gemini-model" && route.protocol == Protocol::Gemini)
+        );
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn sqlite_model_mapping_enforces_provider_protocols_and_references() {
         let directory = std::env::temp_dir().join(format!(
             "llmproxy-model-mapping-{}-{}",
@@ -520,6 +639,7 @@ mod tests {
                 openai_chat: Some("/chat".into()),
                 openai_responses: Some("/responses".into()),
                 anthropic_messages: None,
+                gemini: None,
             },
             host: "api.example.com".into(),
             port: 443,

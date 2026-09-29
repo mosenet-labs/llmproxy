@@ -31,6 +31,7 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
         openai_chat: Some("/custom/chat".into()),
         openai_responses: Some("/custom/responses".into()),
         anthropic_messages: Some("/custom/messages".into()),
+        gemini: None,
     };
     provider.anthropic_version = Some("2023-06-01".into());
     let record = store.create(provider.clone()).await.unwrap();
@@ -154,6 +155,109 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    drop(gateway);
+    drop(store);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn gemini_native_requests_rewrite_model_path_and_stream_without_buffering() {
+    let directory = std::env::temp_dir().join(format!(
+        "llmproxy-gemini-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+    let master_key = STANDARD.encode([21; 32]);
+    let store = ProviderStore::connect(&url, &master_key).await.unwrap();
+    store.migrate().await.unwrap();
+    let (release, acknowledged) = mpsc::channel();
+    let acknowledged = Arc::new(Mutex::new(acknowledged));
+    let (upstream, requests) = Mock::http(move |request, stream| {
+        if request.target.contains("streamGenerateContent") {
+            sse_headers(stream);
+            chunk(
+                stream,
+                b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n",
+            )
+            .unwrap();
+            acknowledged.lock().unwrap().recv_timeout(DEADLINE).unwrap();
+            chunk(stream, b"data: {\"candidates\":[]}\n\n").unwrap();
+            finish_chunks(stream);
+        } else {
+            respond(
+                stream,
+                200,
+                "Content-Type: application/json\r\n",
+                br#"{"candidates":[]}"#,
+            );
+        }
+    });
+    let mut provider = input("Google", upstream.address.port(), "gemini-secret");
+    provider.paths = ProviderPaths::single(Protocol::Gemini);
+    provider.models_path = "/v1beta/models".into();
+    provider.models_protocol = Protocol::Gemini;
+    let record = store.create(provider).await.unwrap();
+    store
+        .create_model(ModelMappingInput {
+            alias: "public/gemini".into(),
+            provider_id: record.id,
+            upstream_model_id: "gemini-test".into(),
+            protocols: vec![Protocol::Gemini],
+            reference_price: None,
+        })
+        .await
+        .unwrap();
+    let gateway = Gateway::database(&url, &master_key);
+    let body = br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#;
+    assert_eq!(
+        gateway
+            .request(
+                "POST",
+                "/v1beta/models/public%2Fgemini:generateContent",
+                "",
+                body
+            )
+            .status,
+        200
+    );
+    let received = requests.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        received.target,
+        "/v1beta/models/gemini-test:generateContent"
+    );
+    assert_eq!(received.body, body);
+    assert_eq!(
+        values(&received.headers, "x-goog-api-key"),
+        ["gemini-secret"]
+    );
+    assert!(values(&received.headers, "authorization").is_empty());
+
+    let mut response = gateway.request(
+        "POST",
+        "/v1beta/models/public%2Fgemini:streamGenerateContent",
+        "",
+        body,
+    );
+    assert_eq!(response.status, 200);
+    let first = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}\n\n";
+    assert_eq!(response.bytes(first.len()), first);
+    release.send(()).unwrap();
+    assert_eq!(response.body(), b"data: {\"candidates\":[]}\n\n");
+    let received = requests.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        received.target,
+        "/v1beta/models/gemini-test:streamGenerateContent?alt=sse"
+    );
+    assert_eq!(received.body, body);
+    assert_eq!(
+        values(&received.headers, "x-goog-api-key"),
+        ["gemini-secret"]
+    );
     drop(gateway);
     drop(store);
     std::fs::remove_dir_all(directory).unwrap();

@@ -30,6 +30,7 @@ pub enum Protocol {
     OpenAiChat,
     OpenAiResponses,
     AnthropicMessages,
+    Gemini,
 }
 
 impl Protocol {
@@ -38,6 +39,7 @@ impl Protocol {
             Self::OpenAiChat => "/v1/chat/completions",
             Self::OpenAiResponses => "/v1/responses",
             Self::AnthropicMessages => "/v1/messages",
+            Self::Gemini => "/v1beta/models",
         }
     }
 
@@ -46,6 +48,7 @@ impl Protocol {
             Self::OpenAiChat => "openai_chat",
             Self::OpenAiResponses => "openai_responses",
             Self::AnthropicMessages => "anthropic_messages",
+            Self::Gemini => "gemini",
         }
     }
 }

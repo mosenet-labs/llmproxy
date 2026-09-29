@@ -13,6 +13,7 @@ pub(crate) struct Provider {
     pub openai_chat_path: Option<String>,
     pub openai_responses_path: Option<String>,
     pub anthropic_messages_path: Option<String>,
+    pub gemini_path: Option<String>,
     pub host: String,
     pub port: u16,
     pub tls: bool,
@@ -54,6 +55,7 @@ pub(crate) struct ModelMapping {
     pub openai_chat: bool,
     pub openai_responses: bool,
     pub anthropic_messages: bool,
+    pub gemini: bool,
     pub input_price_per_million: Option<String>,
     pub output_price_per_million: Option<String>,
     #[version]
@@ -143,6 +145,7 @@ pub(crate) fn protocol(value: &str) -> StoreResult<Protocol> {
         "openai_chat" => Ok(Protocol::OpenAiChat),
         "openai_responses" => Ok(Protocol::OpenAiResponses),
         "anthropic_messages" => Ok(Protocol::AnthropicMessages),
+        "gemini" => Ok(Protocol::Gemini),
         _ => Err(StoreError::Internal),
     }
 }
@@ -153,6 +156,7 @@ impl Provider {
             openai_chat: self.openai_chat_path.clone(),
             openai_responses: self.openai_responses_path.clone(),
             anthropic_messages: self.anthropic_messages_path.clone(),
+            gemini: self.gemini_path.clone(),
         }
     }
 
@@ -188,6 +192,7 @@ impl ModelMapping {
             (self.openai_chat, Protocol::OpenAiChat),
             (self.openai_responses, Protocol::OpenAiResponses),
             (self.anthropic_messages, Protocol::AnthropicMessages),
+            (self.gemini, Protocol::Gemini),
         ]
         .into_iter()
         .filter_map(|(enabled, protocol)| enabled.then_some(protocol))

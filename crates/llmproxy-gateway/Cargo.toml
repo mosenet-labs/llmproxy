@@ -21,6 +21,7 @@ async-trait = "0.1.92"
 serde.workspace = true
 serde_json.workspace = true
 bytes = "1.11.1"
+percent-encoding = "2.3.2"
 tracing.workspace = true
 llmproxy-telemetry = { path = "../llmproxy-telemetry" }
 dotenvy = "0.15.7"

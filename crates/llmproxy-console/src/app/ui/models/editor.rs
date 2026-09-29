@@ -27,9 +27,11 @@ pub(super) struct Editor {
     chat: Signal<bool>,
     responses: Signal<bool>,
     messages: Signal<bool>,
+    gemini: Signal<bool>,
     supports_chat: Signal<bool>,
     supports_responses: Signal<bool>,
     supports_messages: Signal<bool>,
+    supports_gemini: Signal<bool>,
     supported_protocols: Signal<String>,
     probe_protocol: Signal<String>,
     probe_tokens: Signal<String>,
@@ -39,6 +41,7 @@ pub(super) struct Editor {
     probe_chat: Signal<bool>,
     probe_responses: Signal<bool>,
     probe_messages: Signal<bool>,
+    probe_gemini: Signal<bool>,
 }
 
 impl Editor {
@@ -70,9 +73,11 @@ impl Editor {
             chat: signal(cx, || false),
             responses: signal(cx, || false),
             messages: signal(cx, || false),
+            gemini: signal(cx, || false),
             supports_chat: signal(cx, || false),
             supports_responses: signal(cx, || false),
             supports_messages: signal(cx, || false),
+            supports_gemini: signal(cx, || false),
             supported_protocols: signal(cx, String::new),
             probe_protocol: signal(cx, String::new),
             probe_tokens: signal(cx, || "1".to_owned()),
@@ -82,6 +87,7 @@ impl Editor {
             probe_chat: signal(cx, || false),
             probe_responses: signal(cx, || false),
             probe_messages: signal(cx, || false),
+            probe_gemini: signal(cx, || false),
         }
     }
 }
@@ -93,7 +99,7 @@ pub(super) fn editor_trigger(
     provider: Option<&ProviderView>,
     plan: Option<&PricePlanView>,
 ) -> Attributes {
-    let (id, version, alias, provider_id, model_id, chat, responses, messages) =
+    let (id, version, alias, provider_id, model_id, chat, responses, messages, gemini) =
         if let Some(model) = model {
             (
                 model.id.to_string(),
@@ -104,6 +110,7 @@ pub(super) fn editor_trigger(
                 model.protocols.contains(&Protocol::OpenAiChat),
                 model.protocols.contains(&Protocol::OpenAiResponses),
                 model.protocols.contains(&Protocol::AnthropicMessages),
+                model.protocols.contains(&Protocol::Gemini),
             )
         } else {
             (
@@ -112,6 +119,7 @@ pub(super) fn editor_trigger(
                 String::new(),
                 String::new(),
                 String::new(),
+                false,
                 false,
                 false,
                 false,
@@ -143,9 +151,11 @@ pub(super) fn editor_trigger(
         chat: selected_chat,
         responses: selected_responses,
         messages: selected_messages,
+        gemini: selected_gemini,
         supports_chat,
         supports_responses,
         supports_messages,
+        supports_gemini,
         supported_protocols,
         probe_protocol,
         probe_tokens,
@@ -155,6 +165,7 @@ pub(super) fn editor_trigger(
         probe_chat,
         probe_responses,
         probe_messages,
+        probe_gemini,
         ..
     } = editor;
     let supported_chat = provider.is_some_and(|provider| provider.paths.openai_chat.is_some());
@@ -162,10 +173,12 @@ pub(super) fn editor_trigger(
         provider.is_some_and(|provider| provider.paths.openai_responses.is_some());
     let supported_messages =
         provider.is_some_and(|provider| provider.paths.anthropic_messages.is_some());
+    let supported_gemini = provider.is_some_and(|provider| provider.paths.gemini.is_some());
     let protocol_names = [
         (supported_chat, Protocol::OpenAiChat.as_str()),
         (supported_responses, Protocol::OpenAiResponses.as_str()),
         (supported_messages, Protocol::AnthropicMessages.as_str()),
+        (supported_gemini, Protocol::Gemini.as_str()),
     ]
     .into_iter()
     .filter_map(|(enabled, name)| enabled.then_some(name))
@@ -180,6 +193,8 @@ pub(super) fn editor_trigger(
         Protocol::OpenAiResponses.as_str()
     } else if messages {
         Protocol::AnthropicMessages.as_str()
+    } else if gemini {
+        Protocol::Gemini.as_str()
     } else {
         ""
     };
@@ -216,9 +231,11 @@ pub(super) fn editor_trigger(
         selected_chat.set(chat);
         selected_responses.set(responses);
         selected_messages.set(messages);
+        selected_gemini.set(gemini);
         supports_chat.set(supported_chat);
         supports_responses.set(supported_responses);
         supports_messages.set(supported_messages);
+        supports_gemini.set(supported_gemini);
         supported_protocols.set(protocol_names.to_owned());
         probe_protocol.set(initial_probe_protocol.to_owned());
         probe_tokens.set("1".to_owned());
@@ -228,6 +245,7 @@ pub(super) fn editor_trigger(
         probe_chat.set(chat);
         probe_responses.set(responses);
         probe_messages.set(messages);
+        probe_gemini.set(gemini);
         error.set("".to_owned());
         open.set(true);
     }) }
@@ -254,9 +272,11 @@ async fn provider_search(
         chat,
         responses,
         messages,
+        gemini,
         supports_chat,
         supports_responses,
         supports_messages,
+        supports_gemini,
         supported_protocols,
         selected_models,
         draft_aliases,
@@ -293,11 +313,13 @@ async fn provider_search(
                     let has_chat = provider.paths.openai_chat.is_some();
                     let has_responses = provider.paths.openai_responses.is_some();
                     let has_messages = provider.paths.anthropic_messages.is_some();
+                    let has_gemini = provider.paths.gemini.is_some();
                     let protocol_names = provider.paths.supported().into_iter().map(Protocol::as_str).collect::<Vec<_>>().join("|");
                     let only_one = provider.paths.supported().len() == 1;
                     let default_chat = only_one && has_chat;
                     let default_responses = only_one && has_responses;
                     let default_messages = only_one && has_messages;
+                    let default_gemini = only_one && has_gemini;
                     let unavailable = unavailable.clone();
                     let confirm_id = format!("switch-model-provider-{}", provider.id);
                     let confirm_title = format!("切换到「{}」？未保存的模型会清空。", provider.name);
@@ -314,9 +336,11 @@ async fn provider_search(
                             chat.set(default_chat);
                             responses.set(default_responses);
                             messages.set(default_messages);
+                            gemini.set(default_gemini);
                             supports_chat.set(has_chat);
                             supports_responses.set(has_responses);
                             supports_messages.set(has_messages);
+                            supports_gemini.set(has_gemini);
                             supported_protocols.set(protocol_names.to_owned());
                             selected_models.set("[]".to_owned());
                             draft_aliases.set("[]".to_owned());
@@ -366,9 +390,11 @@ async fn draft_model_row(
     supports_chat: bool,
     supports_responses: bool,
     supports_messages: bool,
+    supports_gemini: bool,
     default_chat: bool,
     default_responses: bool,
     default_messages: bool,
+    default_gemini: bool,
     price: Option<&ModelCandidate>,
 ) -> Result<impl View> {
     let initial_alias =
@@ -381,6 +407,7 @@ async fn draft_model_row(
     let chat = signal(cx, || default_chat);
     let responses = signal(cx, || default_responses);
     let messages = signal(cx, || default_messages);
+    let gemini = signal(cx, || default_gemini);
     let row_id = model_id.to_owned();
     let input_price = price.and_then(|price| price.input_price_per_million.as_deref());
     let output_price = price.and_then(|price| price.output_price_per_million.as_deref());
@@ -399,12 +426,13 @@ async fn draft_model_row(
             })></div>
             <div class="min-w-0 max-[760px]:row-start-3"><span class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block">"协议"</span>
                 <button class="flex h-8 w-full items-center justify-between gap-2 rounded-md border border-control-border bg-white px-2.5 text-left text-[13px] text-heading hover:border-primary-hover focus-visible:outline-2 focus-visible:outline-primary" type="button" aria-label=(format!("{model_id} 的协议")) (anchored_menu_trigger_attributes(cx, &menu_id))>
-                        <span class="truncate">$(if chat.get() { if responses.get() { if messages.get() { "Chat +2" } else { "Chat +1" } } else if messages.get() { "Chat +1" } else { "Chat" } } else if responses.get() { if messages.get() { "Responses +1" } else { "Responses" } } else if messages.get() { "Messages" } else { "选择协议" })</span><span class="text-secondary" aria-hidden="true">"⌄"</span>
+                        <span class="truncate">$(if chat.get() { if responses.get() { if messages.get() { if gemini.get() { "Chat +3" } else { "Chat +2" } } else if gemini.get() { "Chat +2" } else { "Chat +1" } } else if messages.get() { if gemini.get() { "Chat +2" } else { "Chat +1" } } else if gemini.get() { "Chat +1" } else { "Chat" } } else if responses.get() { if messages.get() { if gemini.get() { "Responses +2" } else { "Responses +1" } } else if gemini.get() { "Responses +1" } else { "Responses" } } else if messages.get() { if gemini.get() { "Messages +1" } else { "Messages" } } else if gemini.get() { "Gemini" } else { "选择协议" })</span><span class="text-secondary" aria-hidden="true">"⌄"</span>
                 </button>
                 <div id=(menu_id.as_str()) class="gr-anchored-menu fixed inset-auto m-0 mt-1.5 min-w-[150px] rounded-md border border-border bg-white p-1.5 text-heading shadow-lg" popover="auto" role="group" aria-label=(format!("{model_id} 支持的协议")) style=(menu_anchor)>
                         if supports_chat { <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-primary-soft"><input type="checkbox" name=(format!("chat-{index}")) :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label> }
                         if supports_responses { <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-primary-soft"><input type="checkbox" name=(format!("responses-{index}")) :checked=$(responses.get()) @change=$(|event: Event| responses.set(event.target.checked))>"Responses"</label> }
                         if supports_messages { <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-primary-soft"><input type="checkbox" name=(format!("messages-{index}")) :checked=$(messages.get()) @change=$(|event: Event| messages.set(event.target.checked))>"Messages"</label> }
+                        if supports_gemini { <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-primary-soft"><input type="checkbox" name=(format!("gemini-{index}")) :checked=$(gemini.get()) @change=$(|event: Event| gemini.set(event.target.checked))>"Gemini"</label> }
                 </div>
             </div>
             <div class="min-w-0 truncate text-[13px] tabular-nums text-heading max-[760px]:row-start-3" title=(price_label.as_str())><span class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block">"In/Out(M)"</span>(price_label.as_str())</div>
@@ -443,6 +471,9 @@ pub async fn model_draft(
     let supports_messages = protocols
         .split('|')
         .any(|name| name == Protocol::AnthropicMessages.as_str());
+    let supports_gemini = protocols
+        .split('|')
+        .any(|name| name == Protocol::Gemini.as_str());
     let available: Vec<ModelCandidate> =
         serde_json::from_str(&candidates.get()).unwrap_or_default();
     let discovered_count = available.len();
@@ -515,16 +546,22 @@ pub async fn model_draft(
             });
         }
     }
-    let only_one = [supports_chat, supports_responses, supports_messages]
-        .into_iter()
-        .filter(|enabled| *enabled)
-        .count()
+    let only_one = [
+        supports_chat,
+        supports_responses,
+        supports_messages,
+        supports_gemini,
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count()
         == 1;
     let provider_key = provider_id.get();
     let provider_label = provider_name.get();
     let has_chat = supports_chat;
     let has_responses = supports_responses;
     let has_messages = supports_messages;
+    let has_gemini = supports_gemini;
     Ok(view! {
             <div class="min-w-0">
                 <label class="mb-2 block text-sm font-semibold text-heading" for="model-select-input">"选择上游模型"<span class="ml-1 text-[#ff4d4f]">"*"</span></label>
@@ -572,9 +609,11 @@ pub async fn model_draft(
                                 supports_chat: has_chat,
                                 supports_responses: has_responses,
                                 supports_messages: has_messages,
+                                supports_gemini: has_gemini,
                                 default_chat: only_one && has_chat,
                                 default_responses: only_one && has_responses,
                                 default_messages: only_one && has_messages,
+                                default_gemini: only_one && has_gemini,
                                 price: available.iter().find(|candidate| candidate.id == *row_id),
                             )
                         }
@@ -614,9 +653,11 @@ pub(super) async fn model_editor(
         chat,
         responses,
         messages,
+        gemini,
         supports_chat,
         supports_responses,
         supports_messages,
+        supports_gemini,
         supported_protocols,
         candidates,
         selected_models,
@@ -634,6 +675,7 @@ pub(super) async fn model_editor(
         probe_chat,
         probe_responses,
         probe_messages,
+        probe_gemini,
         ..
     } = editor;
     let close = native_dialog_close_attributes(cx, "model-dialog");
@@ -671,7 +713,7 @@ pub(super) async fn model_editor(
                 error.set("".to_owned());
                 // Topcoat renders each draft row with signals; its runtime
                 // cannot collect a dynamic form list without FormData.
-                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(${csrf}, ${id}.get(), ${version}.get(), ${alias}.get(), ${provider_id}.get(), ${model_id}.get(), ${chat}.get(), ${responses}.get(), ${messages}.get(), ${input_price_per_million}.get(), ${output_price_per_million}.get()) : (() => { const form = new FormData(document.getElementById('model-editor-form')); const rows = form.getAll('model_id').map((model_id, index) => ({model_id, alias: form.get('alias-' + index) || '', chat: form.has('chat-' + index), responses: form.has('responses-' + index), messages: form.has('messages-' + index), input_price_per_million: form.get('input-price-' + index), output_price_per_million: form.get('output-price-' + index)})); return ${save_models}.call(${csrf}, ${provider_id}.get(), cx.hydrate(JSON.stringify(rows))); })()).catch(() => ${unavailable})", unavailable.clone());
+                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(${csrf}, ${id}.get(), ${version}.get(), ${alias}.get(), ${provider_id}.get(), ${model_id}.get(), ${chat}.get(), ${responses}.get(), ${messages}.get(), ${gemini}.get(), ${input_price_per_million}.get(), ${output_price_per_million}.get()) : (() => { const form = new FormData(document.getElementById('model-editor-form')); const rows = form.getAll('model_id').map((model_id, index) => ({model_id, alias: form.get('alias-' + index) || '', chat: form.has('chat-' + index), responses: form.has('responses-' + index), messages: form.has('messages-' + index), gemini: form.has('gemini-' + index), input_price_per_million: form.get('input-price-' + index), output_price_per_million: form.get('output-price-' + index)})); return ${save_models}.call(${csrf}, ${provider_id}.get(), cx.hydrate(JSON.stringify(rows))); })()).catch(() => ${unavailable})", unavailable.clone());
                 busy.set(false);
                 if result.is_ok() { open.set(false); success.set(result.unwrap()); refresh.increment(); }
                 else { error.set(result.unwrap_err()); }
@@ -720,6 +762,7 @@ pub(super) async fn model_editor(
                             <label class="flex items-center gap-2" :hidden=$(!supports_chat.get())><input type="checkbox" :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label>
                             <label class="flex items-center gap-2" :hidden=$(!supports_responses.get())><input type="checkbox" :checked=$(responses.get()) @change=$(|event: Event| responses.set(event.target.checked))>"Responses"</label>
                             <label class="flex items-center gap-2" :hidden=$(!supports_messages.get())><input type="checkbox" :checked=$(messages.get()) @change=$(|event: Event| messages.set(event.target.checked))>"Messages"</label>
+                            <label class="flex items-center gap-2" :hidden=$(!supports_gemini.get())><input type="checkbox" :checked=$(gemini.get()) @change=$(|event: Event| gemini.set(event.target.checked))>"Gemini"</label>
                         </div>
                         <div class="mt-6 rounded-lg border border-border bg-surface/40 p-4">
                             <h3 class="m-0 text-sm font-semibold text-heading">"可用性探测"</h3>
@@ -730,6 +773,7 @@ pub(super) async fn model_editor(
                                         <option value="openai_chat" :disabled=$(!probe_chat.get()) :hidden=$(!probe_chat.get())>"Chat"</option>
                                         <option value="openai_responses" :disabled=$(!probe_responses.get()) :hidden=$(!probe_responses.get())>"Responses"</option>
                                         <option value="anthropic_messages" :disabled=$(!probe_messages.get()) :hidden=$(!probe_messages.get())>"Messages"</option>
+                                        <option value="gemini" :disabled=$(!probe_gemini.get()) :hidden=$(!probe_gemini.get())>"Gemini"</option>
                                     </select>
                                 </label>
                                 <label class="min-w-0 text-xs font-medium text-heading">"输出上限（token）"

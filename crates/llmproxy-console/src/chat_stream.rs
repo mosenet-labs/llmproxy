@@ -1,9 +1,15 @@
 use llmproxy_core::protocol::Protocol;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
 use serde_json::{Value, json};
 use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
 
 const MAX_REPLY_BYTES: usize = 256 * 1024;
+const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 #[derive(Debug, Default)]
 pub(crate) struct ChatReply {
@@ -39,6 +45,9 @@ pub fn request_body(protocol: Protocol, alias: &str, history: &[ChatMessage]) ->
         Protocol::AnthropicMessages => {
             json!({ "model": alias, "stream": true, "max_tokens": 2048, "messages": messages })
         }
+        Protocol::Gemini => json!({ "contents": messages.iter().map(|message| {
+            json!({ "role": if message["role"] == "assistant" { "model" } else { "user" }, "parts": [{"text": message["content"]}] })
+        }).collect::<Vec<_>>() }),
     }
 }
 
@@ -84,6 +93,24 @@ fn event(protocol: Protocol, packet: &str) -> Result<(ChatReply, bool), String> 
                 .pointer("/response/incomplete_details")
                 .unwrap_or(&value),
         ));
+    }
+    if protocol == Protocol::Gemini {
+        let mut reply = ChatReply::default();
+        for part in value
+            .pointer("/candidates/0/content/parts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(text) = part["text"].as_str() {
+                if part["thought"] == true {
+                    reply.thinking.push_str(text);
+                } else {
+                    reply.content.push_str(text);
+                }
+            }
+        }
+        return Ok((reply, false));
     }
     let (content, thinking, summary, done) = match protocol {
         Protocol::OpenAiChat => (
@@ -144,6 +171,7 @@ fn event(protocol: Protocol, packet: &str) -> Result<(ChatReply, bool), String> 
             None,
             kind == "message_stop",
         ),
+        Protocol::Gemini => unreachable!(),
     };
     Ok((
         ChatReply {
@@ -182,6 +210,14 @@ fn completed_text(protocol: Protocol, value: &Value) -> String {
             .flatten()
             .filter(|item| item["type"] == "text")
             .filter_map(|item| item["text"].as_str())
+            .collect(),
+        Protocol::Gemini => value
+            .pointer("/candidates/0/content/parts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|part| part["thought"] != true)
+            .filter_map(|part| part["text"].as_str())
             .collect(),
     }
 }
@@ -227,6 +263,14 @@ fn completed_thinking(protocol: Protocol, value: &Value) -> String {
             .filter_map(|item| item["thinking"].as_str())
             .collect::<Vec<_>>()
             .join("\n"),
+        Protocol::Gemini => value
+            .pointer("/candidates/0/content/parts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|part| part["thought"] == true)
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
     }
 }
 
@@ -250,8 +294,14 @@ pub async fn stream_reply(
     history: &[ChatMessage],
     mut on_update: impl FnMut(&ChatReply),
 ) -> Result<ChatReply, String> {
+    let path = if protocol == Protocol::Gemini {
+        let model = utf8_percent_encode(alias, MODEL_SEGMENT);
+        format!("/v1beta/models/{model}:streamGenerateContent")
+    } else {
+        protocol.upstream_path().to_owned()
+    };
     let response = client
-        .post(format!("{gateway_origin}{}", protocol.upstream_path()))
+        .post(format!("{gateway_origin}{path}"))
         .header("accept", "text/event-stream")
         .json(&request_body(protocol, alias, history))
         .send()
@@ -402,6 +452,10 @@ mod tests {
             request_body(Protocol::AnthropicMessages, "alias", &history)["max_tokens"],
             2048
         );
+        assert_eq!(
+            request_body(Protocol::Gemini, "alias", &history)["contents"],
+            json!([{"role":"user","parts":[{"text":"hi"}]}])
+        );
     }
 
     #[test]
@@ -436,6 +490,16 @@ mod tests {
             .contains("rate limit")
         );
         assert!(event(Protocol::OpenAiChat, "data: [DONE]").unwrap().1);
+        assert_eq!(
+            event(
+                Protocol::Gemini,
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Gemini\"}]}}]}"
+            )
+            .unwrap()
+            .0
+            .content,
+            "Gemini"
+        );
         assert_eq!(boundary(b"data: 1\r\n\r\ndata: 2\n\n"), Some((7, 4)));
     }
 

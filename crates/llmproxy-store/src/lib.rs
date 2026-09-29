@@ -123,6 +123,7 @@ pub struct ProviderPaths {
     pub openai_chat: Option<String>,
     pub openai_responses: Option<String>,
     pub anthropic_messages: Option<String>,
+    pub gemini: Option<String>,
 }
 
 impl ProviderPaths {
@@ -136,6 +137,7 @@ impl ProviderPaths {
             Protocol::AnthropicMessages => {
                 paths.anthropic_messages = Some(protocol.upstream_path().into())
             }
+            Protocol::Gemini => paths.gemini = Some(protocol.upstream_path().into()),
         }
         paths
     }
@@ -145,6 +147,7 @@ impl ProviderPaths {
             Protocol::OpenAiChat => self.openai_chat.as_deref(),
             Protocol::OpenAiResponses => self.openai_responses.as_deref(),
             Protocol::AnthropicMessages => self.anthropic_messages.as_deref(),
+            Protocol::Gemini => self.gemini.as_deref(),
         }
     }
 
@@ -153,6 +156,7 @@ impl ProviderPaths {
             Protocol::OpenAiChat,
             Protocol::OpenAiResponses,
             Protocol::AnthropicMessages,
+            Protocol::Gemini,
         ]
         .into_iter()
         .filter(|protocol| self.get(*protocol).is_some())
