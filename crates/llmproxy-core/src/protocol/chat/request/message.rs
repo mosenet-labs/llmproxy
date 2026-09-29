@@ -1,8 +1,10 @@
 //! Chat Completions 请求中 `messages` 数组的原始协议结构。
 //! 参考 API：https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+pub use crate::protocol::optional_nullable::OptionalNullable;
 
 /// 原始请求消息。各角色的必需字段由对应变体声明。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,42 +259,6 @@ pub struct AudioReference {
     /// 保留当前未声明的扩展字段。
     #[serde(flatten)]
     pub extra: Map<String, Value>,
-}
-
-/// 保留可选字段的三种状态：缺失、JSON null 和实际值。
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum OptionalNullable<T> {
-    /// JSON 对象中没有这个字段。
-    #[default]
-    Missing,
-    /// 字段存在，值为 JSON `null`。
-    Null,
-    /// 字段存在，值为对应类型的数据。
-    Value(T),
-}
-
-impl<T> OptionalNullable<T> {
-    pub fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-}
-
-impl<T: Serialize> Serialize for OptionalNullable<T> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Missing | Self::Null => serializer.serialize_none(),
-            Self::Value(value) => value.serialize(serializer),
-        }
-    }
-}
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for OptionalNullable<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match Option::<T>::deserialize(deserializer)? {
-            Some(value) => Self::Value(value),
-            None => Self::Null,
-        })
-    }
 }
 
 #[cfg(test)]

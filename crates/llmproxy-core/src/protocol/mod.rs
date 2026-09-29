@@ -1,6 +1,10 @@
 //! 各协议的原始数据结构和协议标识。
 
 pub mod chat;
+pub mod gemini;
+pub mod messages;
+mod optional_nullable;
+pub mod responses;
 
 use serde::{Deserialize, Serialize};
 
