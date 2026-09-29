@@ -2,24 +2,24 @@
 
 关联：[原始需求](00-original-requirements.md)、[架构设计](01-architecture.md)、[三个明确入口的联调验收](05-explicit-routes-validation.md)。
 
-本文依据项目锁定的 Pingora 0.9 API，说明当前无缓存代理的正常路径、双向流式传输和错误路径。业务实现见 [proxy.rs](../crates/llmproxy-gateway/src/proxy.rs)，框架概览参考 [Pingora 生命周期文档](https://github.com/cloudflare/pingora/blob/main/docs/user_guide/phase.md)。
+本文依据项目锁定的 Pingora 0.9.0，说明 `ProxyHttp` 的主要方法、调用顺序、双向流式传输和错误路径。业务实现见 [proxy.rs](../crates/llmproxy-gateway/src/proxy.rs)，接口与阶段依据 [ProxyHttp 0.9.0 API](https://docs.rs/pingora-proxy/0.9.0/pingora_proxy/trait.ProxyHttp.html)及 [Pingora 生命周期文档](https://github.com/cloudflare/pingora/blob/main/docs/user_guide/phase.md)。
 
 ## 谁负责串联阶段
 
 `http_proxy_service` 将实现了 `ProxyHttp` 的 `Gateway` 接入 Pingora。框架在处理 HTTP 请求的不同时间点调用对应钩子；业务代码通过返回值决定继续、短路或进入错误处理，无须自行调用下一个阶段。
 
-未重写的钩子使用框架默认实现。例如当前请求体和响应体过滤器保持默认行为，由 Pingora 完成流式转发。
+`new_ctx` 和 `upstream_peer` 是必须实现的方法；其余钩子可以保留框架默认实现。当前项目也重写了请求体和上游响应体过滤器，具体见下表。
 
 | 对象 | 生命周期与作用 | 当前项目例子 |
 |---|---|---|
-| `Gateway` | 服务级业务对象，可被多个请求并发使用 | 持有已解析配置及指标句柄 |
+| `Gateway` | 服务级业务对象，可被多个请求并发使用 | 持有 Provider 快照、控制台及遥测对象 |
 | `Session` | 当前请求的代理会话，管理下游 HTTP 状态并提供读写能力 | 读取请求路径、发送本地响应、查询已写出的响应头 |
-| `CTX` / `RequestContext` | 每个请求独立的业务状态，随调用传给各阶段 | 保存协议、开始时间和 span |
+| `CTX` / `RequestContext` | 每个请求独立的业务状态，随调用传给各阶段 | 保存协议、选定的 Provider、遥测及正文处理状态 |
 | `HttpPeer` | 描述上游地址与连接参数，连接本身由框架建立或复用 | Provider 地址、端口、TLS/SNI、连接和读写超时 |
 
 例如，`request_filter` 将协议写入 `ctx.protocol`，后续 `upstream_peer` 和 `upstream_request_filter` 读取同一字段，分别选择连接目标和 Provider 凭据。同一 HTTP keep-alive 连接上的后续请求仍会创建新的请求上下文。
 
-配置解析、环境变量凭据读取和 OTLP exporter 初始化属于启动逻辑，位于上述逐请求流程之前。
+配置解析、数据库快照加载和 OTLP exporter 初始化属于启动逻辑，位于上述逐请求流程之前。
 
 ## 正常代理路径
 
@@ -29,9 +29,11 @@
 flowchart TD
     A["框架接收并解析请求头"] --> B["new_ctx"]
     B --> C["early_request_filter"]
-    C --> D["request_filter"]
+    C --> C1["allow_spawning_subrequest"]
+    C1 --> D["request_filter"]
     D -->|"已完成本地响应"| L["logging"]
-    D -->|"继续代理"| E["proxy_upstream_filter"]
+    D -->|"继续代理"| C2["request_cache_filter / 可选缓存查找"]
+    C2 -->|"未从缓存返回"| E["proxy_upstream_filter"]
     E -->|"允许访问上游"| F["upstream_peer"]
     F --> G["框架新建或复用上游连接"]
     G --> H["connected_to_upstream"]
@@ -41,25 +43,44 @@ flowchart TD
     K -->|"请求结束"| L
 ```
 
-图中省略缓存及可选模块。当前项目默认允许访问上游；`proxy_upstream_filter` 的拒绝语义见后面的返回值表。
+图中省略模块内部处理及缓存命中分支。当前项目未启用代理缓存，默认允许访问上游。`框架发送上游请求头` 之后的「双向流式传输」不是单条顺序链：请求体上传与上游响应接收可以交错，正文过滤器可反复调用。`proxy_upstream_filter` 的拒绝语义见后面的返回值表。
 
 | 阶段 | 触发时机 | 作用 | 当前项目行为 |
 |---|---|---|---|
-| `new_ctx` | 请求头解析成功后 | 创建本次请求的上下文 | 初始化计时器及协议、span 字段 |
-| `early_request_filter` | 下游模块执行前 | 早期模块配置或追踪初始化 | 使用默认实现；鉴权、限流等入口逻辑应优先放入 `request_filter` |
-| `request_filter` | 请求入口检查时 | 校验请求、选择路由、生成本地响应 | 匹配三种协议、创建 span，处理 404/405/501 |
+| `new_ctx` | 请求头解析成功后 | 创建本次请求的 `CTX` | 初始化遥测、协议、Provider 和正文处理状态 |
+| `early_request_filter` | 下游模块执行前 | 必须先于模块运行的早期处理 | 默认实现；一般入口校验放在 `request_filter` |
+| `allow_spawning_subrequest` | 早期过滤后 | 决定本请求能否派生子请求 | 默认不允许 |
+| `request_filter` | 收到请求头后 | 校验、限流、选择路由，或写本地响应并结束代理 | 处理 `/ui`；按协议和模型别名选择 Provider、改写模型前缀；处理 404/405/415/501 等本地响应 |
+| `request_cache_filter` | 请求过滤后 | 决定是否启用代理缓存及其后端 | 默认禁用缓存 |
 | `proxy_upstream_filter` | 准备访问上游前 | 决定是否继续访问上游 | 默认允许 |
 | `upstream_peer` | 需要取得上游连接时 | 返回目标及连接策略；如框架允许重试，每次尝试可以重新调用 | 解析 Provider 地址，设置 TLS/SNI 和超时 |
-| `connected_to_upstream` | 新建或复用连接成功后 | 记录连接信息、是否复用等 | 使用默认实现；调用此钩子不代表一定发生了新握手 |
-| `upstream_request_filter` | 上游请求头发送前 | 修改发给 Provider 的请求头副本 | 改写 Host、凭据与配置控制的协议头 |
-| `request_body_filter` | 请求体块准备转发时 | 按块检查或修改请求体 | 原样通过 |
-| `upstream_response_filter` | 收到上游响应头后 | 处理来自 Provider 的响应头 | 清理逐跳头，保留状态和端到端响应头 |
-| `response_filter` | 代理响应头发给客户端前 | 处理最终下游响应头 | 使用默认实现 |
-| `upstream_response_body_filter` | 收到上游响应体块时 | 检查或修改上游数据块 | 原样通过 |
-| `response_body_filter` | 响应体块发给客户端前 | 处理最终下游数据块 | 原样通过 |
+| `connected_to_upstream` | 新建或复用连接成功后 | 获取连接复用和连接诊断信息 | 记录连接复用、TCP/TLS 信息；调用此钩子不代表一定发生了新握手 |
+| `upstream_request_filter` | 上游请求头发送前 | 修改发给 Provider 的 URI 和请求头副本 | 改写路径、Host、凭据及请求体长度 |
+| `request_body_filter` | 每块请求体准备转发时 | 按块检查、替换、缓冲或节流正文；参数不是完整请求体 | 回放已改写的模型前缀，并按 JSON 文档边界处理后续正文 |
+| `upstream_response_filter` | 收到上游响应头后 | 修改上游响应头；启用缓存时影响缓存内容 | 记录上游状态、选择 JSON/SSE 正文处理方式、清理逐跳头 |
+| `response_filter` | 响应头发给客户端前 | 修改最终下游响应头；也适用于缓存命中 | 使用默认实现 |
+| `upstream_response_body_filter` | 每块上游响应体到达时 | 检查、替换或缓冲数据块，可返回延迟时间 | 按 JSON/SSE 边界处理，当前不改写其语义内容 |
+| `response_body_filter` | 每块响应体发给客户端前 | 处理最终下游数据块，可返回延迟时间 | 使用默认实现 |
+| `upstream_response_trailer_filter` / `response_trailer_filter` | 收到上游 trailer / 发给客户端前 | 分别处理上游 trailer 与最终下游 trailer | 使用默认实现 |
 | `logging` | 请求完成或最终失败时 | 汇总本次请求的状态、耗时、错误及指标 | 输出当前完成日志，更新请求数、失败数和耗时 |
 
 `upstream_response_*` 关注从上游收到的数据，`response_*` 关注发给下游的数据。缓存或模块启用后，两者之间可以存在进一步处理。直接生成的本地响应不保证经过这些业务响应过滤器，因此公共响应头也需要在本地响应函数中设置。
+
+### 条件触发和辅助方法
+
+下列方法也属于 Pingora 0.9.0 的 `ProxyHttp`，但不构成每次普通请求都会走过的固定阶段。当前项目未启用代理缓存，也未使用这些高级扩展钩子。
+
+| 方法 | 触发条件 | 可以做什么 |
+|---|---|---|
+| `init_downstream_modules` / `init_upstream_modules` | 服务初始化；上游模块还需启用 `upstream_modules` 特性 | 注册下游或上游 HTTP 模块；不是逐请求回调 |
+| `adjust_upstream_modules` | 启用 `upstream_modules`，收到上游响应头、模块处理前 | 根据响应头调整模块行为；响应头本身由 `upstream_response_filter` 修改 |
+| `cache_key_callback` / `cache_hit_filter` | 为请求启用缓存后，生成键或命中缓存时 | 生成缓存键、检查命中结果；启用缓存时必须实现合适的 `cache_key_callback` |
+| `cache_miss` / `response_cache_filter` / `cache_vary_filter` | 缓存未命中、上游响应准备写入缓存时 | 决定缓存写入、响应可缓存性及 Vary 键 |
+| `cache_not_modified_filter` / `range_header_filter` / `should_serve_stale` | 启用缓存后遇到条件请求、Range、过期内容或上游故障 | 决定 304、字节范围及是否提供旧缓存 |
+| `is_purge` / `purge_action` / `purge_response_filter` | 收到用于清除缓存的请求时 | 识别请求、删除或过期缓存、修改清除结果响应 |
+| `persist_connection_context` / `on_connection_reuse` | HTTP/1.x keepalive 连接可复用时，分别在 `logging` 后和下一请求早期 | 在相邻请求之间传递少量连接级状态；HTTP/2 不使用这一机制 |
+| `request_summary` / `suppress_error_log` / `suppress_proxy_warn_log` | 框架准备记录请求错误或重试警告时 | 定制错误摘要，或抑制特定日志；不影响 `logging` 的业务收口 |
+| `custom_forwarding` / `downstream_custom_message_proxy_filter` / `upstream_custom_message_proxy_filter` | 使用框架的自定义消息转发机制时 | 转发或过滤双向自定义消息；接口标记为隐藏，普通 HTTP 代理无需实现 |
 
 ## 返回值如何影响流程
 
@@ -89,7 +110,7 @@ flowchart TD
 
 body 过滤器按数据块调用，不保证一次收到完整请求体或响应体。一个数据块可能只包含半个 SSE 事件，也可能包含多个事件；网络分块边界不等于协议事件边界。
 
-当前明确入口保持字节内容与顺序，使用 Pingora 自带的流式转发。SSE 在正常结束或中断后才执行最终 `logging`，不会在发送响应头时就记录最终访问结果。
+当前明确入口在 `request_filter` 预读并改写顶层 `model`，在 `request_body_filter` 回放已改写的前缀；后续请求正文按 JSON 边界处理。响应方向按响应头识别 JSON 或 SSE，等待完整文档或事件后再交给 Pingora 发送，当前不修改其中的业务内容。SSE 在正常结束或中断后才执行最终 `logging`，不会在发送响应头时就记录最终访问结果。
 
 ## 错误路径与重试
 
@@ -115,6 +136,8 @@ Pingora 允许 `fail_to_connect` 或 `error_while_proxy` 返回可重试错误�
 `logging` 覆盖进入业务代理流程的本地拒绝、正常完成和最终失败。请求头解析阶段就被框架拒绝的连接尚未进入这些业务钩子，不会调用业务 `logging`。
 
 请求结束后，框架还会清理资源并决定是否复用连接。`logging` 是请求收尾的观测点，不代表客户端应用已经确认消费了全部响应字节。
+
+若 HTTP/1.x 下游连接将被复用，框架可在 `logging` 后调用 `persist_connection_context`，并在同一连接的下一次请求早期调用 `on_connection_reuse`。这两个钩子传递的是连接级状态，不能代替每个请求重新创建的 `CTX`。
 
 当前各阶段采集的 DNS、TCP/TLS、连接复用和错误数据在 `observability` 模块统一记录，详见[可观测性收口与连接诊断](08-gateway-observability.md)。连接 tracer 独立于请求 span，避免池中连接延长请求 span 生命周期。
 
