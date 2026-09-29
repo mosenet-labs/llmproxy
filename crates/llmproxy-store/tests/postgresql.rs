@@ -2,7 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::protocol::{MessagesAuth, Protocol};
-use llmproxy_store::{ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore, StoreError};
+use llmproxy_store::{
+    ModelMappingInput, ModelRouteInput, ModelRouteTargetInput, ProviderInput, ProviderPaths,
+    ProviderStore, StoreError,
+};
 
 fn input(name: &str, protocol: Protocol) -> ProviderInput {
     ProviderInput {
@@ -446,7 +449,19 @@ async fn exercise_store(url: &str, sqlite: bool) {
         reference_price: None,
     };
     let mapping = store.create_model(mapping_input.clone()).await.unwrap();
-    assert_eq!(store.load_model_routes().await.unwrap().len(), 1);
+    let route = store
+        .create_route(ModelRouteInput {
+            name: "mixed/public".into(),
+            protocol: Protocol::OpenAiResponses,
+            enabled: true,
+            targets: vec![ModelRouteTargetInput {
+                model_id: mapping.id,
+                enabled: true,
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.load_model_routes().await.unwrap().len(), 2);
     let mut remove_mapped_protocol = input("Mixed interfaces", Protocol::OpenAiChat);
     remove_mapped_protocol.api_key.clear();
     assert!(matches!(
@@ -475,6 +490,11 @@ async fn exercise_store(url: &str, sqlite: bool) {
         store.delete_model(mapping.id, mapping.version).await,
         Err(StoreError::Conflict(_))
     ));
+    assert!(matches!(
+        store.delete_model(mapping.id, updated.version).await,
+        Err(StoreError::Conflict(_))
+    ));
+    store.delete_route(route.id, route.version).await.unwrap();
     store
         .delete_model(mapping.id, updated.version)
         .await

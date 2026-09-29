@@ -1,0 +1,1 @@
+ALTER TABLE model_route_targets RENAME TO legacy_model_route_targets;

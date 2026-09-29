@@ -393,7 +393,7 @@ async fn draft_model_row(
             if let Some(value) = input_price { <input type="hidden" name=(format!("input-price-{index}")) value=(value)> }
             if let Some(value) = output_price { <input type="hidden" name=(format!("output-price-{index}")) value=(value)> }
             <div class="min-w-0 truncate text-sm text-heading max-[760px]:col-span-1" title=(model_id)><span class="hidden text-xs text-secondary max-[760px]:block">"模型 ID"</span>(model_id)</div>
-            <div class="min-w-0 max-[760px]:col-span-2 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{index}"))>"客户端别名"</label><input id=(format!("alias-{index}")) name=(format!("alias-{index}")) class="h-8 w-full text-[13px]" type="text" :value=$(alias.get()) maxlength="200" aria-label=(format!("{model_id} 的客户端别名")) @input=$(|event: Event| {
+            <div class="min-w-0 max-[760px]:col-span-2 max-[760px]:row-start-2"><label class="hidden text-xs text-secondary max-[760px]:mb-1 max-[760px]:block" for=(format!("alias-{index}"))>"模型标识"</label><input id=(format!("alias-{index}")) name=(format!("alias-{index}")) class="h-8 w-full text-[13px]" type="text" :value=$(alias.get()) maxlength="200" aria-label=(format!("{model_id} 的模型标识")) @input=$(|event: Event| {
                 alias.set(event.target.value);
                 draft_aliases.set(raw!("(() => { const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); entries.set(${row_id}.dehydrate(), ${event}.target.value.dehydrate()); return cx.hydrate(JSON.stringify([...entries])); })()", "[]".to_owned()));
             })></div>
@@ -470,7 +470,7 @@ pub async fn model_draft(
         String::new()
     } else {
         format!(
-            "模型 ID {} 已在当前 Provider 中导入；使用其他客户端别名仍可继续。",
+            "模型 ID {} 已在当前 Provider 中导入；使用其他模型标识仍可继续。",
             duplicate_model_ids.join("、")
         )
     };
@@ -490,11 +490,11 @@ pub async fn model_draft(
             .iter()
             .any(|(_, _, _, saved)| saved == &alias)
         {
-            initial_alias_warning = format!("客户端别名「{alias}」已存在，请修改后再导入");
+            initial_alias_warning = format!("模型标识「{alias}」已存在，请修改后再导入");
             break;
         }
         if !seen_aliases.insert(alias.clone()) {
-            initial_alias_warning = format!("本次导入的客户端别名「{alias}」重复");
+            initial_alias_warning = format!("本次导入的模型标识「{alias}」重复");
             break;
         }
     }
@@ -559,7 +559,7 @@ pub async fn model_draft(
                 <div class="col-span-full mt-2">
                     <h3 class="mb-3 text-sm font-semibold text-heading">(format!("待导入模型（{}）", rows.len()))</h3>
                     <div class="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1.2fr)_minmax(126px,.7fr)_minmax(146px,.8fr)_32px] gap-2.5 border-b border-border pb-2 text-xs font-medium text-secondary max-[760px]:hidden">
-                        <span>"模型 ID"</span><span>"客户端别名"</span><span>"协议"</span><span title="输入/输出，每百万 token 的美元参考价">"In/Out(M)"</span><span class="sr-only">"操作"</span>
+                        <span>"模型 ID"</span><span>"模型标识"</span><span>"协议"</span><span title="输入/输出，每百万 token 的美元参考价">"In/Out(M)"</span><span class="sr-only">"操作"</span>
                     </div>
                     <div class="divide-y divide-border">
                         #[key((provider_key.as_str(), row_id.as_str()))] for (index, row_id) in rows.iter().enumerate() {
@@ -579,10 +579,10 @@ pub async fn model_draft(
                             )
                         }
                     </div>
-                    <p class="mt-2 mb-0 text-xs text-[#ad6800] empty:hidden" role="status">$({ let _selected = selected.get(); raw!("(() => { const saved = JSON.parse(${existing_models_json}.dehydrate()); const selected = JSON.parse(String(${selected}.get())); const provider = String(${provider_id}.get()); const duplicates = selected.filter((modelId) => saved.some((record) => record[1] === provider && record[2] === modelId)); return duplicates.length ? '模型 ID ' + duplicates.map((modelId) => '「' + modelId + '」').join('、') + ' 已在当前 Provider 中导入；使用其他客户端别名仍可继续。' : ''; })()", initial_model_note.clone()) })</p>
+                    <p class="mt-2 mb-0 text-xs text-[#ad6800] empty:hidden" role="status">$({ let _selected = selected.get(); raw!("(() => { const saved = JSON.parse(${existing_models_json}.dehydrate()); const selected = JSON.parse(String(${selected}.get())); const provider = String(${provider_id}.get()); const duplicates = selected.filter((modelId) => saved.some((record) => record[1] === provider && record[2] === modelId)); return duplicates.length ? '模型 ID ' + duplicates.map((modelId) => '「' + modelId + '」').join('、') + ' 已在当前 Provider 中导入；使用其他模型标识仍可继续。' : ''; })()", initial_model_note.clone()) })</p>
                 </div>
             }
-            <p class="col-span-full mt-2 mb-0 text-xs text-[#cf1322] empty:hidden" role="alert">$({ let _selected = selected.get(); let _aliases = draft_aliases.get(); raw!("(() => { const saved = JSON.parse(${existing_models_json}.dehydrate()); const selected = JSON.parse(String(${selected}.get())); const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); const provider = String(${provider_name}.get()); const seen = new Set(); const modelIds = new Set(); let warning = ''; for (const modelId of selected) { if (modelIds.has(modelId)) continue; modelIds.add(modelId); const current = String(entries.get(modelId) ?? '').trim() || provider + '/' + modelId; if (saved.some((record) => record[3] === current)) { warning = '客户端别名「' + current + '」已存在，请修改后再导入'; break; } if (seen.has(current)) { warning = '本次导入的客户端别名「' + current + '」重复'; break; } seen.add(current); } ${bulk_alias_warning}.set(cx.hydrate(warning)); return warning; })()", initial_alias_warning.clone()) })</p>
+            <p class="col-span-full mt-2 mb-0 text-xs text-[#cf1322] empty:hidden" role="alert">$({ let _selected = selected.get(); let _aliases = draft_aliases.get(); raw!("(() => { const saved = JSON.parse(${existing_models_json}.dehydrate()); const selected = JSON.parse(String(${selected}.get())); const entries = new Map(JSON.parse(String(${draft_aliases}.get()))); const provider = String(${provider_name}.get()); const seen = new Set(); const modelIds = new Set(); let warning = ''; for (const modelId of selected) { if (modelIds.has(modelId)) continue; modelIds.add(modelId); const current = String(entries.get(modelId) ?? '').trim() || provider + '/' + modelId; if (saved.some((record) => record[3] === current)) { warning = '模型标识「' + current + '」已存在，请修改后再导入'; break; } if (seen.has(current)) { warning = '本次导入的模型标识「' + current + '」重复'; break; } seen.add(current); } ${bulk_alias_warning}.set(cx.hydrate(warning)); return warning; })()", initial_alias_warning.clone()) })</p>
     })
 }
 
@@ -711,10 +711,10 @@ pub(super) async fn model_editor(
                             <span class="font-medium tabular-nums text-heading">$(price_summary.get())</span>
                             <span class="text-secondary">"可在模型列表的参考价格列编辑。"</span>
                         </div>
-                        <div class="mt-6">form_field(config: FormFieldConfig::new("model-alias", "客户端别名"),
+                        <div class="mt-6">form_field(config: FormFieldConfig::new("model-alias", "模型标识"),
                             <input id="model-alias" :value=$(alias.get()) @input=$(|event: Event| { alias.set(event.target.value); alias_edited.set(true); }) placeholder="Provider名称/模型ID" maxlength="200">
                         )</div>
-                        <p class="mt-2 mb-0 text-xs text-[#cf1322] empty:hidden" role="alert">$({ let _alias = alias.get(); let _model_id = model_id.get(); raw!("(() => { const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); if (!current) return ''; const ownId = String(${id}.get()); return JSON.parse(${existing_models_json}.dehydrate()).some((record) => record[0] !== ownId && record[3] === current) ? '客户端别名「' + current + '」已存在，请修改后再保存' : ''; })()", String::new()) })</p>
+                        <p class="mt-2 mb-0 text-xs text-[#cf1322] empty:hidden" role="alert">$({ let _alias = alias.get(); let _model_id = model_id.get(); raw!("(() => { const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); if (!current) return ''; const ownId = String(${id}.get()); return JSON.parse(${existing_models_json}.dehydrate()).some((record) => record[0] !== ownId && record[3] === current) ? '模型标识「' + current + '」已存在，请修改后再保存' : ''; })()", String::new()) })</p>
                         <h3 class="mt-6 mb-3 text-sm font-semibold">"选择可用协议（至少一个）"</h3>
                         <div class="flex flex-wrap gap-4 text-sm text-heading">
                             <label class="flex items-center gap-2" :hidden=$(!supports_chat.get())><input type="checkbox" :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label>

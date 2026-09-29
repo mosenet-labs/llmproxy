@@ -130,12 +130,18 @@ async fn exercise_http(database_url: &str) {
     let routes = client.get(format!("{base}/routes")).send().await.unwrap();
     assert_eq!(routes.status(), StatusCode::OK);
     let routes = routes.text().await.unwrap();
-    assert_navigation(&routes, "/ui/routes", "路由概览");
+    assert_navigation(&routes, "/ui/routes", "Model Routes");
     assert!(!routes.contains("providers-panel"));
-    assert_eq!(routes.matches("0 个模型").count(), 3);
-    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-        assert!(routes.contains(path));
-    }
+    assert!(routes.contains("还没有模型路由"));
+    assert_eq!(
+        client
+            .get(format!("{base}/routes/edit"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
     let alias = client.get(&base).send().await.unwrap();
     assert_eq!(alias.status(), StatusCode::SEE_OTHER);
     assert_eq!(alias.headers()["location"], "/ui/providers");
@@ -195,7 +201,7 @@ async fn exercise_http(database_url: &str) {
         ("/ui/providers", "Providers"),
         ("/ui/models", "Models"),
         ("/ui/chat", "Chat"),
-        ("/ui/routes", "路由概览"),
+        ("/ui/routes", "Model Routes"),
         ("/ui/holidays", "节假日"),
     ] {
         let response = client
@@ -519,7 +525,7 @@ async fn exercise_http(database_url: &str) {
         .text()
         .await
         .unwrap();
-    assert!(routes.contains("0 个模型"));
+    assert!(routes.contains("还没有模型路由"));
     assert!(!routes.contains(PROVIDER_KEY));
     assert_eq!(
         store.probe_target(chat.id).await.unwrap().secret,
@@ -895,6 +901,151 @@ async fn exercise_http(database_url: &str) {
         .unwrap();
     assert_eq!(saved_price.input_per_million, "0.15");
     assert_eq!(saved_price.output_per_million, "0.60");
+    let model_id = store
+        .list_models()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|model| model.alias == "Unified Mock/mock-model")
+        .unwrap()
+        .id;
+    assert!(store.list_routes().await.unwrap().is_empty());
+    let new_route_editor = client
+        .get(format!("{base}/routes/edit"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(new_route_editor.contains("route-model-picker"));
+    assert!(new_route_editor.contains("id=\"route-protocol\""));
+    assert!(new_route_editor.contains("data-protocols=\",openai_chat,openai_responses,\""));
+    assert!(new_route_editor.contains("尚未选择候选模型"));
+    let selected_table = new_route_editor
+        .split("id=\"route-selected-results\"")
+        .nth(1)
+        .unwrap()
+        .split('>')
+        .next()
+        .unwrap();
+    assert!(selected_table.contains("display:none"));
+    let route_form = serde_json::json!([
+        csrf,
+        "",
+        "",
+        "smart-chat",
+        "openai_chat",
+        true,
+        serde_json::json!([{"model_id": model_id, "enabled": true}]).to_string()
+    ]);
+    let response = client
+        .post(format!("{base}/_topcoat/runtime/procedures/save-route"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&route_form).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"],
+        "「smart-chat」已保存"
+    );
+    let saved_route = store
+        .list_routes()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|route| route.name == "smart-chat")
+        .unwrap();
+    assert_eq!(saved_route.protocol, Protocol::OpenAiChat);
+    let route_chat = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(route_chat.contains(&format!("value=\"route:{}\"", saved_route.id)));
+    assert!(route_chat.contains("smart-chat · 路由 (Chat)"));
+    let route_protocol = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/default-chat-protocol"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::to_vec(&serde_json::json!([
+                csrf,
+                format!("route:{}", saved_route.id)
+            ]))
+            .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(route_protocol.status(), StatusCode::OK);
+    let route_protocol_body = route_protocol.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(route_protocol_body, "openai_chat");
+    let edit_route = client
+        .get(format!("{base}/routes/edit?id={}", saved_route.id))
+        .send()
+        .await
+        .unwrap();
+    let edit_status = edit_route.status();
+    let edit_html = edit_route.text().await.unwrap();
+    assert_eq!(edit_status, StatusCode::OK, "{edit_html}");
+    assert!(edit_html.contains("smart-chat"));
+    let update_route = serde_json::json!([
+        csrf,
+        saved_route.id.to_string(),
+        saved_route.version.to_string(),
+        "smart-chat-v2",
+        "openai_chat",
+        false,
+        serde_json::json!([{"model_id": model_id, "enabled": true}]).to_string()
+    ]);
+    let response = client
+        .post(format!("{base}/_topcoat/runtime/procedures/save-route"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&update_route).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["ok"],
+        "「smart-chat-v2」已保存"
+    );
+    let updated_route = store
+        .list_routes()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|route| route.id == saved_route.id)
+        .unwrap();
+    assert!(!updated_route.enabled);
+    let delete_route = serde_json::json!([
+        csrf,
+        updated_route.id.to_string(),
+        updated_route.version.to_string()
+    ]);
+    let response = client
+        .post(format!("{base}/_topcoat/runtime/procedures/delete-route"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&delete_route).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        store
+            .list_routes()
+            .await
+            .unwrap()
+            .iter()
+            .all(|route| route.id != saved_route.id)
+    );
     let models = client
         .get(format!("{base}/models"))
         .send()
@@ -1089,7 +1240,7 @@ async fn exercise_http(database_url: &str) {
         .text()
         .await
         .unwrap();
-    assert_eq!(routes.matches("1 个模型").count(), 2);
+    assert!(routes.contains("还没有模型路由"));
     let mut forwarded = false;
     for _ in 0..60 {
         let response = client

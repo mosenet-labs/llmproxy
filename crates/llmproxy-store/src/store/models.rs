@@ -1,5 +1,17 @@
 use super::*;
 
+async fn check_route_name_available(tx: &mut Transaction<'_>, name: &str) -> StoreResult<()> {
+    if !ModelRouteRow::all()
+        .filter(ModelRouteRow::fields().name().eq(name))
+        .exec(tx)
+        .await?
+        .is_empty()
+    {
+        return Err(StoreError::Conflict("模型标识与已有路由名称重复".into()));
+    }
+    Ok(())
+}
+
 impl ProviderStore {
     pub async fn list_models(&self) -> StoreResult<Vec<ModelMappingView>> {
         let mut connection = self.connection().await?;
@@ -37,6 +49,7 @@ impl ProviderStore {
         let provider = find(&mut tx, input.provider_id).await?;
         check_mapping_provider(&provider, &input)?;
         check_unique_alias(&mut tx, &input.alias, None).await?;
+        check_route_name_available(&mut tx, &input.alias).await?;
         let upstream_model_id = input.upstream_model_id.clone();
         let catalog_price = input.reference_price.clone();
         let mapping = ModelMapping::create()
@@ -90,7 +103,7 @@ impl ProviderStore {
                 ));
             }
             if !aliases.insert(input.alias.clone()) {
-                return Err(StoreError::Conflict(format!("「{label}」：模型别名重复")));
+                return Err(StoreError::Conflict(format!("「{label}」：模型标识重复")));
             }
             if !model_ids.insert(input.upstream_model_id.clone()) {
                 return Err(StoreError::Conflict(format!("「{label}」：模型重复选择")));
@@ -107,6 +120,9 @@ impl ProviderStore {
             check_mapping_provider(&provider, &input)
                 .map_err(|error| StoreError::Validation(format!("「{label}」：{error}")))?;
             check_unique_alias(&mut tx, &input.alias, None)
+                .await
+                .map_err(|error| StoreError::Conflict(format!("「{label}」：{error}")))?;
+            check_route_name_available(&mut tx, &input.alias)
                 .await
                 .map_err(|error| StoreError::Conflict(format!("「{label}」：{error}")))?;
             let upstream_model_id = input.upstream_model_id.clone();
@@ -157,7 +173,29 @@ impl ProviderStore {
         check_mapping_version(&mapping, version)?;
         let provider = find(&mut tx, input.provider_id).await?;
         check_mapping_provider(&provider, &input)?;
+        for target in ModelRouteTargetRow::all()
+            .filter(ModelRouteTargetRow::fields().model_id().eq(id))
+            .exec(&mut tx)
+            .await?
+        {
+            let route = ModelRouteRow::filter_by_id(target.route_id)
+                .first()
+                .exec(&mut tx)
+                .await?
+                .ok_or(StoreError::Internal)?;
+            if !input
+                .protocols
+                .contains(&routes::protocol_from_str(&route.protocol)?)
+            {
+                return Err(StoreError::Conflict(
+                    "模型仍被此协议的路由使用，请先从路由中移除".into(),
+                ));
+            }
+        }
         check_unique_alias(&mut tx, &input.alias, Some(id)).await?;
+        if input.alias != mapping.alias {
+            check_route_name_available(&mut tx, &input.alias).await?;
+        }
         mapping
             .update()
             .alias(input.alias)
@@ -192,6 +230,15 @@ impl ProviderStore {
         self.bindings(&mut tx, true).await?;
         let mapping = find_mapping(&mut tx, id).await?;
         check_mapping_version(&mapping, version)?;
+        let references = ModelRouteTargetRow::all()
+            .filter(ModelRouteTargetRow::fields().model_id().eq(id))
+            .exec(&mut tx)
+            .await?;
+        if !references.is_empty() {
+            return Err(StoreError::Conflict(
+                "此模型仍被模型路由使用，请先从路由中移除".into(),
+            ));
+        }
         mapping.delete().exec(&mut tx).await?;
         tx.commit().await?;
         Ok(())
@@ -201,21 +248,76 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
-        let mappings = ModelMapping::all().exec(&mut tx).await?;
         let mut routes = Vec::new();
-        for mapping in mappings {
+        let mut route_names = HashSet::new();
+        for route in ModelRouteRow::all().exec(&mut tx).await? {
+            let protocol = routes::protocol_from_str(&route.protocol)?;
+            route_names.insert((route.name.clone(), protocol));
+            let targets = ModelRouteTargetRow::all()
+                .filter(ModelRouteTargetRow::fields().route_id().eq(route.id))
+                .order_by(ModelRouteTargetRow::fields().position().asc())
+                .exec(&mut tx)
+                .await?;
+            let mut candidates = Vec::with_capacity(targets.len());
+            for target in targets {
+                let mapping = find_mapping(&mut tx, target.model_id).await?;
+                let provider = find(&mut tx, mapping.provider_id).await?;
+                candidates.push((target, mapping, provider));
+            }
+            let selected = candidates.iter().find(|(target, mapping, provider)| {
+                route.enabled
+                    && target.enabled
+                    && provider.enabled
+                    && mapping.protocols().contains(&protocol)
+            });
+            let resolved = if let Some((_, _, provider)) = selected {
+                Some(ActiveProvider {
+                    id: provider.id,
+                    protocol,
+                    upstream_path: provider
+                        .paths()
+                        .get(protocol)
+                        .ok_or(StoreError::Internal)?
+                        .to_owned(),
+                    host: provider.host.clone(),
+                    port: provider.port,
+                    tls: provider.tls,
+                    secret: self.cipher.decrypt(&provider.encrypted_key)?,
+                    anthropic_version: provider.anthropic_version.clone(),
+                    messages_auth: MessagesAuth::parse(&provider.messages_auth)
+                        .ok_or(StoreError::Internal)?,
+                    connect_timeout_ms: provider.connect_timeout_ms,
+                    read_timeout_ms: provider.read_timeout_ms,
+                    write_timeout_ms: provider.write_timeout_ms,
+                })
+            } else {
+                None
+            };
+            routes.push(ModelRoute {
+                alias: route.name.clone(),
+                upstream_model_id: selected.map_or(String::new(), |(_, mapping, _)| {
+                    mapping.upstream_model_id.clone()
+                }),
+                enabled: selected.is_some(),
+                provider: resolved,
+                protocol,
+            });
+        }
+        for mapping in ModelMapping::all().exec(&mut tx).await? {
             let provider = find(&mut tx, mapping.provider_id).await?;
             for protocol in mapping.protocols() {
-                let upstream_path = provider
-                    .paths()
-                    .get(protocol)
-                    .ok_or(StoreError::Internal)?
-                    .to_owned();
+                if route_names.contains(&(mapping.alias.clone(), protocol)) {
+                    continue;
+                }
                 let resolved = if provider.enabled {
                     Some(ActiveProvider {
                         id: provider.id,
                         protocol,
-                        upstream_path,
+                        upstream_path: provider
+                            .paths()
+                            .get(protocol)
+                            .ok_or(StoreError::Internal)?
+                            .to_owned(),
                         host: provider.host.clone(),
                         port: provider.port,
                         tls: provider.tls,

@@ -1,0 +1,1 @@
+CREATE INDEX model_route_targets_model_id_idx ON model_route_targets(model_id);

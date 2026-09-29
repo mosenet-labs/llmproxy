@@ -292,7 +292,7 @@ pub async fn provider_list(
                 <div class="border-t border-border px-6 py-4 text-[13px] text-secondary max-[640px]:px-4">"显示 "(providers.len())" / "(total)" 个 Provider"</div>
             }
         </section>
-        <p class="mt-4 mb-0 flex items-start gap-2 text-[13px] leading-relaxed text-secondary">icon(data: INFO_CIRCLE_FILLED, attrs: attributes! { class="mt-1 size-3.5 shrink-0 text-muted" aria-hidden="true" })"请在 Models 中选择模型并设置别名，网关按别名和协议转发请求。"</p>
+        <p class="mt-4 mb-0 flex items-start gap-2 text-[13px] leading-relaxed text-secondary">icon(data: INFO_CIRCLE_FILLED, attrs: attributes! { class="mt-1 size-3.5 shrink-0 text-muted" aria-hidden="true" })"请先在 Models 中添加上游模型，再到 Model Routes 配置对外模型名与候选顺序。"</p>
     })
 }
 

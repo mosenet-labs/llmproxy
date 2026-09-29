@@ -9,13 +9,13 @@ use toasty_core::driver::operation::TransactionMode;
 
 use crate::{
     ActiveProvider, MessagesAuth, ModelMappingInput, ModelMappingView, ModelPrice,
-    ModelProbeTarget, ModelRoute, ProbeStatus, ProviderInput, ProviderView, StoreError,
-    StoreResult,
+    ModelProbeTarget, ModelRoute, ModelRouteInput, ModelRouteTargetView, ModelRouteView,
+    ProbeStatus, ProviderInput, ProviderView, StoreError, StoreResult,
     crypto::KeyCipher,
     database::Backend,
     model::{
-        HolidayDateRow, ModelMapping, ModelPricePlan, ModelPriceRule, Provider, RouteBinding,
-        StoreKey, protocol,
+        HolidayDateRow, ModelMapping, ModelPricePlan, ModelPriceRule, ModelRouteRow,
+        ModelRouteTargetRow, Provider, RouteBinding, StoreKey, protocol,
     },
     pricing::decimal_price,
 };
@@ -25,6 +25,7 @@ mod migrations;
 mod models;
 mod pricing;
 mod providers;
+mod routes;
 
 use migrations::{MIGRATIONS, SQLITE_MIGRATIONS};
 use pricing::backfill_legacy_prices;
@@ -53,6 +54,8 @@ impl ProviderStore {
                 RouteBinding,
                 StoreKey,
                 ModelMapping,
+                ModelRouteRow,
+                ModelRouteTargetRow,
                 ModelPricePlan,
                 ModelPriceRule,
                 HolidayDateRow
@@ -236,7 +239,7 @@ fn validate_mapping(mut input: ModelMappingInput) -> StoreResult<ModelMappingInp
         || input.alias.len() > 200
         || input.alias.chars().any(char::is_control)
     {
-        return Err(StoreError::Validation("模型别名须为 1–200 个字符".into()));
+        return Err(StoreError::Validation("模型标识须为 1–200 个字符".into()));
     }
     if input.upstream_model_id.is_empty()
         || input.upstream_model_id.len() > 200
@@ -282,7 +285,7 @@ async fn check_unique_alias(
         .await?
         && Some(existing.id) != own_id
     {
-        return Err(StoreError::Conflict("模型别名已存在".into()));
+        return Err(StoreError::Conflict("模型标识已存在".into()));
     }
     Ok(())
 }
@@ -552,7 +555,92 @@ mod tests {
         assert_eq!(price.input_per_million, "0.15");
         assert_eq!(price.output_per_million, "0.60");
         assert_eq!(store.list_models().await.unwrap().len(), 1);
-        assert_eq!(store.load_model_routes().await.unwrap().len(), 2);
+        assert!(store.list_routes().await.unwrap().is_empty());
+        assert!(
+            store
+                .load_model_routes()
+                .await
+                .unwrap()
+                .iter()
+                .any(|route| {
+                    route.alias == "Primary/model"
+                        && route.protocol == Protocol::OpenAiChat
+                        && route.upstream_model_id == "upstream-model"
+                })
+        );
+        assert!(matches!(
+            store
+                .create_route(ModelRouteInput {
+                    name: "Primary/model".into(),
+                    protocol: Protocol::OpenAiChat,
+                    enabled: true,
+                    targets: vec![crate::ModelRouteTargetInput {
+                        model_id: saved.id,
+                        enabled: true,
+                    }],
+                })
+                .await,
+            Err(StoreError::Conflict(_))
+        ));
+        let route = store
+            .create_route(ModelRouteInput {
+                name: "public-model".into(),
+                protocol: Protocol::OpenAiChat,
+                enabled: true,
+                targets: vec![crate::ModelRouteTargetInput {
+                    model_id: saved.id,
+                    enabled: true,
+                }],
+            })
+            .await
+            .unwrap();
+        let responses_route = store
+            .create_route(ModelRouteInput {
+                name: "public-model".into(),
+                protocol: Protocol::OpenAiResponses,
+                enabled: true,
+                targets: vec![crate::ModelRouteTargetInput {
+                    model_id: saved.id,
+                    enabled: true,
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.load_model_routes().await.unwrap().len(), 4);
+        assert!(matches!(
+            store
+                .create_route(ModelRouteInput {
+                    name: "public-model".into(),
+                    protocol: Protocol::OpenAiChat,
+                    enabled: true,
+                    targets: vec![crate::ModelRouteTargetInput {
+                        model_id: saved.id,
+                        enabled: true
+                    }],
+                })
+                .await,
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(matches!(
+            store
+                .create_route(ModelRouteInput {
+                    name: "wrong-protocol".into(),
+                    protocol: Protocol::AnthropicMessages,
+                    enabled: true,
+                    targets: vec![crate::ModelRouteTargetInput {
+                        model_id: saved.id,
+                        enabled: true
+                    }],
+                })
+                .await,
+            Err(StoreError::Validation(_))
+        ));
+        let mut chat_only = mapping.clone();
+        chat_only.protocols = vec![Protocol::OpenAiChat];
+        assert!(matches!(
+            store.update_model(saved.id, saved.version, chat_only).await,
+            Err(StoreError::Conflict(_))
+        ));
         let batch = ["first", "second"].map(|id| ModelMappingInput {
             alias: format!("Primary/{id}"),
             provider_id: provider.id,
@@ -597,7 +685,100 @@ mod tests {
             store.delete(provider.id, provider.version).await,
             Err(StoreError::Conflict(_))
         ));
+        let mut secondary_input = provider_input.clone();
+        secondary_input.name = "Secondary".into();
+        let secondary = store.create(secondary_input).await.unwrap();
+        let secondary_model = store
+            .create_model(ModelMappingInput {
+                alias: "Secondary/model".into(),
+                provider_id: secondary.id,
+                upstream_model_id: "backup-model".into(),
+                protocols: vec![Protocol::OpenAiChat, Protocol::OpenAiResponses],
+                reference_price: None,
+            })
+            .await
+            .unwrap();
+        let route = store
+            .update_route(
+                route.id,
+                route.version,
+                ModelRouteInput {
+                    name: "public-model".into(),
+                    protocol: Protocol::OpenAiChat,
+                    enabled: true,
+                    targets: vec![
+                        crate::ModelRouteTargetInput {
+                            model_id: saved.id,
+                            enabled: true,
+                        },
+                        crate::ModelRouteTargetInput {
+                            model_id: secondary_model.id,
+                            enabled: true,
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let routes = store.load_model_routes().await.unwrap();
+        let selected = routes
+            .iter()
+            .find(|route| route.alias == "public-model" && route.protocol == Protocol::OpenAiChat)
+            .unwrap();
+        assert_eq!(selected.upstream_model_id, "upstream-model");
+        store
+            .set_enabled(provider.id, provider.version, false)
+            .await
+            .unwrap();
+        let routes = store.load_model_routes().await.unwrap();
+        let selected = routes
+            .iter()
+            .find(|route| route.alias == "public-model" && route.protocol == Protocol::OpenAiChat)
+            .unwrap();
+        assert_eq!(selected.upstream_model_id, "backup-model");
+        assert_eq!(selected.provider.as_ref().unwrap().id, secondary.id);
+        store
+            .set_enabled(secondary.id, secondary.version, false)
+            .await
+            .unwrap();
+        let routes = store.load_model_routes().await.unwrap();
+        let selected = routes
+            .iter()
+            .find(|route| route.alias == "public-model" && route.protocol == Protocol::OpenAiChat)
+            .unwrap();
+        assert!(selected.provider.is_none());
+        assert!(matches!(
+            store
+                .update_route(
+                    route.id,
+                    route.version - 1,
+                    ModelRouteInput {
+                        name: "public-model".into(),
+                        protocol: Protocol::OpenAiChat,
+                        enabled: true,
+                        targets: vec![crate::ModelRouteTargetInput {
+                            model_id: saved.id,
+                            enabled: true
+                        }],
+                    }
+                )
+                .await,
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(matches!(
+            store.delete_model(saved.id, saved.version).await,
+            Err(StoreError::Conflict(_))
+        ));
+        store.delete_route(route.id, route.version).await.unwrap();
+        store
+            .delete_route(responses_route.id, responses_route.version)
+            .await
+            .unwrap();
         store.delete_model(saved.id, saved.version).await.unwrap();
+        store
+            .delete_model(secondary_model.id, secondary_model.version)
+            .await
+            .unwrap();
         for model in imported {
             store.delete_model(model.id, model.version).await.unwrap();
         }

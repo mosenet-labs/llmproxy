@@ -51,6 +51,21 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0010_holiday_dates.sql",
         include_str!("../../migrations/postgresql/0010_holiday_dates.sql"),
     ),
+    MigrationFile::new(
+        202609290001,
+        "0011_model_routes.sql",
+        include_str!("../../migrations/postgresql/0011_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290002,
+        "0012_remove_implicit_model_routes.sql",
+        include_str!("../../migrations/postgresql/0012_remove_implicit_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290003,
+        "0013_route_protocol.sql",
+        include_str!("../../migrations/postgresql/0013_route_protocol.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -178,5 +193,85 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202609280008,
         "0025_holiday_dates.sql",
         include_str!("../../migrations/sqlite/0025_holiday_dates.sql"),
+    ),
+    MigrationFile::new(
+        202609290001,
+        "0026_model_routes.sql",
+        include_str!("../../migrations/sqlite/0026_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290002,
+        "0027_model_route_targets.sql",
+        include_str!("../../migrations/sqlite/0027_model_route_targets.sql"),
+    ),
+    MigrationFile::new(
+        202609290003,
+        "0028_model_route_targets_model_idx.sql",
+        include_str!("../../migrations/sqlite/0028_model_route_targets_model_idx.sql"),
+    ),
+    MigrationFile::new(
+        202609290004,
+        "0029_backfill_model_routes.sql",
+        include_str!("../../migrations/sqlite/0029_backfill_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290005,
+        "0030_backfill_model_route_targets.sql",
+        include_str!("../../migrations/sqlite/0030_backfill_model_route_targets.sql"),
+    ),
+    MigrationFile::new(
+        202609290006,
+        "0031_remove_implicit_route_targets.sql",
+        include_str!("../../migrations/sqlite/0031_remove_implicit_route_targets.sql"),
+    ),
+    MigrationFile::new(
+        202609290007,
+        "0032_remove_implicit_model_routes.sql",
+        include_str!("../../migrations/sqlite/0032_remove_implicit_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290008,
+        "0033_rename_legacy_model_routes.sql",
+        include_str!("../../migrations/sqlite/0033_rename_legacy_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290009,
+        "0034_rename_legacy_route_targets.sql",
+        include_str!("../../migrations/sqlite/0034_rename_legacy_route_targets.sql"),
+    ),
+    MigrationFile::new(
+        202609290010,
+        "0035_create_protocol_routes.sql",
+        include_str!("../../migrations/sqlite/0035_create_protocol_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290011,
+        "0036_create_protocol_route_targets.sql",
+        include_str!("../../migrations/sqlite/0036_create_protocol_route_targets.sql"),
+    ),
+    MigrationFile::new(
+        202609290012,
+        "0037_copy_protocol_routes.sql",
+        include_str!("../../migrations/sqlite/0037_copy_protocol_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290013,
+        "0038_copy_protocol_route_targets.sql",
+        include_str!("../../migrations/sqlite/0038_copy_protocol_route_targets.sql"),
+    ),
+    MigrationFile::new(
+        202609290014,
+        "0039_drop_legacy_route_targets.sql",
+        include_str!("../../migrations/sqlite/0039_drop_legacy_route_targets.sql"),
+    ),
+    MigrationFile::new(
+        202609290015,
+        "0040_drop_legacy_model_routes.sql",
+        include_str!("../../migrations/sqlite/0040_drop_legacy_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202609290016,
+        "0041_route_targets_model_idx.sql",
+        include_str!("../../migrations/sqlite/0041_route_targets_model_idx.sql"),
     ),
 ]);

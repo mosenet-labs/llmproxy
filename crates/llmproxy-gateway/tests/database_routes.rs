@@ -307,7 +307,7 @@ async fn exercise_gateway(url: &str) {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    assert!(response.text().await.unwrap().contains("路由概览"));
+    assert!(response.text().await.unwrap().contains("Model Routes"));
 
     let new = store
         .create(input(

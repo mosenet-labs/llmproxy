@@ -227,6 +227,36 @@ pub struct ModelMappingView {
     pub version: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct ModelRouteTargetInput {
+    pub model_id: i64,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelRouteInput {
+    pub name: String,
+    pub protocol: Protocol,
+    pub enabled: bool,
+    pub targets: Vec<ModelRouteTargetInput>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelRouteTargetView {
+    pub model: ModelMappingView,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelRouteView {
+    pub id: i64,
+    pub name: String,
+    pub protocol: Protocol,
+    pub enabled: bool,
+    pub targets: Vec<ModelRouteTargetView>,
+    pub version: u64,
+}
+
 /// Server-only model route. Credentials are never serialized to the browser.
 pub struct ModelRoute {
     pub alias: String,

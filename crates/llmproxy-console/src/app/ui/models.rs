@@ -180,11 +180,11 @@ pub async fn model_workspace(
         model_editor(editor: &editor, providers: &providers, all_models: &all, csrf: csrf.as_str(), success: &success, refresh: &refresh)
         price_editor(editor: &price_editor_state, csrf: csrf.as_str(), success: &success, refresh: &refresh)
         <section class="mb-6 flex min-h-20 items-center justify-between gap-6 max-[640px]:flex-col max-[640px]:items-start max-[640px]:gap-4">
-            <div><h1 class="m-0 text-[28px] font-semibold leading-[1.35] text-heading max-[640px]:text-2xl">"Models"</h1><p class="mt-2 mb-0 text-sm text-secondary">"选择上游模型，设置客户端别名与可用协议。"</p></div>
+            <div><h1 class="m-0 text-[28px] font-semibold leading-[1.35] text-heading max-[640px]:text-2xl">"Models"</h1><p class="mt-2 mb-0 text-sm text-secondary">"管理具体上游模型；模型标识可直接用于请求，也可在 Model Routes 中创建新的对外模型名。"</p></div>
             <button class=(class!(BUTTON, PRIMARY)) type="button" (create) :disabled=(providers.is_empty())>"＋ 新建模型"</button>
         </section>
         <section class="overflow-visible rounded-lg border border-border bg-white shadow-xs" aria-label="模型列表">
-            <div class="flex items-center justify-between gap-4 px-6 py-5 max-[640px]:px-4"><h2 class="m-0 text-base font-semibold">"模型列表"<span class="ml-2 rounded bg-surface px-2 text-[13px] font-normal text-secondary">(all.len())</span></h2><span class="text-[13px] text-secondary">"按协议与别名匹配请求"</span></div>
+            <div class="flex items-center justify-between gap-4 px-6 py-5 max-[640px]:px-4"><h2 class="m-0 text-base font-semibold">"模型列表"<span class="ml-2 rounded bg-surface px-2 text-[13px] font-normal text-secondary">(all.len())</span></h2><a class="text-[13px] text-primary hover:underline" href="/ui/routes">"管理 Model Routes →"</a></div>
             <form class="flex flex-wrap items-center gap-3 border-t border-border px-6 py-4 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[150px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/ui/models" role="search" @submit=$(|event: Event| {
                 event.prevent_default();
                 applied_query.set(draft_query.get());
@@ -193,7 +193,7 @@ pub async fn model_workspace(
                 page.set(1);
                 refresh.increment();
             })>
-                <input class="h-9 w-[300px] max-w-full rounded-md border border-control-border px-3 text-sm focus:border-primary max-[640px]:w-full" type="search" name="q" aria-label="搜索模型" placeholder="搜索别名、上游模型或 Provider" :value=$(draft_query.get()) @input=$(|event: Event| draft_query.set(event.target.value))>
+                <input class="h-9 w-[300px] max-w-full rounded-md border border-control-border px-3 text-sm focus:border-primary max-[640px]:w-full" type="search" name="q" aria-label="搜索模型" placeholder="搜索标识、上游模型或 Provider" :value=$(draft_query.get()) @input=$(|event: Event| draft_query.set(event.target.value))>
                 <select name="protocol" aria-label="按协议筛选模型" :value=$(draft_protocol.get()) @change=$(|event: Event| draft_protocol.set(event.target.value))><option value="">"全部协议"</option>for kind in [Protocol::OpenAiChat, Protocol::OpenAiResponses, Protocol::AnthropicMessages] { <option value=(kind.as_str()) selected=(draft_protocol.get_untracked() == kind.as_str())>(protocol_label(kind))</option> }</select>
                 <select name="provider" aria-label="按 Provider 筛选模型" :value=$(draft_provider.get()) @change=$(|event: Event| draft_provider.set(event.target.value))><option value="">"全部 Provider"</option>for option in &filter_providers { <option value=(option.id.to_string()) selected=(draft_provider.get_untracked() == option.id.to_string())>(option.name.as_str())</option> }</select>
                 <button class=(BUTTON) type="submit">"查询"</button>
@@ -205,7 +205,7 @@ pub async fn model_workspace(
                 <div class="border-t border-border px-6 py-12 text-center text-sm text-secondary">"没有找到匹配的模型"</div>
             } else {
                 data_table(label: "模型列表", attrs: attributes! { class="min-w-[960px] [&_th]:px-5! [&_td]:px-5! [&_td]:py-4! [&_td:nth-child(5)]:py-2!" },
-                    <thead><tr><th>"模型别名"</th><th>"上游模型 ID"</th><th>"Provider"</th><th>"协议"</th><th>"参考价格"</th><th>"状态"</th><th class="text-right!">"操作"</th></tr></thead>
+                    <thead><tr><th>"模型标识"</th><th>"上游模型 ID"</th><th>"Provider"</th><th>"协议"</th><th>"参考价格"</th><th>"状态"</th><th class="text-right!">"操作"</th></tr></thead>
                     <tbody>#[key(model.id)] for model in &page_models {
                         let plan: Option<&PricePlanView> = price_plans.iter().find(|plan| plan.provider_id == model.provider_id && plan.upstream_model_id == model.upstream_model_id);
                         let alias_count = all.iter().filter(|other| other.provider_id == model.provider_id && other.upstream_model_id == model.upstream_model_id).count();

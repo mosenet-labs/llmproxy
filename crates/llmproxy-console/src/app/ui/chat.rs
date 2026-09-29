@@ -1,6 +1,7 @@
 use std::{collections::HashMap, io};
 
 use llmproxy_core::protocol::Protocol;
+use llmproxy_store::{ModelRouteView, ProviderStore};
 use topcoat::{
     Result,
     context::{Cx, app_context},
@@ -25,15 +26,43 @@ fn protocol_label(protocol: Protocol) -> &'static str {
     }
 }
 
-fn selected_model(id: &str, protocol: &str) -> std::result::Result<(i64, Protocol), String> {
-    let id = id.parse().map_err(|_| "请选择有效的模型")?;
-    let protocol = match protocol {
+fn selected_protocol(protocol: &str) -> std::result::Result<Protocol, String> {
+    Ok(match protocol {
         "openai_chat" => Protocol::OpenAiChat,
         "openai_responses" => Protocol::OpenAiResponses,
         "anthropic_messages" => Protocol::AnthropicMessages,
         _ => return Err("请选择有效的协议".to_owned()),
-    };
-    Ok((id, protocol))
+    })
+}
+
+fn route_available(route: &ModelRouteView) -> bool {
+    route.enabled
+        && route
+            .targets
+            .iter()
+            .any(|target| target.enabled && target.model.provider_enabled)
+}
+
+async fn chat_target(
+    store: &ProviderStore,
+    selection: &str,
+) -> std::result::Result<(String, Vec<Protocol>, bool), String> {
+    if let Some(id) = selection.strip_prefix("route:") {
+        let id = id.parse::<i64>().map_err(|_| "请选择有效的模型路由")?;
+        let route = store
+            .list_routes()
+            .await
+            .map_err(|_| "无法读取模型路由配置")?
+            .into_iter()
+            .find(|route| route.id == id)
+            .ok_or("模型路由已不存在")?;
+        let available = route_available(&route);
+        Ok((route.name, vec![route.protocol], available))
+    } else {
+        let id = selection.parse::<i64>().map_err(|_| "请选择有效的模型")?;
+        let model = store.get_model(id).await.map_err(|_| "无法读取模型配置")?;
+        Ok((model.alias, model.protocols, model.provider_enabled))
+    }
 }
 
 #[page]
@@ -47,14 +76,28 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         .filter(|model| model.provider_enabled && !model.protocols.is_empty())
         .collect();
     models.sort_by(|a, b| a.alias.cmp(&b.alias));
-    let available = !models.is_empty();
+    let mut routes: Vec<_> = state
+        .store
+        .list_routes()
+        .await?
+        .into_iter()
+        .filter(route_available)
+        .collect();
+    routes.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.protocol.as_str().cmp(b.protocol.as_str()))
+    });
+    let available = !models.is_empty() || !routes.is_empty();
     let first_model = models
         .first()
         .map(|model| model.id.to_string())
+        .or_else(|| routes.first().map(|route| format!("route:{}", route.id)))
         .unwrap_or_default();
     let first_protocol = models
         .first()
         .and_then(|model| model.protocols.first())
+        .or_else(|| routes.first().map(|route| &route.protocol))
         .map(|protocol| protocol.as_str().to_owned())
         .unwrap_or_default();
     let initial = state
@@ -140,6 +183,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                     busy.set(false);
                                 }) },
                                     for model in &models { <option value=(model.id.to_string())>(model.alias.as_str())</option> }
+                                    for route in &routes { <option value=(format!("route:{}", route.id))>(format!("{} · 路由 ({})", route.name, protocol_label(route.protocol)))</option> }
                                 )
                             </div>
                         )</div>
@@ -167,9 +211,11 @@ pub async fn new_chat(
         .get(&current_session)
         .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
     let scope = current.scope().to_owned();
-    let (id, protocol_kind) = selected_model(&model_id, &protocol).map_err(io::Error::other)?;
-    let model = state.store.get_model(id).await?;
-    if !model.provider_enabled || !model.protocols.contains(&protocol_kind) {
+    let protocol_kind = selected_protocol(&protocol).map_err(io::Error::other)?;
+    let (_, protocols, available) = chat_target(&state.store, &model_id)
+        .await
+        .map_err(io::Error::other)?;
+    if !available || !protocols.contains(&protocol_kind) {
         return Err(io::Error::other("当前模型或协议已不可用").into());
     }
     Ok(sessions.create(Some(&scope), &model_id, &protocol)?)
@@ -178,13 +224,11 @@ pub async fn new_chat(
 #[procedure("/ui/_topcoat/runtime/procedures/default-chat-protocol")]
 pub async fn default_protocol(cx: &Cx, csrf: String, model_id: String) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
-    let id = model_id
-        .parse()
-        .map_err(|_| io::Error::other("无效的模型"))?;
-    let model = app_context::<AppState>(cx).store.get_model(id).await?;
-    Ok(if model.provider_enabled {
-        model
-            .protocols
+    let (_, protocols, available) = chat_target(&app_context::<AppState>(cx).store, &model_id)
+        .await
+        .map_err(io::Error::other)?;
+    Ok(if available {
+        protocols
             .first()
             .map(|protocol| protocol.as_str())
             .unwrap_or_default()
@@ -215,20 +259,16 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool
         return Ok(false);
     };
     let result = async {
-        let (model_id, protocol) = selected_model(session.model_id(), session.protocol())?;
-        let model = state
-            .store
-            .get_model(model_id)
-            .await
-            .map_err(|_| "无法读取模型配置".to_owned())?;
-        if !model.provider_enabled || !model.protocols.contains(&protocol) {
+        let protocol = selected_protocol(session.protocol())?;
+        let (alias, protocols, available) = chat_target(&state.store, session.model_id()).await?;
+        if !available || !protocols.contains(&protocol) {
             return Err("当前模型或协议已不可用".to_owned());
         }
         stream_reply(
             &state.chat_client,
             &state.gateway_origin,
             protocol,
-            &model.alias,
+            &alias,
             &history,
             |reply| session.update(reply),
         )
@@ -250,11 +290,9 @@ pub async fn chat_protocol_picker(
 ) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
     let csrf = state.csrf.clone();
-    let id = model_id
-        .get()
-        .parse()
-        .map_err(|_| io::Error::other("无效的模型"))?;
-    let model = state.store.get_model(id).await?;
+    let (_, protocols, _) = chat_target(&state.store, &model_id.get())
+        .await
+        .map_err(io::Error::other)?;
     Ok(view! {
         select(attrs: attributes! { cx => id="chat-protocol" aria-label="选择模型协议" class="w-full" :value=$(protocol.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
             busy.set(true);
@@ -265,7 +303,7 @@ pub async fn chat_protocol_picker(
             refresh.increment();
             busy.set(false);
         }) },
-            for kind in &model.protocols {
+            for kind in &protocols {
                 <option value=(kind.as_str())>(protocol_label(*kind))</option>
             }
         )
@@ -287,13 +325,16 @@ pub async fn chat_session_list(
         .chat_sessions
         .get(&session.get())
         .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
-    let aliases: HashMap<_, _> = state
+    let mut aliases: HashMap<_, _> = state
         .store
         .list_models()
         .await?
         .into_iter()
         .map(|model| (model.id.to_string(), model.alias))
         .collect();
+    for route in state.store.list_routes().await? {
+        aliases.insert(format!("route:{}", route.id), route.name);
+    }
     let rooms: Vec<_> = state
         .chat_sessions
         .list(current.scope(), &session.get())

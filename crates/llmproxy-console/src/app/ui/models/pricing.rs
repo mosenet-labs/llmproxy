@@ -787,7 +787,7 @@ pub(super) async fn price_editor(
                 <div class="min-h-[300px] overflow-y-auto p-6">
                     <div class="mb-4 rounded-md border border-[#ffccc7] bg-[#fff2f0] px-4 py-3 text-sm text-[#cf1322]" role="alert" :hidden=$(if error.get().is_empty() { true } else if matrix_mode.get() { false } else { error.get().starts_with("第 ") })>$(error.get())</div>
                     <div class="flex flex-wrap items-start justify-between gap-3">
-                        <div><h3 class="m-0 text-base font-semibold text-heading">$(provider_name.get())" / "$(model_id.get())</h3><p class="mt-1 mb-0 text-xs text-secondary">$(alias_count.get())" 个客户端别名共用此价格。仅作为参考价格展示。"</p></div>
+                        <div><h3 class="m-0 text-base font-semibold text-heading">$(provider_name.get())" / "$(model_id.get())</h3><p class="mt-1 mb-0 text-xs text-secondary">$(alias_count.get())" 个模型标识共用此价格。仅作为参考价格展示。"</p></div>
                         <span class="rounded border border-border bg-surface px-2.5 py-1 text-xs text-secondary">$(if version.get().is_empty() { "新价格" } else { "当前版本" })" "$(version.get())" · "$(source.get())" "$(recorded_at.get())</span>
                     </div>
                     <div class="mt-6 grid grid-cols-[150px_minmax(180px,1fr)_minmax(0,1.5fr)] gap-3 max-[700px]:grid-cols-1">

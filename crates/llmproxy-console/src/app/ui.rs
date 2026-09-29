@@ -24,12 +24,12 @@ pub async fn providers_redirect(cx: &Cx) -> Result<topcoat::router::error::SeeOt
 
 #[layout]
 pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
-    let routes_page = uri(cx).path() == "/ui/routes";
+    let routes_page = uri(cx).path().starts_with("/ui/routes");
     let models_page = uri(cx).path() == "/ui/models";
     let chat_page = uri(cx).path() == "/ui/chat";
     let holidays_page = uri(cx).path() == "/ui/holidays";
     let page_title = if routes_page {
-        "路由概览"
+        "Model Routes"
     } else if models_page {
         "Models"
     } else if chat_page {
@@ -64,7 +64,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                             <a class=(NAV_ITEM) href=(providers_link) aria-current=(if routes_page || models_page || chat_page || holidays_page { None } else { Some("page") })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Providers"</a>
                             <a class=(NAV_ITEM) href=(models_link) aria-current=(if models_page { Some("page") } else { None })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Models"</a>
                             <a class=(NAV_ITEM) href=(chat_link) aria-current=(if chat_page { Some("page") } else { None })>icon(data: PROJECT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Chat"</a>
-                            <a class=(NAV_ITEM) href=(routes_link) aria-current=(if routes_page { Some("page") } else { None })>icon(data: APARTMENT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"路由概览"</a>
+                            <a class=(NAV_ITEM) href=(routes_link) aria-current=(if routes_page { Some("page") } else { None })>icon(data: APARTMENT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Model Routes"</a>
                             <a class=(NAV_ITEM) href=(holidays_link) aria-current=(if holidays_page { Some("page") } else { None })>icon(data: CALENDAR_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"节假日"</a>
                         </nav>
                         <div class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden">"本地开发环境"</div>

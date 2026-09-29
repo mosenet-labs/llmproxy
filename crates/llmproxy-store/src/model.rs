@@ -62,6 +62,32 @@ pub(crate) struct ModelMapping {
 }
 
 #[derive(toasty::Model)]
+#[table = "model_routes"]
+pub(crate) struct ModelRouteRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub name: String,
+    pub protocol: String,
+    pub enabled: bool,
+    #[version]
+    pub version: u64,
+    pub updated_at: i64,
+}
+
+#[derive(toasty::Model)]
+#[table = "model_route_targets"]
+pub(crate) struct ModelRouteTargetRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub route_id: i64,
+    pub model_id: i64,
+    pub position: i64,
+    pub enabled: bool,
+}
+
+#[derive(toasty::Model)]
 #[table = "model_price_plans"]
 pub(crate) struct ModelPricePlan {
     #[key]

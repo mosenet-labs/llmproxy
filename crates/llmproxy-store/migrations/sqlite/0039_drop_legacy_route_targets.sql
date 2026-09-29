@@ -1,0 +1,1 @@
+DROP TABLE legacy_model_route_targets;

@@ -1,5 +1,7 @@
 # 模型映射与 Models 控制台
 
+> 本文记录原有单模型别名路由的实施过程。当前对外名称及多候选选择见 [Model Routes](18-model-routes.md)。
+
 ## 已确认的行为
 
 - 控制台的两个管理入口为 `/ui/providers`（Providers）和 `/ui/models`（Models）；`/ui` 跳转到 Providers。
