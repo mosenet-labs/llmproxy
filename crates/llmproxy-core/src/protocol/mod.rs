@@ -1,3 +1,7 @@
+//! 各协议的原始数据结构和协议标识。
+
+pub mod chat;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
