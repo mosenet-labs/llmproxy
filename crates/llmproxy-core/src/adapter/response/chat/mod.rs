@@ -2,9 +2,11 @@
 
 mod decode;
 mod encode;
+mod usage;
 
 pub use decode::decode_chat;
 pub use encode::encode_chat;
+pub use usage::{decode_chat_usage, encode_chat_usage};
 
 use crate::protocol::Protocol;
 

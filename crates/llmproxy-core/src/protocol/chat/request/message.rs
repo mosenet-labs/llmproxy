@@ -93,6 +93,9 @@ pub enum TextPart {
     Text {
         /// 内容块中的文本。
         text: String,
+        /// 在此内容块末尾设置显式提示缓存断点。
+        #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+        prompt_cache_breakpoint: OptionalNullable<PromptCacheBreakpoint>,
         /// 保留当前未声明的扩展字段，例如提示缓存断点。
         #[serde(flatten)]
         extra: Map<String, Value>,
@@ -107,6 +110,9 @@ pub enum UserPart {
     Text {
         /// 用户输入的文本。
         text: String,
+        /// 在此内容块末尾设置显式提示缓存断点。
+        #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+        prompt_cache_breakpoint: OptionalNullable<PromptCacheBreakpoint>,
         /// 保留当前未声明的扩展字段，例如提示缓存断点。
         #[serde(flatten)]
         extra: Map<String, Value>,
@@ -115,6 +121,9 @@ pub enum UserPart {
     ImageUrl {
         /// 图片地址及可选的细节级别。
         image_url: ImageUrl,
+        /// 在此内容块末尾设置显式提示缓存断点。
+        #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+        prompt_cache_breakpoint: OptionalNullable<PromptCacheBreakpoint>,
         /// 保留当前未声明的扩展字段，例如提示缓存断点。
         #[serde(flatten)]
         extra: Map<String, Value>,
@@ -123,6 +132,9 @@ pub enum UserPart {
     InputAudio {
         /// Base64 音频数据及其格式。
         input_audio: InputAudio,
+        /// 在此内容块末尾设置显式提示缓存断点。
+        #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+        prompt_cache_breakpoint: OptionalNullable<PromptCacheBreakpoint>,
         /// 保留当前未声明的扩展字段，例如提示缓存断点。
         #[serde(flatten)]
         extra: Map<String, Value>,
@@ -131,6 +143,9 @@ pub enum UserPart {
     File {
         /// 文件数据、已上传文件 ID 或文件名。
         file: FileInput,
+        /// 在此内容块末尾设置显式提示缓存断点。
+        #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+        prompt_cache_breakpoint: OptionalNullable<PromptCacheBreakpoint>,
         /// 保留当前未声明的扩展字段，例如提示缓存断点。
         #[serde(flatten)]
         extra: Map<String, Value>,
@@ -187,6 +202,9 @@ pub enum AssistantPart {
     Text {
         /// 模型生成的文本。
         text: String,
+        /// 在此内容块末尾设置显式提示缓存断点。
+        #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+        prompt_cache_breakpoint: OptionalNullable<PromptCacheBreakpoint>,
         /// 保留当前未声明的扩展字段，例如提示缓存断点。
         #[serde(flatten)]
         extra: Map<String, Value>,
@@ -199,6 +217,16 @@ pub enum AssistantPart {
         #[serde(flatten)]
         extra: Map<String, Value>,
     },
+}
+
+/// 消息内容块末尾的显式提示缓存断点。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PromptCacheBreakpoint {
+    /// 断点模式，标准值为 `explicit`。
+    pub mode: String,
+    /// 保留供应商扩展字段。
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// assistant 产生的工具调用；函数参数保持原协议中的字符串形式。

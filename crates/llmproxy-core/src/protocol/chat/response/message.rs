@@ -1,5 +1,5 @@
 //! `choices[].message` 的原始协议结构，不包含 Choice 外层字段。
-//! 参考 API：https://developers.openai.com/api/reference/cli/resources/chat
+//! 参考 API：https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -19,9 +19,9 @@ pub struct Message {
     pub refusal: OptionalNullable<String>,
     /// 消息角色，固定为 `assistant`。
     pub role: AssistantRole,
-    /// 文本引用、URL 等标注；具体标注结构暂以 JSON 保留。
+    /// 模型输出中的 URL 引用等标注。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-    pub annotations: OptionalNullable<Vec<Value>>,
+    pub annotations: OptionalNullable<Vec<Annotation>>,
     /// 模型生成的音频输出。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub audio: OptionalNullable<Audio>,
@@ -48,6 +48,44 @@ pub struct Audio {
     /// 音频对应的文本转录。
     pub transcript: String,
     /// 保留未声明的音频扩展字段。
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// 输出标注；已知 URL 引用结构化，未来新增类型保留原始 JSON。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Annotation {
+    /// 网页搜索生成的 URL 引用。
+    UrlCitation(UrlCitationAnnotation),
+    /// 尚未建模的标注类型。
+    Other(Value),
+}
+
+/// URL 引用标注的外层类型。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UrlCitationAnnotation {
+    /// 标注类型，标准值为 `url_citation`。
+    pub r#type: String,
+    /// 引用在输出中的位置、标题和地址。
+    pub url_citation: UrlCitation,
+    /// 保留供应商扩展字段。
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// 网页引用在输出文本中的范围与来源。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UrlCitation {
+    /// 引用结束位置。
+    pub end_index: u64,
+    /// 引用起始位置。
+    pub start_index: u64,
+    /// 来源网页标题。
+    pub title: String,
+    /// 来源网页地址。
+    pub url: String,
+    /// 保留供应商扩展字段。
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

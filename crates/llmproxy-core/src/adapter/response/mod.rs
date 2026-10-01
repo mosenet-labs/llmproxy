@@ -70,7 +70,7 @@ fn reject_unmapped_parts(message: &IrMessage, target: Protocol) -> Result<()> {
     Ok(())
 }
 
-pub use chat::{decode_chat, encode_chat};
+pub use chat::{decode_chat, decode_chat_usage, encode_chat, encode_chat_usage};
 pub use gemini::{decode_gemini, encode_gemini};
 pub use messages::{decode_messages, encode_messages};
 pub use responses::{decode_responses, encode_responses};

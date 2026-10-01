@@ -420,4 +420,24 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn chat_cache_breakpoint_survives_message_edit() {
+        let mut body = json!({"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"before","prompt_cache_breakpoint":{"mode":"explicit"}}]}]});
+        let mut batch = Protocol::OpenAiChat
+            .decode_request_messages(&body)
+            .unwrap()
+            .unwrap();
+        change_first_text(&mut batch.messages[0].parts);
+        assert!(
+            Protocol::OpenAiChat
+                .encode_request_messages(&mut body, batch)
+                .unwrap()
+        );
+        assert_eq!(body["messages"][0]["content"][0]["text"], "edited");
+        assert_eq!(
+            body["messages"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+            "explicit"
+        );
+    }
 }

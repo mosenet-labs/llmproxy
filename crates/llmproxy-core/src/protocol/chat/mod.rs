@@ -3,4 +3,5 @@
 pub mod request;
 pub mod response;
 
-pub use request::message::*;
+pub use request::{Request, message::*};
+pub use response::{Chunk, Completion};
