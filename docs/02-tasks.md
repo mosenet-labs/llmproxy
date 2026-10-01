@@ -191,3 +191,12 @@ P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --w
 - [x] A2：完成四种请求消息序列与 IR 的双向适配。
 - [x] A3：验证同协议往返、IR 修改、跨协议拆分合并与明确失败。
 - [x] A4：运行格式、crate 和 workspace 验证。
+
+## RM：响应消息 IR 适配器
+
+范围和验收见[响应消息 IR 适配器](20-response-message-adapters.md)。
+
+- [x] RM1：定义四协议原始响应消息和响应 IR。
+- [x] RM2：实现非流式响应消息序列的双向适配。
+- [x] RM3：验证同协议保真、IR 修改、跨协议与不支持内容。
+- [x] RM4：完成格式、Clippy 和 workspace 验证。

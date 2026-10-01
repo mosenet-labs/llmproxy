@@ -1,4 +1,4 @@
-//! 仅保存未规范化的原协议字段，避免与 IR 正文重复。
+//! 请求与响应共用的原协议保留字段和内容块操作。
 
 use serde_json::{Map, Value, json};
 
@@ -21,6 +21,12 @@ pub(super) fn save(
         KEY.into(),
         json!({"protocol": protocol.as_str(), "form": form, "extra": extra}),
     );
+}
+
+fn metadata(protocol: Protocol, form: &str, extra: Map<String, Value>) -> Map<String, Value> {
+    let mut metadata = Map::new();
+    save(&mut metadata, protocol, form, extra);
+    metadata
 }
 
 pub(super) fn form(metadata: &Map<String, Value>, protocol: Protocol) -> Option<&str> {
@@ -72,9 +78,10 @@ pub(super) fn part(
     form: &str,
     extra: Map<String, Value>,
 ) -> Part {
-    let mut metadata = Map::new();
-    save(&mut metadata, protocol, form, extra);
-    Part { kind, metadata }
+    Part {
+        kind,
+        metadata: metadata(protocol, form, extra),
+    }
 }
 
 /// 未支持的内容块只保留一份原始对象，供同协议写回。
@@ -143,12 +150,24 @@ pub(super) fn message(
     form: &str,
     extra: Map<String, Value>,
 ) -> Message {
-    let mut metadata = Map::new();
-    save(&mut metadata, protocol, form, extra);
     Message {
         role,
         parts,
-        metadata,
+        metadata: metadata(protocol, form, extra),
+    }
+}
+
+pub(super) fn response_message(
+    role: Role,
+    parts: Vec<Part>,
+    protocol: Protocol,
+    form: &str,
+    extra: Map<String, Value>,
+) -> crate::ir::response::Message {
+    crate::ir::response::Message {
+        role,
+        parts,
+        metadata: metadata(protocol, form, extra),
     }
 }
 

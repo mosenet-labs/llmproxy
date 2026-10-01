@@ -26,7 +26,12 @@ pub fn encode_gemini(messages: &[IrMessage]) -> Result<Vec<Message>> {
         for part in &message.parts {
             let block = match &part.kind {
                 PartKind::Text(text) => json!({"text":text}),
-                PartKind::ToolCall(call) if role == Some("model") => {
+                PartKind::ToolCall(call)
+                    if role == Some("model")
+                        || (role.is_none()
+                            && wire::form(&part.metadata, PROTOCOL)
+                                .is_some_and(|form| form.starts_with("function_call"))) =>
+                {
                     if !call.arguments.is_object()
                         && !(call.arguments.is_null()
                             && wire::form(&part.metadata, PROTOCOL).is_some())
@@ -49,7 +54,12 @@ pub fn encode_gemini(messages: &[IrMessage]) -> Result<Vec<Message>> {
                     }
                     json!({"functionCall":function})
                 }
-                PartKind::ToolResult(result) if role == Some("user") => {
+                PartKind::ToolResult(result)
+                    if role == Some("user")
+                        || (role.is_none()
+                            && wire::form(&part.metadata, PROTOCOL)
+                                == Some("function_response")) =>
+                {
                     let name = result
                         .name
                         .as_ref()

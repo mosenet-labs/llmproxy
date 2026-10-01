@@ -8,7 +8,7 @@
 
 ## 模块和数据流
 
-`protocol/*/request/message.rs` 继续只定义原始数据；`ir/request/message.rs` 定义中间语义；`adapter/request/` 各协议模块按**消息序列**解码、编码。`wire.rs` 只处理各协议共用的保留字段和内容块操作；四个协议均在各自目录下以 `decode.rs`、`encode.rs` 分开实现。调用方先以客户端协议解码到 IR，处理 IR，再按 Provider 协议编码。适配器不读取 HTTP body，不负责 Pingora 缓冲或重放。
+`protocol/*/request/message.rs` 继续只定义原始数据；`ir/request/message.rs` 定义请求消息，`ir/message.rs` 定义请求和响应共用的片段语义；`adapter/request/` 各协议模块按**消息序列**解码、编码。`adapter/wire.rs` 处理请求与响应共用的保留字段和内容块操作；四个协议均在各自目录下以 `decode.rs`、`encode.rs` 分开实现。调用方先以客户端协议解码到 IR，处理 IR，再按 Provider 协议编码。适配器不读取 HTTP body，不负责 Pingora 缓冲或重放。
 
 ```text
 原始消息序列 → 源协议 decode → Vec<IR Message> → 业务处理 → 目标协议 encode → 原始消息序列

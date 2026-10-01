@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub use crate::protocol::common::{AssistantRole, MessageType};
 use crate::protocol::optional_nullable::OptionalNullable;
 
 /// `input` 数组中的消息。工具调用和工具结果是其他输入项类型。
@@ -94,20 +95,6 @@ pub enum InputRole {
     User,
     System,
     Developer,
-}
-
-/// 模型输出消息的固定角色。
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AssistantRole {
-    Assistant,
-}
-
-/// 消息输入项或输出项的固定类型。
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageType {
-    Message,
 }
 
 /// assistant 消息在一次响应中的阶段。
