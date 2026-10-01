@@ -182,6 +182,10 @@ struct TargetForm {
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/save-route")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Topcoat 按表单字段逐个注入过程参数"
+)]
 pub async fn save_route(
     cx: &Cx,
     csrf: String,

@@ -21,6 +21,8 @@ pub struct Message {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
+    /// 原协议未指定角色；目前仅 Gemini 可原样写回。
+    Unspecified,
     /// 系统指令。
     System,
     /// 开发者指令。

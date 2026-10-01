@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod ir;
 pub mod protocol;
 pub mod provider;

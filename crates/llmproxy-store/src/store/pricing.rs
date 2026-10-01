@@ -182,8 +182,8 @@ pub(super) async fn backfill_legacy_prices(tx: &mut Transaction<'_>) -> StoreRes
         .into_iter()
         .map(|plan| (plan.provider_id, plan.upstream_model_id))
         .collect();
-    let mut groups: BTreeMap<(i64, String), Vec<(Option<String>, Option<String>)>> =
-        BTreeMap::new();
+    type LegacyPrices = (Option<String>, Option<String>);
+    let mut groups: BTreeMap<(i64, String), Vec<LegacyPrices>> = BTreeMap::new();
     for mapping in ModelMapping::all().exec(&mut *tx).await? {
         groups
             .entry((mapping.provider_id, mapping.upstream_model_id))

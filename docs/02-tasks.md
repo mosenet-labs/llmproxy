@@ -182,3 +182,12 @@ P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --w
 - [x] H3：为 SQLite / PostgreSQL 追加节假日迁移，按年事务替换，保存官方来源。
 - [x] H4：增加 `/ui/holidays` 管理页，通过 Topcoat Signal、Shard、Procedure 切换视图、翻页和导入。
 - [ ] H5：新增年度国务院通知发布时，核对文号与网页结构并增加相应来源解析；价格规则中的节假日条件在后续任务中接入。
+
+## A：请求消息 IR 适配器
+
+设计、边界和逐项验收见[请求消息 IR 适配器](19-request-message-adapters.md)。
+
+- [x] A1：固定保留字段契约，表示 Gemini 未指定角色。
+- [x] A2：完成四种请求消息序列与 IR 的双向适配。
+- [x] A3：验证同协议往返、IR 修改、跨协议拆分合并与明确失败。
+- [x] A4：运行格式、crate 和 workspace 验证。
