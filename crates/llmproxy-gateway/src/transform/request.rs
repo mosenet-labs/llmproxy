@@ -1,10 +1,11 @@
 use std::ops::Range;
 
 use bytes::Bytes;
+use llmproxy_core::protocol::Protocol;
 use pingora::{Error, ErrorType, Result, proxy::Session};
 
 use super::{
-    BodyKind, BodyTransform,
+    BodyKind, BodyTransform, MessagePhase,
     model::{MODEL_PREFIX_LIMIT, Scan, rewrite_model, scan_model},
 };
 
@@ -27,6 +28,7 @@ pub struct RequestBody {
 }
 
 impl RequestBody {
+    /// 创建请求正文处理器，默认按 JSON 缓冲。
     pub fn new() -> Self {
         Self {
             model_prefix: None,
@@ -37,6 +39,7 @@ impl RequestBody {
         }
     }
 
+    /// 在路由前预读顶层模型别名，并保存已读前缀供后续回放。
     pub async fn read_model(&mut self, session: &mut Session) -> Result<ModelRead> {
         // 上游选择早于正文过滤，因此只预读定位模型所需的前缀，并交给 Pingora 回放。
         session.enable_retry_buffering();
@@ -66,6 +69,7 @@ impl RequestBody {
         Ok(ModelRead::Found(alias))
     }
 
+    /// 将已保存前缀中的模型别名替换为上游模型 ID。
     pub fn select_model(&mut self, upstream_model_id: &str) -> serde_json::Result<()> {
         let ModelPrefix { bytes, range } = self
             .model_prefix
@@ -78,10 +82,17 @@ impl RequestBody {
         Ok(())
     }
 
+    /// 返回模型字段改写引起的正文字节数变化。
     pub fn body_delta(&self) -> isize {
         self.body_delta
     }
 
+    /// 为请求 JSON 消息选择对应协议的编解码器。
+    pub fn set_protocol(&mut self, protocol: Protocol) {
+        self.body.set_codec(protocol, MessagePhase::Request);
+    }
+
+    /// 将路由阶段预读的前缀回放到正文过滤器，再处理当前分块。
     pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
         if let Some(rewritten) = self.replay_prefix.take() {
             // 路由阶段读取的前缀在此回放，再与后续正文交给同一个缓冲状态。

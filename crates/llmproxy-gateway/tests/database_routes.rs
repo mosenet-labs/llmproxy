@@ -193,7 +193,7 @@ async fn gemini_native_requests_rewrite_model_path_and_stream_without_buffering(
                 stream,
                 200,
                 "Content-Type: application/json\r\n",
-                br#"{"candidates":[]}"#,
+                br#" {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]} "#,
             );
         }
     });
@@ -214,16 +214,16 @@ async fn gemini_native_requests_rewrite_model_path_and_stream_without_buffering(
         .unwrap();
     let gateway = Gateway::database(&url, &master_key);
     let body = br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#;
+    let response = gateway.request(
+        "POST",
+        "/v1beta/models/public%2Fgemini:generateContent",
+        "",
+        body,
+    );
+    assert_eq!(response.status, 200);
     assert_eq!(
-        gateway
-            .request(
-                "POST",
-                "/v1beta/models/public%2Fgemini:generateContent",
-                "",
-                body
-            )
-            .status,
-        200
+        response.body(),
+        br#" {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]} "#
     );
     let received = requests.recv_timeout(DEADLINE).unwrap();
     assert_eq!(

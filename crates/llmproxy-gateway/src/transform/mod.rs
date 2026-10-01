@@ -8,6 +8,7 @@ mod request;
 pub use request::{ModelRead, RequestBody};
 
 use bytes::Bytes;
+use llmproxy_core::{adapter::codec::MessageCodec, protocol::Protocol};
 
 // 限制单次请求的缓冲内存；尚无修改规则时，超限正文回退为原样转发。
 const MAX_BUFFERED_BODY: usize = 8 * 1024 * 1024;
@@ -20,27 +21,43 @@ pub enum BodyKind {
     Sse,
 }
 
+#[derive(Clone, Copy)]
+pub enum MessagePhase {
+    Request,
+    Response,
+}
+
 #[derive(Default)]
 pub struct BodyTransform {
     kind: BodyKind,
+    codec: Option<(Protocol, MessagePhase)>,
     // JSON 等待正文结束；SSE 只保留尚未完整的事件。
     pending: Vec<u8>,
 }
 
 impl BodyTransform {
+    /// 创建指定正文类型的分块处理器。
     pub fn new(kind: BodyKind) -> Self {
         Self {
             kind,
+            codec: None,
             pending: Vec::new(),
         }
     }
 
+    /// 为 JSON 正文指定来源协议及请求或响应消息方向。
+    pub fn set_codec(&mut self, protocol: Protocol, phase: MessagePhase) {
+        self.codec = Some((protocol, phase));
+    }
+
+    /// 根据上游响应头切换正文处理方式，并清空上一种方式的暂存片段。
     pub fn replace_kind(&mut self, kind: BodyKind) {
         // 根据本次上游响应头重新选择正文处理方式。
         self.kind = kind;
         self.pending.clear();
     }
 
+    /// 缓冲 JSON 到正文结束，或逐个放行完整 SSE 事件；超限后原样透传。
     pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) {
         if matches!(self.kind, BodyKind::Passthrough) {
             return;
@@ -70,7 +87,7 @@ impl BodyTransform {
         let complete = Bytes::from(complete);
         *body = Some(match self.kind {
             BodyKind::Json => match parse::JsonDocument::decode(complete) {
-                Ok(json) => process_json(json),
+                Ok(json) => process_json(json, self.codec),
                 Err(original) => original,
             },
             BodyKind::Sse => {
@@ -82,12 +99,29 @@ impl BodyTransform {
     }
 }
 
-fn process_json(json: parse::JsonDocument) -> Bytes {
-    // 首版没有处理规则；后续可在编码前修改解码后的值。
-    let _ = json.value();
+/// 在完整 JSON 中执行消息投影；当前未编辑 IR，保持原始字节输出。
+fn process_json(mut json: parse::JsonDocument, codec: Option<(Protocol, MessagePhase)>) -> Bytes {
+    if let Some((protocol, phase)) = codec {
+        // 尚无 IR 编辑规则；解析失败或没有消息节点时保持原文转发。
+        let _ = json.apply(|body| match phase {
+            MessagePhase::Request => {
+                let Some(batch) = protocol.decode_request_messages(body)? else {
+                    return Ok(false);
+                };
+                protocol.encode_request_messages(body, batch)
+            }
+            MessagePhase::Response => {
+                let Some(batch) = protocol.decode_response_messages(body)? else {
+                    return Ok(false);
+                };
+                protocol.encode_response_messages(body, batch)
+            }
+        });
+    }
     json.encode()
 }
 
+/// 仅对未压缩的 JSON 和 SSE 响应启用相应的正文处理方式。
 pub fn response_kind(content_type: Option<&[u8]>, content_encoding: Option<&[u8]>) -> BodyKind {
     // 以下解析器只处理未压缩的 JSON 或 SSE 字节。
     if content_encoding.is_some_and(|value| !value.eq_ignore_ascii_case(b"identity")) {

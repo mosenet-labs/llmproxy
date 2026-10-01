@@ -9,6 +9,7 @@ pub struct JsonDocument {
 }
 
 impl JsonDocument {
+    /// 解析完整 JSON，同时保存原始字节；解析失败时交还原始字节。
     pub fn decode(original: Bytes) -> Result<Self, Bytes> {
         // 无效 JSON 保持原样，沿用现有的上游和客户端行为。
         match serde_json::from_slice(&original) {
@@ -21,17 +22,20 @@ impl JsonDocument {
         }
     }
 
+    #[cfg(test)]
+    /// 返回解析后的 JSON，供单元测试检查。
     pub fn value(&self) -> &Value {
         &self.value
     }
 
-    #[allow(dead_code)]
-    pub fn value_mut(&mut self) -> &mut Value {
-        // 只有实际修改才启用 JSON 重新序列化。
-        self.changed = true;
-        &mut self.value
+    /// 应用编辑并按返回值记录是否需要重新序列化。
+    pub fn apply<E>(&mut self, edit: impl FnOnce(&mut Value) -> Result<bool, E>) -> Result<(), E> {
+        // 编解码未改变 IR 时保留原始字节；实际编辑才重新序列化正文。
+        self.changed |= edit(&mut self.value)?;
+        Ok(())
     }
 
+    /// 无编辑时返回原始字节，有编辑时输出重新序列化的 JSON。
     pub fn encode(self) -> Bytes {
         if self.changed {
             Bytes::from(serde_json::to_vec(&self.value).expect("JSON value must serialize"))
@@ -41,6 +45,7 @@ impl JsonDocument {
     }
 }
 
+/// 找到最后一个完整 SSE 事件的结束位置；流结束时返回全部长度。
 pub fn complete_sse_prefix(bytes: &[u8], end: bool) -> Option<usize> {
     if end {
         return Some(bytes.len());
@@ -60,6 +65,7 @@ pub fn complete_sse_prefix(bytes: &[u8], end: bool) -> Option<usize> {
     last_event_end
 }
 
+/// 读取完整 SSE 事件中的 JSON `data`，忽略非 JSON 和结束标记。
 pub fn sse_json(bytes: &[u8], mut process: impl FnMut(&Value)) {
     let mut data = String::new();
     // 同一事件的多行 data: 需要合并；非 JSON 数据和 [DONE] 标记保持原始字节。
@@ -80,6 +86,7 @@ pub fn sse_json(bytes: &[u8], mut process: impl FnMut(&Value)) {
     process_sse_data(&data, &mut process);
 }
 
+/// 对单个 SSE 事件的数据调用 JSON 处理函数。
 fn process_sse_data(data: &str, process: &mut impl FnMut(&Value)) {
     if data != "[DONE]"
         && !data.is_empty()
@@ -103,7 +110,12 @@ mod tests {
         assert_eq!(document.encode(), raw);
 
         let mut document = JsonDocument::decode(raw).unwrap();
-        document.value_mut()["model"] = json!("provider-model");
+        document
+            .apply(|value| {
+                value["model"] = json!("provider-model");
+                Ok::<bool, ()>(true)
+            })
+            .unwrap();
         assert_eq!(
             document.encode(),
             Bytes::from_static(br#"{"model":"provider-model"}"#)

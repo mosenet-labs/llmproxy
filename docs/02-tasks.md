@@ -200,3 +200,12 @@ P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --w
 - [x] RM2：实现非流式响应消息序列的双向适配。
 - [x] RM3：验证同协议保真、IR 修改、跨协议与不支持内容。
 - [x] RM4：完成格式、Clippy 和 workspace 验证。
+
+## C21：同协议消息 IR 处理链路
+
+设计和阶段边界见[同协议消息 IR 处理链路](21-message-codec-pipeline.md)。
+
+- [x] C21-1：公共 codec 定位并编解码四协议请求和响应 message。
+- [x] C21-2：网关非流式 JSON 链路读取消息 IR，未编辑时原样转发。
+- [x] C21-3：覆盖混合项、多候选、缺失消息、错误响应与 SSE。
+- [x] C21-4：通过格式、Clippy 和 workspace 验证。

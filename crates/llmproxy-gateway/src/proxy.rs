@@ -21,7 +21,7 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use crate::{
     observability::{GatewayTelemetry, RequestTelemetry},
     snapshot::{ProviderSnapshots, ResolvedProvider},
-    transform::{BodyTransform, ModelRead, RequestBody, response_kind},
+    transform::{BodyTransform, MessagePhase, ModelRead, RequestBody, response_kind},
 };
 
 const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -101,6 +101,7 @@ impl ProxyHttp for Gateway {
             Route::Gemini { alias, stream } => {
                 let protocol = Protocol::Gemini;
                 ctx.protocol = Some(protocol);
+                ctx.request_body.set_protocol(protocol);
                 let (provider, upstream_model_id) = match self.resolve_model_route(protocol, &alias)
                 {
                     Ok(route) => route,
@@ -118,6 +119,7 @@ impl ProxyHttp for Gateway {
             }
             Route::Proxy(protocol) => {
                 ctx.protocol = Some(protocol);
+                ctx.request_body.set_protocol(protocol);
                 let content_encoding = session.get_header_bytes("content-encoding");
                 if !content_encoding.is_empty()
                     && !content_encoding.eq_ignore_ascii_case(b"identity")
@@ -364,6 +366,10 @@ impl ProxyHttp for Gateway {
                 .get("content-encoding")
                 .map(|value| value.as_bytes()),
         ));
+        ctx.response_body.set_codec(
+            ctx.protocol.expect("request_filter set protocol"),
+            MessagePhase::Response,
+        );
         // This is a copy of the upstream header, before downstream framing is
         // selected. The upstream reader keeps its original framing information.
         let mut nominated = Vec::new();

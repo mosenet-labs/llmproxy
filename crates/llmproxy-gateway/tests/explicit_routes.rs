@@ -11,6 +11,59 @@ use std::{
 use support::*;
 
 #[test]
+fn same_protocol_message_projection_preserves_http_bodies() {
+    let replies: [&'static [u8]; 3] = [
+        br#" {"choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}],"usage":{"total_tokens":2}} "#,
+        br#" {"output":[{"type":"reasoning","id":"r1","summary":[]},{"id":"msg_1","content":[{"type":"output_text","annotations":[],"text":"ok"}],"role":"assistant","status":"completed","type":"message"}],"usage":{"total_tokens":2}} "#,
+        br#" {"type":"message","id":"m1","content":[{"type":"text","text":"ok"}],"model":"claude","role":"assistant","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}} "#,
+    ];
+    let upstreams: Vec<_> = replies
+        .into_iter()
+        .map(|reply| {
+            Mock::http(move |_, stream| {
+                respond(stream, 200, "Content-Type: application/json\r\n", reply)
+            })
+        })
+        .collect();
+    let gateway = Gateway::start(std::array::from_fn(|index| {
+        Provider::http(upstreams[index].0.address)
+    }));
+    let requests = [
+        format!(
+            r#" {{ "model":"{}", "messages":[{{"role":"user","content":"hi"}}], "temperature":0.3 }} "#,
+            ALIASES[0]
+        ),
+        format!(
+            r#" {{ "model":"{}", "input":[{{"role":"user","content":"hi"}},{{"type":"function_call","id":"c1","name":"lookup","arguments":"{{}}"}}] }} "#,
+            ALIASES[1]
+        ),
+        format!(
+            r#" {{ "model":"{}", "messages":[{{"role":"user","content":"hi"}}], "max_tokens":32 }} "#,
+            ALIASES[2]
+        ),
+    ];
+    for index in 0..3 {
+        let response = gateway.request(
+            "POST",
+            PATHS[index],
+            "Content-Type: application/json\r\n",
+            requests[index].as_bytes(),
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body(), replies[index]);
+        let received = upstreams[index].1.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(
+            received.body,
+            requests[index].replace(ALIASES[index], "mock").as_bytes()
+        );
+        assert_eq!(
+            values(&received.headers, "content-length"),
+            [received.body.len().to_string()]
+        );
+    }
+}
+
+#[test]
 fn proxies_requests_headers_and_provider_errors_for_each_route() {
     let upstreams: Vec<_> = (0..3)
         .map(|_| Mock::http(|request, stream| {
