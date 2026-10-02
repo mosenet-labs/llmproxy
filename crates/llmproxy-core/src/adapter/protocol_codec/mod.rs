@@ -1,8 +1,13 @@
-//! 四种协议的完整 JSON 正文与 IR 之间的同协议转换。
+//! 四种协议的完整 JSON 正文与 IR 转换；跨协议首批支持非流式纯文本。
 
+mod cross;
 mod request;
 mod response;
 
+pub use cross::{RequestTarget, ResponseTarget};
+
+#[cfg(test)]
+mod cross_tests;
 #[cfg(test)]
 mod tests;
 
@@ -15,7 +20,7 @@ use crate::{
 
 use super::{Error, Result};
 
-/// 请求及非流式响应的协议编解码契约；尚未规范化的字段由协议类型保留。
+/// 请求及非流式响应的协议编解码契约；同协议可保留尚未规范化的字段。
 pub trait ProtocolCodec {
     /// 将 JSON 请求解析为来源协议类型，再投影为 IR。
     fn decode_request(&self, body: &Value) -> Result<Request>;
@@ -25,9 +30,34 @@ pub trait ProtocolCodec {
     fn decode_response(&self, body: &Value) -> Result<Response>;
     /// 将 IR 写回来源协议类型，并序列化为非流式 JSON 响应。
     fn encode_response(&self, response: &Response) -> Result<Value>;
+    /// 将 IR 编为指定目标协议的非流式请求；跨协议时只支持已验证的公共语义。
+    fn encode_request_for(&self, request: &Request, target: &RequestTarget<'_>) -> Result<Value>;
+    /// 将 IR 编为指定目标协议的非流式响应；响应外壳由调用方提供。
+    fn encode_response_for(
+        &self,
+        response: &Response,
+        target: &ResponseTarget<'_>,
+    ) -> Result<Value>;
 }
 
 impl ProtocolCodec for Protocol {
+    fn encode_request_for(&self, request: &Request, target: &RequestTarget<'_>) -> Result<Value> {
+        if *self == request.source_protocol() {
+            return self.encode_request(request);
+        }
+        cross::encode_request(*self, request, target)
+    }
+
+    fn encode_response_for(
+        &self,
+        response: &Response,
+        target: &ResponseTarget<'_>,
+    ) -> Result<Value> {
+        if *self == response.source_protocol() {
+            return self.encode_response(response);
+        }
+        cross::encode_response(*self, response, target)
+    }
     fn decode_request(&self, body: &Value) -> Result<Request> {
         use crate::ir::request::source::Source;
         let source = match self {
