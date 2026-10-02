@@ -4,8 +4,11 @@ pub mod chat;
 mod common;
 pub mod gemini;
 pub mod messages;
+pub mod moderation;
 mod optional_nullable;
 pub mod responses;
+
+pub use optional_nullable::OptionalNullable;
 
 use serde::{Deserialize, Serialize};
 

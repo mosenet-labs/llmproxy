@@ -6,6 +6,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use super::cache::CacheControl;
 use crate::protocol::optional_nullable::OptionalNullable;
 
 /// `messages` 数组中的一条输入消息。
@@ -91,7 +92,7 @@ pub enum KnownContentBlock {
         text: String,
         /// 可选的提示缓存断点。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-        cache_control: OptionalNullable<Value>,
+        cache_control: OptionalNullable<CacheControl>,
         /// 文本引用标注。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
         citations: OptionalNullable<Vec<Value>>,
@@ -105,7 +106,7 @@ pub enum KnownContentBlock {
         source: Value,
         /// 可选的提示缓存断点。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-        cache_control: OptionalNullable<Value>,
+        cache_control: OptionalNullable<CacheControl>,
         /// 服务端对图片应用的变换配置。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
         transformations: OptionalNullable<Value>,
@@ -119,7 +120,7 @@ pub enum KnownContentBlock {
         source: Value,
         /// 可选的提示缓存断点。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-        cache_control: OptionalNullable<Value>,
+        cache_control: OptionalNullable<CacheControl>,
         /// 文档引用的启用配置。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
         citations: OptionalNullable<Value>,
@@ -161,7 +162,7 @@ pub enum KnownContentBlock {
         name: String,
         /// 可选的提示缓存断点。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-        cache_control: OptionalNullable<Value>,
+        cache_control: OptionalNullable<CacheControl>,
         /// 调用来源，例如直接调用或服务端工具调用。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
         caller: OptionalNullable<Value>,
@@ -178,7 +179,7 @@ pub enum KnownContentBlock {
         tool_use_id: String,
         /// 可选的提示缓存断点。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-        cache_control: OptionalNullable<Value>,
+        cache_control: OptionalNullable<CacheControl>,
         /// 结果正文，可以是字符串或内容块数组。
         #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
         content: OptionalNullable<ToolResultContent>,

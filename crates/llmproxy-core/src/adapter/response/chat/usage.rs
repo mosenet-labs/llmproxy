@@ -1,6 +1,7 @@
 //! Chat 用量统计与通用 IR 的映射；流式最终用量分片复用同一映射。
 
 use crate::{
+    adapter::nullable::{present, set},
     ir::{
         cache::CacheUsage,
         usage::{InputTokenDetails, OutputTokenDetails, Usage as IrUsage},
@@ -23,22 +24,34 @@ pub fn decode_chat_usage(usage: &ChatUsage) -> IrUsage {
         OptionalNullable::Value(details) => Some(details),
         _ => None,
     };
+    let read = input.and_then(|details| present(&details.cached_tokens));
+    let write = input.and_then(|details| present(&details.cache_write_tokens));
     IrUsage {
         input_tokens: Some(usage.prompt_tokens),
         output_tokens: Some(usage.completion_tokens),
         total_tokens: Some(usage.total_tokens),
         cache: CacheUsage {
-            read_input_tokens: input.and_then(|details| present(&details.cached_tokens)),
-            write_input_tokens: input.and_then(|details| present(&details.cache_write_tokens)),
+            read_input_tokens: read,
+            write_input_tokens: write,
+            write_short_input_tokens: None,
+            write_long_input_tokens: None,
         },
         input_details: InputTokenDetails {
+            uncached_tokens: read.zip(write).and_then(|(read, write)| {
+                usage.prompt_tokens.checked_sub(read)?.checked_sub(write)
+            }),
             text_tokens: input.and_then(|details| present(&details.text_tokens)),
             audio_tokens: input.and_then(|details| present(&details.audio_tokens)),
             image_tokens: input.and_then(|details| present(&details.image_tokens)),
+            video_tokens: None,
+            document_tokens: None,
+            tool_tokens: None,
         },
         output_details: OutputTokenDetails {
             text_tokens: output.and_then(|details| present(&details.text_tokens)),
             audio_tokens: output.and_then(|details| present(&details.audio_tokens)),
+            image_tokens: None,
+            video_tokens: None,
             reasoning_tokens: output.and_then(|details| present(&details.reasoning_tokens)),
             accepted_prediction_tokens: output
                 .and_then(|details| present(&details.accepted_prediction_tokens)),
@@ -117,26 +130,11 @@ pub fn encode_chat_usage(usage: &IrUsage, original: Option<&ChatUsage>) -> Resul
     Ok(encoded)
 }
 
-/// 只把协议实际提供的计数映射到 IR。
-fn present(value: &OptionalNullable<u64>) -> Option<u64> {
-    match value {
-        OptionalNullable::Value(value) => Some(*value),
-        _ => None,
-    }
-}
-
 /// 构造完整 Chat 用量时，必需的总数不能凭空推断。
 fn required(value: Option<u64>, original: Option<u64>) -> Result<u64> {
     value
         .or(original)
         .ok_or_else(|| Error::Unsupported("Chat usage 缺少必需的词元总数".into()))
-}
-
-/// 仅覆盖 IR 有值的计数，保留原协议未映射的细分统计。
-fn set(target: &mut OptionalNullable<u64>, value: Option<u64>) {
-    if let Some(value) = value {
-        *target = OptionalNullable::Value(value);
-    }
 }
 
 fn get_input_details(
@@ -191,6 +189,7 @@ mod tests {
         let mut ir = decode_chat_usage(&raw);
         assert_eq!(ir.cache.read_input_tokens, Some(60));
         assert_eq!(ir.cache.write_input_tokens, Some(10));
+        assert_eq!(ir.input_details.uncached_tokens, Some(30));
         assert_eq!(ir.output_details.reasoning_tokens, Some(5));
         assert_eq!(
             serde_json::to_value(encode_chat_usage(&ir, Some(&raw)).unwrap()).unwrap(),

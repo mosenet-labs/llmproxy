@@ -1,16 +1,16 @@
-//! Chat 请求缓存参数与通用缓存配置的映射。
+//! Responses 请求缓存参数与通用缓存配置的映射。
 
 use crate::{
     adapter::nullable::present,
     ir::cache::CacheSettings,
-    protocol::chat::{
+    protocol::{
         OptionalNullable,
-        request::{Request, parameters::PromptCacheOptions},
+        responses::request::body::{PromptCacheOptions, Request},
     },
 };
 
-/// 提取 Chat 请求显式指定的缓存参数；消息内容块的断点仍随消息 IR 保留。
-pub fn decode_chat_cache(request: &Request) -> CacheSettings {
+/// 从 Responses 请求提取显式缓存设置。
+pub fn decode_responses_cache(request: &Request) -> CacheSettings {
     let options = match &request.prompt_cache_options {
         OptionalNullable::Value(options) => Some(options),
         _ => None,
@@ -24,8 +24,8 @@ pub fn decode_chat_cache(request: &Request) -> CacheSettings {
     }
 }
 
-/// 将通用缓存配置写回 Chat 请求，保留原有的供应商扩展参数。
-pub fn encode_chat_cache(request: &mut Request, cache: &CacheSettings) {
+/// 将 IR 中有值的缓存参数写回请求，保留未映射字段和显式 `null`。
+pub fn encode_responses_cache(request: &mut Request, cache: &CacheSettings) {
     if let Some(key) = &cache.key {
         request.prompt_cache_key = OptionalNullable::Value(key.clone());
     }
@@ -49,32 +49,26 @@ pub fn encode_chat_cache(request: &mut Request, cache: &CacheSettings) {
 
 #[cfg(test)]
 mod tests {
+    use super::{decode_responses_cache, encode_responses_cache};
+    use crate::protocol::responses::request::Request;
     use serde_json::json;
 
-    use super::{decode_chat_cache, encode_chat_cache};
-    use crate::protocol::chat::request::Request;
-
     #[test]
-    fn cache_options_project_and_keep_other_fields() {
-        let source = json!({"model":"m","messages":[],"prompt_cache_key":"session","prompt_cache_options":{"mode":"explicit","ttl":"30m","vendor":true},"prompt_cache_retention":"24h"});
-        let mut request: Request = serde_json::from_value(source).unwrap();
-        let mut cache = decode_chat_cache(&request);
-        assert_eq!(cache.key.as_deref(), Some("session"));
+    fn cache_projection_keeps_diagnostics_and_nulls() {
+        let source = json!({"model":"m","input":"hi","prompt_cache_key":null,"prompt_cache_options":{"mode":"explicit","ttl":"30m","comparison_response_id":"resp_1"}});
+        let mut request: Request = serde_json::from_value(source.clone()).unwrap();
+        let mut cache = decode_responses_cache(&request);
         assert_eq!(cache.mode.as_deref(), Some("explicit"));
+        assert_eq!(cache.key, None);
+        encode_responses_cache(&mut request, &cache);
+        assert_eq!(serde_json::to_value(&request).unwrap(), source);
         cache.key = Some("next".into());
-        encode_chat_cache(&mut request, &cache);
+        encode_responses_cache(&mut request, &cache);
         let encoded = serde_json::to_value(request).unwrap();
         assert_eq!(encoded["prompt_cache_key"], "next");
-        assert_eq!(encoded["prompt_cache_options"]["vendor"], true);
-    }
-
-    #[test]
-    fn cache_round_trip_keeps_null_and_missing_fields() {
-        let source = json!({"model":"m","messages":[],"prompt_cache_key":null,"prompt_cache_options":{"mode":null,"vendor":true}});
-        let mut request: Request = serde_json::from_value(source.clone()).unwrap();
-        let cache = decode_chat_cache(&request);
-        assert_eq!(cache.key, None);
-        encode_chat_cache(&mut request, &cache);
-        assert_eq!(serde_json::to_value(request).unwrap(), source);
+        assert_eq!(
+            encoded["prompt_cache_options"]["comparison_response_id"],
+            "resp_1"
+        );
     }
 }

@@ -87,7 +87,7 @@ impl RequestBody {
         self.body_delta
     }
 
-    /// 为请求 JSON 消息选择对应协议的编解码器。
+    /// 为请求 JSON 正文选择对应协议的编解码器。
     pub fn set_protocol(&mut self, protocol: Protocol) {
         self.body.set_codec(protocol, MessagePhase::Request);
     }

@@ -8,7 +8,10 @@ mod request;
 pub use request::{ModelRead, RequestBody};
 
 use bytes::Bytes;
-use llmproxy_core::{adapter::codec::MessageCodec, protocol::Protocol};
+use llmproxy_core::{
+    adapter::{Error as AdapterError, protocol_codec::ProtocolCodec},
+    protocol::Protocol,
+};
 
 // 限制单次请求的缓冲内存；尚无修改规则时，超限正文回退为原样转发。
 const MAX_BUFFERED_BODY: usize = 8 * 1024 * 1024;
@@ -45,7 +48,7 @@ impl BodyTransform {
         }
     }
 
-    /// 为 JSON 正文指定来源协议及请求或响应消息方向。
+    /// 为 JSON 正文指定来源协议及请求或响应方向。
     pub fn set_codec(&mut self, protocol: Protocol, phase: MessagePhase) {
         self.codec = Some((protocol, phase));
     }
@@ -99,22 +102,26 @@ impl BodyTransform {
     }
 }
 
-/// 在完整 JSON 中执行消息投影；当前未编辑 IR，保持原始字节输出。
+/// 在完整 JSON 中执行整体 IR 投影；当前未编辑 IR，保持原始字节输出。
 fn process_json(mut json: parse::JsonDocument, codec: Option<(Protocol, MessagePhase)>) -> Bytes {
     if let Some((protocol, phase)) = codec {
-        // 尚无 IR 编辑规则；解析失败或没有消息节点时保持原文转发。
-        let _ = json.apply(|body| match phase {
-            MessagePhase::Request => {
-                let Some(batch) = protocol.decode_request_messages(body)? else {
-                    return Ok(false);
-                };
-                protocol.encode_request_messages(body, batch)
-            }
-            MessagePhase::Response => {
-                let Some(batch) = protocol.decode_response_messages(body)? else {
-                    return Ok(false);
-                };
-                protocol.encode_response_messages(body, batch)
+        // 尚无 IR 编辑规则；解析失败时保持原文转发。
+        let _ = json.apply::<AdapterError>(|body| {
+            let encoded = match phase {
+                MessagePhase::Request => {
+                    let request = protocol.decode_request(body)?;
+                    protocol.encode_request(&request)?
+                }
+                MessagePhase::Response => {
+                    let response = protocol.decode_response(body)?;
+                    protocol.encode_response(&response)?
+                }
+            };
+            if encoded == *body {
+                Ok(false)
+            } else {
+                *body = encoded;
+                Ok(true)
             }
         });
     }
@@ -150,8 +157,32 @@ pub fn response_kind(content_type: Option<&[u8]>, content_encoding: Option<&[u8]
 
 #[cfg(test)]
 mod tests {
-    use super::{BodyKind, BodyTransform};
+    use super::{BodyKind, BodyTransform, MessagePhase};
     use bytes::Bytes;
+    use llmproxy_core::protocol::Protocol;
+
+    #[test]
+    fn full_ir_round_trip_keeps_unedited_json_bytes() {
+        let cases = [
+            (
+                MessagePhase::Request,
+                br#" { "model":"m", "messages":[{"role":"user","content":"hi"}], "prompt_cache_key":"key" } "#
+                    .as_slice(),
+            ),
+            (
+                MessagePhase::Response,
+                br#" { "id":"c1", "created":1, "model":"m", "object":"chat.completion", "choices":[{"finish_reason":"stop","index":0,"message":{"role":"assistant","content":"hi"}}], "usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3}} } "#
+                    .as_slice(),
+            ),
+        ];
+        for (phase, source) in cases {
+            let mut transform = BodyTransform::new(BodyKind::Json);
+            transform.set_codec(Protocol::OpenAiChat, phase);
+            let mut body = Some(Bytes::copy_from_slice(source));
+            transform.push(&mut body, true);
+            assert_eq!(body.unwrap().as_ref(), source);
+        }
+    }
 
     #[test]
     fn json_waits_for_end_and_preserves_original_bytes() {

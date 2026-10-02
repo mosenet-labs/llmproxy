@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::message::TextPart;
+pub use crate::protocol::moderation::{ModerationMode, ModerationPolicy, ModerationSettings};
 use crate::protocol::optional_nullable::OptionalNullable;
 
 /// 音频输出的格式和声音。
@@ -73,43 +74,6 @@ pub struct FunctionDefinition {
     /// 是否严格遵循参数结构；旧版 `functions` 可省略。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub strict: OptionalNullable<bool>,
-    /// 保留供应商扩展字段。
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-/// 输入和输出审核的配置。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModerationSettings {
-    /// 用于审核的模型 ID。
-    pub model: String,
-    /// 输入和输出各自的审核策略。
-    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-    pub policy: OptionalNullable<ModerationPolicy>,
-    /// 保留供应商扩展字段。
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-/// 输入与输出的审核策略。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModerationPolicy {
-    /// 输入审核策略。
-    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-    pub input: OptionalNullable<ModerationMode>,
-    /// 输出审核策略。
-    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-    pub output: OptionalNullable<ModerationMode>,
-    /// 保留供应商扩展字段。
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-/// 一侧审核的处理方式。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModerationMode {
-    /// `score` 只提供分数，`block` 允许阻断。
-    pub mode: String,
     /// 保留供应商扩展字段。
     #[serde(flatten)]
     pub extra: Map<String, Value>,

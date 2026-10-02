@@ -4,6 +4,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use super::usage::Usage;
 pub use crate::protocol::common::{AssistantRole, MessageType};
 use crate::protocol::optional_nullable::OptionalNullable;
 
@@ -35,8 +36,8 @@ pub struct Message {
     /// 命中的自定义停止序列。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub stop_sequence: OptionalNullable<String>,
-    /// 输入、输出及缓存 token 用量；细项暂以 JSON 保留。
-    pub usage: Value,
+    /// 输入、输出及缓存词元用量。
+    pub usage: Usage,
     /// 容器、诊断等新增响应字段。
     #[serde(flatten)]
     pub extra: Map<String, Value>,

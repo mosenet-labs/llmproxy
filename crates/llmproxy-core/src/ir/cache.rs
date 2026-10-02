@@ -13,6 +13,8 @@ pub struct CacheSettings {
     pub ttl: Option<String>,
     /// 旧版缓存保留策略。
     pub retention: Option<String>,
+    /// 服务端显式缓存内容的引用，例如 Gemini 的 `cachedContent`。
+    pub reference: Option<String>,
 }
 
 /// 一次响应中缓存读取与写入的输入词元数。
@@ -22,4 +24,8 @@ pub struct CacheUsage {
     pub read_input_tokens: Option<u64>,
     /// 写入提示缓存的词元数；`None` 表示上游未报告。
     pub write_input_tokens: Option<u64>,
+    /// 写入短时缓存的词元数；可用于区分不同 TTL 的计费。
+    pub write_short_input_tokens: Option<u64>,
+    /// 写入长时缓存的词元数。
+    pub write_long_input_tokens: Option<u64>,
 }

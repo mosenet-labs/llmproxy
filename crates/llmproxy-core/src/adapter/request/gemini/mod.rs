@@ -1,8 +1,11 @@
 //! Gemini generateContent 请求消息适配。
 //! 参考：https://ai.google.dev/api/generate-content
 
+mod cache;
 mod decode;
 mod encode;
+
+pub use cache::{decode_gemini_cache, encode_gemini_cache};
 
 pub use decode::decode_gemini;
 pub use encode::encode_gemini;

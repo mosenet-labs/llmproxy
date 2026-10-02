@@ -12,6 +12,10 @@ use super::{Result, wire};
 mod tests;
 
 pub use chat::{decode_chat, decode_chat_cache, encode_chat, encode_chat_cache};
-pub use gemini::{decode_gemini, encode_gemini};
-pub use messages::{decode_messages, encode_messages};
-pub use responses::{decode_responses, encode_responses};
+pub use gemini::{decode_gemini, decode_gemini_cache, encode_gemini, encode_gemini_cache};
+pub use messages::{
+    decode_messages, decode_messages_cache, encode_messages, encode_messages_cache,
+};
+pub use responses::{
+    decode_responses, decode_responses_cache, encode_responses, encode_responses_cache,
+};

@@ -24,12 +24,20 @@ pub struct Usage {
 /// 输入模态细分；其值可能与缓存计数重叠，不应直接相加。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InputTokenDetails {
+    /// 未命中、也未写入缓存的输入词元数；部分协议单独报告。
+    pub uncached_tokens: Option<u64>,
     /// 输入文本词元数。
     pub text_tokens: Option<u64>,
     /// 输入音频词元数。
     pub audio_tokens: Option<u64>,
     /// 输入图片词元数。
     pub image_tokens: Option<u64>,
+    /// 输入视频词元数。
+    pub video_tokens: Option<u64>,
+    /// 输入文档词元数。
+    pub document_tokens: Option<u64>,
+    /// 工具调用引入的额外输入词元数。
+    pub tool_tokens: Option<u64>,
 }
 
 /// 输出模态和生成方式的细分；其值可能相互重叠。
@@ -39,6 +47,10 @@ pub struct OutputTokenDetails {
     pub text_tokens: Option<u64>,
     /// 输出音频词元数。
     pub audio_tokens: Option<u64>,
+    /// 输出图片词元数。
+    pub image_tokens: Option<u64>,
+    /// 输出视频词元数。
+    pub video_tokens: Option<u64>,
     /// 推理词元数。
     pub reasoning_tokens: Option<u64>,
     /// 与预测输出匹配的词元数。
