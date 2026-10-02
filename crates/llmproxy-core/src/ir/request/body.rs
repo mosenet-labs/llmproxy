@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Message, source::Source};
+use super::{Instruction, Item, Message, source::Source};
 use crate::{ir::cache::CacheSettings, protocol::Protocol};
 
 /// 一次完整请求的消息和缓存投影，以及可同协议回写的来源类型。
@@ -10,6 +10,10 @@ use crate::{ir::cache::CacheSettings, protocol::Protocol};
 pub struct Request {
     /// 按原报文顺序排列的对话消息。
     pub messages: Vec<Message>,
+    /// 在消息历史之前生效的顶层指令。
+    pub instructions: Vec<Instruction>,
+    /// 消息及独立工具输入项的原始顺序。
+    pub items: Vec<Item>,
     /// 请求级缓存设置；内容块级断点仍由消息保留。
     pub cache: CacheSettings,
     /// 未规范化的生成参数、工具输入项及供应商扩展字段。

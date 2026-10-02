@@ -3,7 +3,12 @@
 use serde_json::Value;
 
 use crate::{
-    ir::{response::Message, response::source::Source, usage::Usage},
+    ir::{
+        message::ToolCall,
+        response::source::Source,
+        response::{Item, Message},
+        usage::Usage,
+    },
     protocol::{OptionalNullable, responses::response::body::OutputItem},
 };
 
@@ -28,6 +33,54 @@ pub(super) fn decode_messages(source: &Source) -> Result<Vec<Message>> {
             response::decode_gemini(&gemini_candidate_messages(&body.candidates))
         }
     }
+}
+
+/// 提取 Responses 独立函数输出项，保留与文本消息的相对顺序。
+pub(super) fn decode_items(source: &Source, message_count: usize) -> Result<Vec<Item>> {
+    let Source::Responses(body) = source else {
+        return Ok((0..message_count).map(Item::Message).collect());
+    };
+    let mut items = Vec::with_capacity(body.output.len());
+    let mut index = 0;
+    for item in &body.output {
+        match item {
+            OutputItem::Message(_) => {
+                items.push(Item::Message(index));
+                index += 1;
+            }
+            OutputItem::Other(raw)
+                if raw.get("type").and_then(Value::as_str) == Some("function_call") =>
+            {
+                let name = raw
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::Invalid("function_call 缺少 name".into()))?;
+                let arguments = raw
+                    .get("arguments")
+                    .cloned()
+                    .ok_or_else(|| Error::Invalid("function_call 缺少 arguments".into()))?;
+                let arguments = arguments
+                    .as_str()
+                    .map(|value| {
+                        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.into()))
+                    })
+                    .unwrap_or(arguments);
+                items.push(Item::ToolCall {
+                    call: ToolCall {
+                        id: raw
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        name: name.into(),
+                        arguments,
+                    },
+                    item_id: raw.get("id").and_then(Value::as_str).map(str::to_owned),
+                });
+            }
+            OutputItem::Other(raw) => items.push(Item::Opaque(Value::Object(raw.clone()))),
+        }
+    }
+    Ok(items)
 }
 
 /// 将编辑后的消息写回来源响应类型，保留候选及非消息输出项。

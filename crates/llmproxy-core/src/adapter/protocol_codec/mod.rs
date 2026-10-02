@@ -1,10 +1,10 @@
-//! 四种协议的完整 JSON 正文与 IR 转换；跨协议首批支持非流式纯文本。
+//! 四种协议的完整 JSON 正文与 IR 转换。
 
 mod cross;
 mod request;
 mod response;
 
-pub use cross::{RequestTarget, ResponseTarget};
+pub use cross::{Conversion, ConversionWarning, RequestTarget, ResponseTarget};
 
 #[cfg(test)]
 mod cross_tests;
@@ -30,20 +30,28 @@ pub trait ProtocolCodec {
     fn decode_response(&self, body: &Value) -> Result<Response>;
     /// 将 IR 写回来源协议类型，并序列化为非流式 JSON 响应。
     fn encode_response(&self, response: &Response) -> Result<Value>;
-    /// 将 IR 编为指定目标协议的非流式请求；跨协议时只支持已验证的公共语义。
-    fn encode_request_for(&self, request: &Request, target: &RequestTarget<'_>) -> Result<Value>;
+    /// 将 IR 编为指定目标协议的非流式请求，返回无法保留的语义警告。
+    fn encode_request_for(
+        &self,
+        request: &Request,
+        target: &RequestTarget<'_>,
+    ) -> Result<Conversion>;
     /// 将 IR 编为指定目标协议的非流式响应；响应外壳由调用方提供。
     fn encode_response_for(
         &self,
         response: &Response,
         target: &ResponseTarget<'_>,
-    ) -> Result<Value>;
+    ) -> Result<Conversion>;
 }
 
 impl ProtocolCodec for Protocol {
-    fn encode_request_for(&self, request: &Request, target: &RequestTarget<'_>) -> Result<Value> {
+    fn encode_request_for(
+        &self,
+        request: &Request,
+        target: &RequestTarget<'_>,
+    ) -> Result<Conversion> {
         if *self == request.source_protocol() {
-            return self.encode_request(request);
+            return Ok(Conversion::exact(self.encode_request(request)?));
         }
         cross::encode_request(*self, request, target)
     }
@@ -52,9 +60,9 @@ impl ProtocolCodec for Protocol {
         &self,
         response: &Response,
         target: &ResponseTarget<'_>,
-    ) -> Result<Value> {
+    ) -> Result<Conversion> {
         if *self == response.source_protocol() {
-            return self.encode_response(response);
+            return Ok(Conversion::exact(self.encode_response(response)?));
         }
         cross::encode_response(*self, response, target)
     }
@@ -74,8 +82,11 @@ impl ProtocolCodec for Protocol {
                 gemini::request::Request,
             >(body.clone())?)),
         };
+        let messages = request::decode_messages(&source)?;
         Ok(Request {
-            messages: request::decode_messages(&source)?,
+            items: request::decode_items(&source, messages.len())?,
+            instructions: request::decode_instructions(&source),
+            messages,
             cache: request::decode_cache(&source),
             source,
         })
@@ -83,6 +94,13 @@ impl ProtocolCodec for Protocol {
 
     fn encode_request(&self, request: &Request) -> Result<Value> {
         ensure_source(*self, request.source_protocol())?;
+        if request.instructions != request::decode_instructions(&request.source)
+            || request.items != request::decode_items(&request.source, request.messages.len())?
+        {
+            return Err(Error::Unsupported(
+                "同协议回写暂不支持修改顶层指令或独立输入项".into(),
+            ));
+        }
         let mut source = request.source.clone();
         request::encode_messages(&mut source, &request.messages)?;
         if request.cache != request::decode_cache(&request.source) {
@@ -112,8 +130,10 @@ impl ProtocolCodec for Protocol {
                 gemini::response::Response,
             >(body.clone())?)),
         };
+        let messages = response::decode_messages(&source)?;
         Ok(Response {
-            messages: response::decode_messages(&source)?,
+            items: response::decode_items(&source, messages.len())?,
+            messages,
             usage: response::decode_usage(&source),
             source,
         })
@@ -121,6 +141,11 @@ impl ProtocolCodec for Protocol {
 
     fn encode_response(&self, response: &Response) -> Result<Value> {
         ensure_source(*self, response.source_protocol())?;
+        if response.items != response::decode_items(&response.source, response.messages.len())? {
+            return Err(Error::Unsupported(
+                "同协议回写暂不支持修改独立输出项".into(),
+            ));
+        }
         let mut source = response.source.clone();
         response::encode_messages(&mut source, &response.messages)?;
         let original_usage = response::decode_usage(&response.source);

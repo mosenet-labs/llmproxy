@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Message, source::Source};
+use super::{Item, Message, source::Source};
 use crate::{ir::usage::Usage, protocol::Protocol};
 
 /// 一次完整响应的消息和用量投影，以及可同协议回写的来源类型。
@@ -10,6 +10,8 @@ use crate::{ir::usage::Usage, protocol::Protocol};
 pub struct Response {
     /// 按候选或输出项顺序排列的消息。
     pub messages: Vec<Message>,
+    /// 消息及独立输出项的原始顺序。
+    pub items: Vec<Item>,
     /// 上游报告的本次用量；缺失与明确报告零区分。
     pub usage: Option<Usage>,
     /// 未规范化的候选、工具输出及供应商扩展字段。
