@@ -201,8 +201,8 @@ pub enum KnownContentBlock {
 pub enum ToolResultContent {
     /// 纯文本结果。
     Text(String),
-    /// 工具返回的内容块；具体块字段暂以 JSON 保留。
-    Parts(Vec<Value>),
+    /// 工具返回的文本、图片、文档等类型化内容块；未知类型仍由 ContentBlock 保留。
+    Parts(Vec<ContentBlock>),
 }
 
 #[cfg(test)]

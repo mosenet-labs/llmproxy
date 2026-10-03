@@ -16,7 +16,7 @@ use topcoat_ant_design::{
     chat_message_list, chat_sender, chat_think, select,
 };
 
-use crate::{app::AppState, chat_stream::stream_reply};
+use crate::{app::AppState, chat_stream::chat_reply};
 
 fn protocol_label(protocol: Protocol) -> &'static str {
     match protocol {
@@ -110,6 +110,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
     let protocol = signal(cx, || first_protocol);
     let draft = signal(cx, String::new);
     let busy = signal(cx, || false);
+    let streaming = signal(cx, || true);
     let refresh = signal(cx, || 0usize);
     let csrf = state.csrf.clone();
     let submit = attributes! { cx => @submit=$(async |event: Event| {
@@ -122,7 +123,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                 let started = begin_chat(csrf.clone(), session.get(), prompt).await;
                 if started {
                     refresh.increment();
-                    let _sent = send_chat(csrf.clone(), session.get()).await;
+                    let _sent = send_chat(csrf.clone(), session.get(), streaming.get()).await;
                 }
                 busy.set(false);
             }
@@ -151,6 +152,8 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                             chat_protocol_picker(model_id: $(model_id), protocol: $(protocol), session: $(session), refresh: $(refresh), busy: $(busy))
                         </div>
                         <p class="mt-2 mb-0 pl-10 text-[11px] leading-[1.5] text-[#8a94a3]">"切换协议将开始新会话"</p>
+                        <label class="mt-3 flex items-center gap-2 text-[12px] text-secondary"><input type="checkbox" :checked=$(streaming.get()) :disabled=$(busy.get()) @change=$(|event: Event| { streaming.set(event.target.checked); })>"流式输出"</label>
+                        <p class="mt-2 mb-0 text-[11px] text-secondary">"跨协议请使用非流式；流式转换尚未开放。"</p>
                     </div>
                     <div class="mt-6 flex min-h-0 flex-1 flex-col border-t border-[#e9edf2] px-2 pt-4 max-[760px]:mt-3 max-[760px]:pt-3">
                         <div class="flex items-center justify-between"><h3 class="m-0 text-[11px] font-semibold tracking-[0.12em] text-[#8793a2]">"历史会话"</h3><span class="text-[11px] text-[#9aa4b0]">"本页"</span></div>
@@ -251,7 +254,7 @@ pub async fn begin_chat(cx: &Cx, csrf: String, session_id: String, prompt: Strin
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/send-chat")]
-pub async fn send_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool> {
+pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: bool) -> Result<bool> {
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
     let Some(session) = state.chat_sessions.get(&session_id) else {
@@ -266,12 +269,13 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool
         if !available || !protocols.contains(&protocol) {
             return Err("当前模型或协议已不可用".to_owned());
         }
-        stream_reply(
+        chat_reply(
             &state.chat_client,
             &state.gateway_origin,
             protocol,
             &alias,
             &history,
+            streaming,
             |reply| session.update(reply),
         )
         .await
@@ -379,11 +383,13 @@ pub async fn chat_history(
         let mut changed = room.subscribe();
         loop {
             let (messages, thinking, busy) = room.snapshot();
+            let usage = room.usage_snapshot();
             let entries: Vec<_> = messages
                 .into_iter()
                 .map(|message| {
                     let thought = thinking.get(&message.id).cloned().unwrap_or_default();
-                    (message, thought)
+                    let usage = usage.get(&message.id).cloned().unwrap_or_default();
+                    (message, thought, usage)
                 })
                 .collect();
             let token = emit! {
@@ -395,8 +401,8 @@ pub async fn chat_history(
                 } else {
                     chat_message_list(label: "聊天消息", attrs: attributes! { class="pb-2" },
                         #[key(message.id.clone())]
-                        for (message, thought) in entries {
-                            chat_message_entry(message: message, thought: thought)
+                        for (message, thought, usage) in entries {
+                            chat_message_entry(message: message, thought: thought, usage: usage)
                         }
                     )
                 }
@@ -410,7 +416,12 @@ pub async fn chat_history(
 }
 
 #[component]
-async fn chat_message_entry(cx: &Cx, message: ChatMessage, thought: String) -> Result<impl View> {
+async fn chat_message_entry(
+    cx: &Cx,
+    message: ChatMessage,
+    thought: String,
+    usage: String,
+) -> Result<impl View> {
     let thought_id = format!("chat-thought-{}", message.id);
     let thought_open = signal(cx, || false);
     Ok(view! {
@@ -424,6 +435,9 @@ async fn chat_message_entry(cx: &Cx, message: ChatMessage, thought: String) -> R
                 <p class="m-0 whitespace-pre-wrap break-words">(if message.content.is_empty() { if thought.is_empty() { "正在等待回复…" } else { "正在思考…" } } else { message.content.as_str() })</p>
             } else {
                 chat_markdown(source: message.content.as_str())
+            }
+            if !usage.is_empty() {
+                <p class="mt-3 mb-0 text-[11px] text-secondary" aria-label="本轮词元用量">(usage.as_str())</p>
             }
         )
     })

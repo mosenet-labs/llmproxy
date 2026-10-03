@@ -1,0 +1,181 @@
+//! 非流式跨协议响应在父请求中提交；上游连接和编解码仍走同一套 Pingora 回调。
+use super::{Gateway, RequestContext};
+use bytes::Bytes;
+use pingora::{
+    Error, ErrorType, Result,
+    protocols::http::HttpTask,
+    proxy::{
+        ProxyHttp, Session,
+        subrequest::{BodyMode, Ctx},
+    },
+};
+use pingora_http::ResponseHeader;
+use std::sync::{Arc, Mutex};
+
+/// 同一份上下文在父子请求间移动，固定路由快照并避免重复记录遥测。
+#[derive(Clone)]
+struct Exchange(Arc<Mutex<Option<RequestContext>>>);
+
+/// 仅接受框架私有上下文标记，客户端请求头不能绕过路由和鉴权。
+fn exchange(session: &Session) -> Option<&Exchange> {
+    session.subrequest_ctx.as_ref()?.user_ctx()?.downcast_ref()
+}
+
+/// 子请求接管已选定的 Provider 和请求前缀，不再次选路或预读模型。
+pub(super) fn resume(session: &Session, ctx: &mut RequestContext) -> Result<bool> {
+    let Some(exchange) = exchange(session) else {
+        return Ok(false);
+    };
+    *ctx = exchange
+        .0
+        .lock()
+        .expect("subrequest context mutex")
+        .take()
+        .ok_or_else(|| {
+            Error::explain(
+                ErrorType::InternalError,
+                "subrequest context already consumed",
+            )
+        })?;
+    Ok(true)
+}
+
+/// 子请求结束时归还遥测上下文，由父请求按最终客户端状态完成一次统计。
+pub(super) fn complete(gateway: &Gateway, session: &Session, ctx: &mut RequestContext) -> bool {
+    let Some(exchange) = exchange(session) else {
+        return false;
+    };
+    *exchange.0.lock().expect("subrequest context mutex") =
+        Some(std::mem::replace(ctx, gateway.new_ctx()));
+    true
+}
+
+/// 成功返回 true 表示响应已完成；同协议继续原有流式／透传路径。
+pub(super) async fn forward(
+    gateway: &Gateway,
+    session: &mut Session,
+    ctx: &mut RequestContext,
+) -> Result<bool> {
+    if ctx
+        .provider
+        .as_ref()
+        .is_none_or(|p| Some(p.protocol) == ctx.protocol)
+    {
+        return Ok(false);
+    }
+    let input = ctx.request_body.buffered_input(session).await?;
+    let spawner = session.subrequest_spawner.as_ref().ok_or_else(|| {
+        Error::explain(ErrorType::InternalError, "subrequest spawner unavailable")
+    })?;
+    let protocol = ctx.protocol;
+    let shared = Exchange(Arc::new(Mutex::new(Some(std::mem::replace(
+        ctx,
+        gateway.new_ctx(),
+    )))));
+    ctx.protocol = protocol;
+    let (request, handle) = spawner.create_subrequest(
+        session.as_downstream(),
+        Ctx::builder()
+            .body_mode(BodyMode::ExpectBody)
+            .user_ctx(Box::new(shared.clone()))
+            .build(),
+    );
+    let mut error_rx = handle.subreq_proxy_error;
+    let mut rx = handle.rx;
+    // 发送完正文后仍持有发送端；提前关闭会被子请求当作客户端断开。
+    let tx = handle.tx;
+    // 不 spawn 游离任务：父请求取消时三个 future 一起销毁，子请求不会留在后台生成。
+    let (_, _, captured) = tokio::join!(
+        request.run(),
+        async {
+            for chunk in input {
+                if tx.send(HttpTask::Body(Some(chunk), false)).await.is_err() {
+                    return;
+                }
+            }
+            let _ = tx.send(HttpTask::Body(None, true)).await;
+        },
+        async move {
+            let mut response = Captured::default();
+            while let Some(task) = rx.recv().await {
+                response.push(task)?;
+            }
+            response.finish()
+        }
+    );
+    if let Some(restored) = shared.0.lock().expect("subrequest context mutex").take() {
+        *ctx = restored;
+    }
+    // 通道关闭与失败通知可能同一次轮询就绪，等子请求结束后优先核对错误。
+    if let Ok(error) = error_rx.try_recv() {
+        if error.esource() == &pingora::ErrorSource::Downstream {
+            captured?;
+        }
+        return Err(error);
+    }
+    let (mut header, body) = captured?;
+    header.remove_header("transfer-encoding");
+    header.remove_header("content-length");
+    header.remove_header("etag");
+    header.insert_header("content-length", body.len().to_string())?;
+    session
+        .write_response_header(header, body.is_empty())
+        .await?;
+    if !body.is_empty() {
+        session.write_response_body(Some(body), true).await?;
+    }
+    Ok(true)
+}
+
+/// 只缓冲已转换后的输出；响应头和结束标记也必须完整收到。
+#[derive(Default)]
+struct Captured {
+    header: Option<Box<ResponseHeader>>,
+    body: Vec<u8>,
+    ended: bool,
+}
+impl Captured {
+    /// 不向客户端发送任何 HttpTask；错误立即终止采集。
+    fn push(&mut self, task: HttpTask) -> Result<()> {
+        match task {
+            HttpTask::Header(header, end) if !header.status.is_informational() => {
+                self.header = Some(header);
+                self.ended |= end;
+            }
+            HttpTask::Header(_, _) => {}
+            HttpTask::Body(body, end) => {
+                if let Some(body) = body {
+                    if self.body.len().saturating_add(body.len())
+                        > crate::transform::MAX_BUFFERED_BODY
+                    {
+                        return Err(Error::explain(
+                            ErrorType::HTTPStatus(502),
+                            "converted response exceeds limit",
+                        ));
+                    }
+                    self.body.extend_from_slice(&body);
+                }
+                self.ended |= end;
+            }
+            HttpTask::Done | HttpTask::Trailer(_) => self.ended = true,
+            HttpTask::Failed(error) => return Err(error),
+            HttpTask::UpgradedBody(_, _) => {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(502),
+                    "unexpected upgraded response",
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// 已收响应头不等于成功，缺失正文结束标记时必须返回网关错误。
+    fn finish(self) -> Result<(Box<ResponseHeader>, Bytes)> {
+        match (self.header, self.ended) {
+            (Some(header), true) => Ok((header, Bytes::from(self.body))),
+            _ => Err(Error::explain(
+                ErrorType::HTTPStatus(502),
+                "incomplete converted response",
+            )),
+        }
+    }
+}

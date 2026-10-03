@@ -60,7 +60,16 @@ pub fn decode_gemini(messages: &[Message]) -> Result<Vec<IrMessage>> {
                 wire::put(&mut extra, "videoMetadata", &block.video_metadata)?;
 
                 let part = if let Some(text) = block.text.as_option() {
-                    wire::text_part(text.clone(), PROTOCOL, "text", extra)
+                    if block.thought == O::Value(true) {
+                        wire::part(
+                            PartKind::Reasoning(Value::String(text.clone())),
+                            PROTOCOL,
+                            "thinking",
+                            extra,
+                        )
+                    } else {
+                        wire::text_part(text.clone(), PROTOCOL, "text", extra)
+                    }
                 } else if let Some(call) = block.function_call.as_option() {
                     let mut nested = call.extra.clone();
                     if matches!(call.id, O::Null) {
@@ -113,7 +122,9 @@ pub fn decode_gemini(messages: &[Message]) -> Result<Vec<IrMessage>> {
                         extra,
                     )
                 } else {
-                    wire::opaque_value(PROTOCOL, block)?
+                    crate::adapter::media::part(crate::ir::media::OriginalMedia::Gemini(Box::new(
+                        block.clone(),
+                    )))?
                 };
                 parts.push(part);
             }

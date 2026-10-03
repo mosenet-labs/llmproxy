@@ -106,7 +106,9 @@ fn input_parts(parts: &[InputPart]) -> Result<Vec<Part>> {
                 "input_text",
                 extra.clone(),
             )),
-            _ => wire::opaque_value(PROTOCOL, part),
+            _ => crate::adapter::media::part(crate::ir::media::OriginalMedia::Responses(
+                part.clone(),
+            )),
         })
         .collect()
 }

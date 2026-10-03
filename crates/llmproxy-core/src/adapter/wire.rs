@@ -80,6 +80,12 @@ pub(super) fn part(
 
 /// 未支持的内容块只保留一份原始对象，供同协议写回。
 pub(super) fn opaque(protocol: Protocol, block: Map<String, Value>) -> Part {
+    if let Some(output) = super::server_output::decode(protocol, &block) {
+        return Part {
+            kind: PartKind::ServerOutput(output),
+            metadata: Map::new(),
+        };
+    }
     Part {
         kind: PartKind::Opaque(OpaquePart {
             protocol,

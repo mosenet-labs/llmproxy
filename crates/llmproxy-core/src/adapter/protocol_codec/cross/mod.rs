@@ -1,12 +1,18 @@
 //! 四协议非流式跨协议转换及结构化警告。
 
+mod cache;
+mod candidates;
+mod controls;
 pub(super) mod generation;
+mod native;
 mod request;
 mod response;
+mod server_output;
 pub(super) mod tools;
+mod usage;
 
+pub(super) use candidates::encode_response;
 pub(super) use request::encode_request;
-pub(super) use response::encode_response;
 
 use crate::{
     adapter::{Error, Result, wire},
@@ -94,6 +100,16 @@ fn warn_metadata(
         return Err(unsupported(path, "消息来源协议标记不匹配"));
     }
     let mut extra = wire::extra(metadata, source);
+    for key in ["cache_control", "prompt_cache_breakpoint"] {
+        if extra
+            .get(key)
+            .and_then(|v| v.get("type").or_else(|| v.get("mode")))
+            .and_then(Value::as_str)
+            .is_some_and(|v| matches!(v, "ephemeral" | "explicit"))
+        {
+            extra.remove(key);
+        }
+    }
     for key in [
         "content",
         "annotations",

@@ -26,6 +26,12 @@ pub fn encode_gemini(messages: &[IrMessage]) -> Result<Vec<Message>> {
         };
         let mut parts = Vec::new();
         for part in &message.parts {
+            if let PartKind::ServerOutput(output) = &part.kind {
+                parts.push(serde_json::from_value(
+                    crate::adapter::server_output::original(output, PROTOCOL)?.clone(),
+                )?);
+                continue;
+            }
             if let PartKind::Opaque(opaque) = &part.kind {
                 if opaque.protocol != PROTOCOL {
                     return Err(Error::Unsupported("无法转换不透明内容块".into()));
@@ -61,6 +67,24 @@ pub fn encode_gemini(messages: &[IrMessage]) -> Result<Vec<Message>> {
                 ..Default::default()
             };
             match &part.kind {
+                PartKind::Media(media) => {
+                    if let crate::ir::media::OriginalMedia::Gemini(part) =
+                        crate::adapter::media::encode(media, PROTOCOL)?
+                    {
+                        parts.push(*part);
+                    }
+                    continue;
+                }
+
+                PartKind::Reasoning(value) => {
+                    block.text = O::Value(
+                        value
+                            .as_str()
+                            .ok_or_else(|| Error::Unsupported("思考正文必须是文本".into()))?
+                            .into(),
+                    );
+                    block.thought = O::Value(true);
+                }
                 PartKind::Text(text) => block.text = O::Value(text.clone()),
                 PartKind::ToolCall(call)
                     if role == Some(RawRole::Model)

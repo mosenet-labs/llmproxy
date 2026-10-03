@@ -150,6 +150,76 @@ impl Items {
         }
         Ok(false)
     }
+    /// 追加媒体并保留与同轮文本的顺序；Provider 私有资源由媒体编码器拒绝。
+    pub(super) fn media(&mut self, role: Role, media: &crate::ir::media::Media) -> Result<()> {
+        use crate::ir::media::OriginalMedia as Raw;
+        let target = match self {
+            Self::Chat(_) => Protocol::OpenAiChat,
+            Self::Responses(_) => Protocol::OpenAiResponses,
+            Self::Messages(_) => Protocol::AnthropicMessages,
+            Self::Gemini(_) => Protocol::Gemini,
+        };
+        let mut media = media.clone();
+        // 跨协议不允许媒体的同协议往返副本参与目标构造。
+        media.original = None;
+        let block = crate::adapter::media::encode(&media, target)?;
+        match (self, block) {
+            (Self::Chat(items), Raw::Chat(block)) => {
+                if role != Role::User {
+                    return Err(unsupported("media.role", "Chat 媒体输入必须来自 user"));
+                }
+                if let Some(c::Message::User(message)) = items.last_mut() {
+                    match &mut message.content {
+                        c::Content::Parts(parts) => parts.push(block),
+                        c::Content::Text(text) => {
+                            message.content = c::Content::Parts(vec![
+                                c::UserPart::Text {
+                                    text: std::mem::take(text),
+                                    prompt_cache_breakpoint: O::Missing,
+                                    extra: Default::default(),
+                                },
+                                block,
+                            ])
+                        }
+                    }
+                } else {
+                    items.push(c::Message::User(c::ContentMessage {
+                        content: c::Content::Parts(vec![block]),
+                        name: None,
+                        extra: Default::default(),
+                    }));
+                }
+            }
+            (Self::Responses(items), Raw::Responses(block)) => {
+                if role != Role::User {
+                    return Err(unsupported("media.role", "Responses 媒体输入必须来自 user"));
+                }
+                if let Some(rb::InputItem::Message(rm::Message::Easy(message)))=items.last_mut().filter(|item| matches!(item,rb::InputItem::Message(rm::Message::Easy(m)) if m.role==rm::Role::User)) {
+                    match &mut message.content {
+                        rm::Content::Parts(parts)=>parts.push(block),
+                        rm::Content::Text(text)=>message.content=rm::Content::Parts(vec![rm::InputPart::InputText {text:std::mem::take(text),extra:Default::default()},block]),
+                    }
+                } else {items.push(rb::InputItem::Message(rm::Message::Easy(rm::EasyInputMessage {content:rm::Content::Parts(vec![block]),role:rm::Role::User,phase:O::Missing,r#type:None,extra:Default::default()})));}
+            }
+            (Self::Messages(items), Raw::Messages(block)) => {
+                if role != Role::User {
+                    return Err(unsupported("media.role", "Messages 媒体输入必须来自 user"));
+                }
+                push_message_block(items, m::Role::User, block);
+            }
+            (Self::Gemini(items), Raw::Gemini(block)) => push_gemini_part(
+                items,
+                if role == Role::Assistant {
+                    g::Role::Model
+                } else {
+                    g::Role::User
+                },
+                *block,
+            ),
+            _ => unreachable!("目标协议固定"),
+        }
+        Ok(())
+    }
     /// 追加一个客户端工具调用，同角色的调用并入同一条消息。
     pub(super) fn call(&mut self, id: String, name: &str, args: Map<String, Value>) -> Result<()> {
         match self {
@@ -206,60 +276,6 @@ impl Items {
             ),
         }
         Ok(())
-    }
-    /// 追加配对后的工具结果；参数中的动态对象不作为协议正文载体。
-    pub(super) fn result(
-        &mut self,
-        id: String,
-        name: String,
-        content: String,
-        response: Map<String, Value>,
-    ) {
-        match self {
-            Self::Chat(items) => items.push(c::Message::Tool {
-                tool_call_id: id,
-                content: c::Content::Text(content),
-                extra: Default::default(),
-            }),
-            Self::Responses(items) => {
-                items.push(rb::InputItem::FunctionCallOutput(rf::CallOutput {
-                    r#type: rf::ResultType::FunctionCallOutput,
-                    call_id: O::Value(id),
-                    output: Value::String(content),
-                    id: O::Missing,
-                    status: O::Missing,
-                    extra: Default::default(),
-                }))
-            }
-            Self::Messages(items) => push_message_block(
-                items,
-                m::Role::User,
-                m::ContentBlock::Known(m::KnownContentBlock::ToolResult {
-                    tool_use_id: id,
-                    content: O::Value(m::ToolResultContent::Text(content)),
-                    cache_control: O::Missing,
-                    is_error: O::Missing,
-                    toolset_name: O::Missing,
-                    extra: Default::default(),
-                }),
-            ),
-            Self::Gemini(items) => push_gemini_part(
-                items,
-                g::Role::User,
-                g::Part {
-                    function_response: O::Value(g::FunctionResponse {
-                        id: O::Value(id),
-                        name,
-                        response,
-                        parts: O::Missing,
-                        will_continue: O::Missing,
-                        scheduling: O::Missing,
-                        extra: Default::default(),
-                    }),
-                    ..Default::default()
-                },
-            ),
-        }
     }
     /// 把类型化输入项装入完整目标请求，生成参数和工具由各自模块写入。
     pub(super) fn finish(self, model: &str, system: Vec<String>) -> protocol::Request {
@@ -324,7 +340,11 @@ fn text_block(text: String) -> m::ContentBlock {
     })
 }
 /// Messages 合并相邻同角色内容，必要时将文本转换成块数组。
-fn push_message_block(items: &mut Vec<m::Message>, role: m::Role, block: m::ContentBlock) {
+pub(super) fn push_message_block(
+    items: &mut Vec<m::Message>,
+    role: m::Role,
+    block: m::ContentBlock,
+) {
     if let Some(last) = items.last_mut().filter(|last| last.role == role) {
         match &mut last.content {
             m::Content::Parts(parts) => parts.push(block),
@@ -341,7 +361,7 @@ fn push_message_block(items: &mut Vec<m::Message>, role: m::Role, block: m::Cont
     }
 }
 /// Gemini 合并相邻同角色的内容片段。
-fn push_gemini_part(items: &mut Vec<g::Message>, role: g::Role, part: g::Part) {
+pub(super) fn push_gemini_part(items: &mut Vec<g::Message>, role: g::Role, part: g::Part) {
     if let Some(last) = items.last_mut().filter(|last| last.role == Some(role)) {
         last.parts.push(part);
     } else {

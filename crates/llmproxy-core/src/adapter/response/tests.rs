@@ -112,7 +112,7 @@ fn missing_output_context_and_opaque_cross_protocol_are_rejected() {
     let raw: Vec<messages::response::message::Message> = serde_json::from_value(json!([{"id":"msg_1","content":[{"type":"thinking","signature":"sig","thinking":"plan"}],"model":"claude-example","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":1,"output_tokens":1}}])).unwrap();
     let ir = decode_messages(&raw).unwrap();
     assert!(encode_chat(&ir).is_err());
-    assert!(matches!(&ir[0].parts[0].kind, PartKind::Opaque(_)));
+    assert!(matches!(&ir[0].parts[0].kind, PartKind::Reasoning(_)));
     assert_eq!(
         serde_json::to_value(encode_messages(&ir).unwrap()).unwrap()[0]["content"][0]["signature"],
         Value::String("sig".into())

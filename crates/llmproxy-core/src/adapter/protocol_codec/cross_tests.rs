@@ -155,10 +155,9 @@ fn rejects_unmapped_request_semantics() {
     assert!(
         Protocol::OpenAiChat
             .encode_request_for(&ir, &target)
-            .unwrap()
-            .warnings
-            .iter()
-            .any(|warning| warning.path.contains("previous_response_id"))
+            .unwrap_err()
+            .to_string()
+            .contains("previous_response_id")
     );
 
     let mut body = request(Protocol::OpenAiResponses);
@@ -173,13 +172,12 @@ fn rejects_unmapped_request_semantics() {
     body["messages"][0]["content"] =
         json!([{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]);
     let ir = Protocol::OpenAiChat.decode_request(&body).unwrap();
-    assert!(
+    assert_eq!(
         Protocol::Gemini
             .encode_request_for(&ir, &target)
             .unwrap()
-            .warnings
-            .iter()
-            .any(|warning| warning.path.contains("parts"))
+            .body["contents"][0]["parts"][0]["fileData"]["fileUri"],
+        "https://example.com/a.png"
     );
 
     let mut body = request(Protocol::OpenAiChat);
@@ -251,7 +249,7 @@ fn rejects_unmapped_response_semantics() {
             .encode_response_for(&ir, &target)
             .unwrap_err()
             .to_string()
-            .contains("choices")
+            .contains("candidates")
     );
 
     let mut body = response(Protocol::OpenAiResponses);
@@ -262,16 +260,21 @@ fn rejects_unmapped_response_semantics() {
             .encode_response_for(&ir, &target)
             .unwrap_err()
             .to_string()
-            .contains("status")
+            .contains("finish_reason")
     );
 
     let mut body = response(Protocol::Gemini);
     body["usageMetadata"]["cachedContentTokenCount"] = json!(2);
     let ir = Protocol::Gemini.decode_response(&body).unwrap();
+    let converted = Protocol::OpenAiChat
+        .encode_response_for(&ir, &target)
+        .unwrap();
+    assert_eq!(
+        converted.body["usage"]["prompt_tokens_details"]["cached_tokens"],
+        2
+    );
     assert!(
-        Protocol::OpenAiChat
-            .encode_response_for(&ir, &target)
-            .unwrap()
+        !converted
             .warnings
             .iter()
             .any(|warning| warning.path.contains("usage"))

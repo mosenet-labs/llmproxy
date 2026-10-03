@@ -59,6 +59,20 @@ pub fn decode_messages(messages: &[Message]) -> Result<Vec<IrMessage>> {
                             extra,
                         ))
                     }
+                    ContentBlock::Known(Block::Thinking {
+                        thinking,
+                        signature,
+                        extra,
+                    }) => {
+                        let mut extra = extra.clone();
+                        extra.insert("signature".into(), Value::String(signature.clone()));
+                        Ok(wire::part(
+                            PartKind::Reasoning(Value::String(thinking.clone())),
+                            PROTOCOL,
+                            "thinking",
+                            extra,
+                        ))
+                    }
                     _ => wire::opaque_value(PROTOCOL, block),
                 })
                 .collect::<Result<_>>()?;

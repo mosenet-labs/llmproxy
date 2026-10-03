@@ -69,6 +69,28 @@ pub fn encode_messages(messages: &[IrMessage]) -> Result<Vec<Message>> {
                         extra,
                     }
                 }
+                PartKind::Media(media) => {
+                    if let crate::ir::media::OriginalMedia::Messages(part) =
+                        crate::adapter::media::encode(media, PROTOCOL)?
+                    {
+                        blocks.push(part);
+                    }
+                    continue;
+                }
+                PartKind::Reasoning(value) => Block::Thinking {
+                    thinking: value
+                        .as_str()
+                        .ok_or_else(|| Error::Unsupported("思考正文必须是文本".into()))?
+                        .into(),
+                    signature: wire::required(&mut extra, "signature")?,
+                    extra,
+                },
+                PartKind::ServerOutput(output) => {
+                    blocks.push(serde_json::from_value(
+                        crate::adapter::server_output::original(output, PROTOCOL)?.clone(),
+                    )?);
+                    continue;
+                }
                 PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
                     blocks.push(serde_json::from_value(opaque.data.clone())?);
                     continue;

@@ -82,6 +82,33 @@ impl RequestBody {
         Ok(())
     }
 
+    /// 保存原始请求体及已预读前缀，供非流式子请求按原边界回放一次。
+    pub async fn buffered_input(&self, session: &mut Session) -> Result<Vec<Bytes>> {
+        let mut chunks = Vec::new();
+        let mut length = 0usize;
+        if self.replay_prefix.is_some() {
+            let prefix = session.get_retry_buffer().ok_or_else(|| {
+                Error::explain(ErrorType::InternalError, "missing request prefix")
+            })?;
+            length = prefix.len();
+            chunks.push(prefix);
+        }
+        while !session.is_body_done() {
+            let Some(chunk) = session.read_request_body().await? else {
+                break;
+            };
+            length = length.saturating_add(chunk.len());
+            if length > super::MAX_BUFFERED_BODY {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(413),
+                    "cross-protocol request exceeds limit",
+                ));
+            }
+            chunks.push(chunk);
+        }
+        Ok(chunks)
+    }
+
     /// 返回模型字段改写引起的正文字节数变化。
     pub fn body_delta(&self) -> isize {
         self.body_delta

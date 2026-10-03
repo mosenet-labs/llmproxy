@@ -6,7 +6,6 @@ use llmproxy_core::{
     protocol::Protocol,
 };
 use pingora::{Error, ErrorType, Result};
-use serde_json::json;
 
 use super::codec;
 
@@ -23,22 +22,6 @@ pub(super) enum CrossConversion {
         id: String,
         created: i64,
     },
-}
-
-/// 避免将 Provider 的专有错误格式和可能含敏感信息的正文直接发给客户端。
-pub(super) fn error_body(protocol: Protocol, status: u16) -> Bytes {
-    let body = match protocol {
-        Protocol::OpenAiChat | Protocol::OpenAiResponses => json!({
-            "error": {"message": "Provider request failed", "type": "upstream_error", "code": status}
-        }),
-        Protocol::AnthropicMessages => json!({
-            "type": "error", "error": {"type": "api_error", "message": "Provider request failed"}
-        }),
-        Protocol::Gemini => json!({
-            "error": {"code": status, "message": "Provider request failed", "status": "UNKNOWN"}
-        }),
-    };
-    Bytes::from(serde_json::to_vec(&body).expect("error JSON must serialize"))
 }
 
 /// 仅记录字段路径和原因；正文及工具结果不进入日志。

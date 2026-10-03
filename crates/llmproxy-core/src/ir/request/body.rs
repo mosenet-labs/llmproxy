@@ -12,6 +12,8 @@ pub struct Request {
     pub model: Option<String>,
     /// 客户端函数工具声明。
     pub tools: Vec<Function>,
+    /// 由 Provider 执行的搜索、代码执行等能力。
+    pub native_tools: Vec<super::native::NativeTool>,
     /// 已规范化的生成参数。
     pub generation: Generation,
     /// 尚未进入通用语义的字段及跨协议处理规则。
@@ -22,8 +24,10 @@ pub struct Request {
     pub instructions: Vec<Instruction>,
     /// 消息及独立工具输入项的原始顺序。
     pub items: Vec<Item>,
-    /// 请求级缓存设置；内容块级断点仍由消息保留。
+    /// 请求级缓存设置；内容块级断点单独记录位置。
     pub cache: CacheSettings,
+    /// 内容级缓存断点的位置和 TTL。
+    pub cache_breakpoints: Vec<crate::ir::cache::Breakpoint>,
     /// 未规范化的生成参数、工具输入项及供应商扩展字段。
     pub(crate) source: Option<Source>,
     /// 来源标识仅用于诊断，不要求存在来源报文。
@@ -36,12 +40,14 @@ impl Request {
         Self {
             model: None,
             tools: Vec::new(),
+            native_tools: Vec::new(),
             generation: Generation::default(),
             diagnostics: Vec::new(),
             messages: Vec::new(),
             instructions: Vec::new(),
             items: Vec::new(),
             cache: CacheSettings::default(),
+            cache_breakpoints: Vec::new(),
             source: None,
             origin,
         }

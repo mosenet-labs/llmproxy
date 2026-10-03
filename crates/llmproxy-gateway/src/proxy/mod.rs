@@ -1,3 +1,5 @@
+mod buffered;
+
 use std::{
     sync::{
         Arc,
@@ -94,7 +96,14 @@ impl ProxyHttp for Gateway {
         }
     }
 
+    fn allow_spawning_subrequest(&self, session: &Session, _ctx: &Self::CTX) -> bool {
+        session.subrequest_ctx.is_none()
+    }
+
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        if buffered::resume(session, ctx)? {
+            return Ok(false);
+        }
         // WEB控制台
         if crate::console::matches(session.req_header().uri.path()) {
             ctx.console = true;
@@ -117,13 +126,13 @@ impl ProxyHttp for Gateway {
                     Ok(route) => route,
                     Err(status) => {
                         ctx.telemetry.selected(protocol, None);
-                        session.respond_error(status).await?;
+                        crate::transform::respond_error(session, ctx.protocol, status).await?;
                         return Ok(true);
                     }
                 };
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
                 if provider.protocol != protocol && stream {
-                    session.respond_error(422).await?;
+                    crate::transform::respond_error(session, ctx.protocol, 422).await?;
                     return Ok(true);
                 }
                 let content_encoding = session.get_header_bytes("content-encoding");
@@ -131,7 +140,7 @@ impl ProxyHttp for Gateway {
                     && !content_encoding.is_empty()
                     && !content_encoding.eq_ignore_ascii_case(b"identity")
                 {
-                    session.respond_error(415).await?;
+                    crate::transform::respond_error(session, ctx.protocol, 415).await?;
                     return Ok(true);
                 }
                 ctx.client_model = Some(alias);
@@ -146,7 +155,7 @@ impl ProxyHttp for Gateway {
                 ctx.provider = Some(provider);
                 ctx.gemini_model_id = Some(upstream_model_id);
                 ctx.gemini_stream = stream;
-                Ok(false)
+                buffered::forward(self, session, ctx).await
             }
             Route::Proxy(protocol) => {
                 ctx.protocol = Some(protocol);
@@ -156,7 +165,7 @@ impl ProxyHttp for Gateway {
                     && !content_encoding.eq_ignore_ascii_case(b"identity")
                 {
                     session.set_keepalive(None);
-                    session.respond_error(415).await?;
+                    crate::transform::respond_error(session, ctx.protocol, 415).await?;
                     return Ok(true);
                 }
                 // 持续读取从session中读取request body数据直到读取model为止
@@ -164,7 +173,7 @@ impl ProxyHttp for Gateway {
                     ModelRead::Found(alias) => alias,
                     ModelRead::Rejected(status) => {
                         session.set_keepalive(None);
-                        session.respond_error(status).await?;
+                        crate::transform::respond_error(session, ctx.protocol, status).await?;
                         return Ok(true);
                     }
                 };
@@ -174,7 +183,7 @@ impl ProxyHttp for Gateway {
                     Err(status) => {
                         ctx.telemetry.selected(protocol, None);
                         session.set_keepalive(None);
-                        session.respond_error(status).await?;
+                        crate::transform::respond_error(session, ctx.protocol, status).await?;
                         return Ok(true);
                     }
                 };
@@ -198,10 +207,10 @@ impl ProxyHttp for Gateway {
                 // Pin one immutable provider for the full request, including SSE.
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
                 ctx.provider = Some(provider);
-                Ok(false)
+                buffered::forward(self, session, ctx).await
             }
             Route::Auto => {
-                session.respond_error(501).await?;
+                crate::transform::respond_error(session, ctx.protocol, 501).await?;
                 Ok(true)
             }
             Route::MethodNotAllowed => {
@@ -215,7 +224,7 @@ impl ProxyHttp for Gateway {
                 Ok(true)
             }
             Route::NotFound => {
-                session.respond_error(404).await?;
+                crate::transform::respond_error(session, ctx.protocol, 404).await?;
                 Ok(true)
             }
         }
@@ -567,7 +576,8 @@ impl ProxyHttp for Gateway {
 
         let code = error_status(error);
         if code != 0
-            && let Err(write_error) = session.respond_error(code).await
+            && let Err(write_error) =
+                crate::transform::respond_error(session, ctx.protocol, code).await
         {
             ctx.telemetry.error_response_failed(&write_error);
         }
@@ -583,6 +593,9 @@ impl ProxyHttp for Gateway {
         error: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
+        if buffered::complete(self, session, ctx) {
+            return;
+        }
         if ctx.console {
             if error.is_some() {
                 llmproxy_console::observability::transport_failure(

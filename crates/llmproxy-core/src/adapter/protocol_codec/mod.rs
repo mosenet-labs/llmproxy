@@ -224,3 +224,11 @@ fn encode_changed<D: Clone, M: PartialEq>(
             .collect(),
     ))
 }
+
+#[cfg(test)]
+mod nonstream_tests;
+
+#[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
+mod native_tests;

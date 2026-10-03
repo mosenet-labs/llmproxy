@@ -28,8 +28,6 @@ pub(super) fn decode(source: &Request, notes: &mut Notes) -> Vec<Function> {
                         &function.parameters,
                         &function.strict,
                     );
-                } else {
-                    notes.dropped(path);
                 }
             }
         }
@@ -47,8 +45,6 @@ pub(super) fn decode(source: &Request, notes: &mut Notes) -> Vec<Function> {
                         &function.parameters,
                         &function.strict,
                     );
-                } else {
-                    notes.dropped(path);
                 }
             }
         }
@@ -61,10 +57,11 @@ pub(super) fn decode(source: &Request, notes: &mut Notes) -> Vec<Function> {
                         .as_option()
                         .is_some_and(|kind| kind != "custom")
                     {
-                        notes.dropped(path);
                         continue;
                     }
-                    notes.extra(&function.extra, &path);
+                    let mut extra = function.extra.clone();
+                    extra.remove("cache_control");
+                    notes.extra(&extra, &path);
                     add(
                         &mut result,
                         notes,
@@ -74,25 +71,12 @@ pub(super) fn decode(source: &Request, notes: &mut Notes) -> Vec<Function> {
                         &O::Value(function.input_schema.clone()),
                         &O::Missing,
                     );
-                } else {
-                    notes.dropped(path);
                 }
             }
         }
         Request::Gemini(body) => {
             for (i, tool) in body.tools.as_option().into_iter().flatten().enumerate() {
                 let path = format!("tools[{i}]");
-                notes.field(
-                    &tool.google_search_retrieval,
-                    &format!("{path}.googleSearchRetrieval"),
-                );
-                notes.field(&tool.code_execution, &format!("{path}.codeExecution"));
-                notes.field(&tool.google_search, &format!("{path}.googleSearch"));
-                notes.field(&tool.computer_use, &format!("{path}.computerUse"));
-                notes.field(&tool.url_context, &format!("{path}.urlContext"));
-                notes.field(&tool.file_search, &format!("{path}.fileSearch"));
-                notes.field(&tool.mcp_servers, &format!("{path}.mcpServers"));
-                notes.field(&tool.google_maps, &format!("{path}.googleMaps"));
                 notes.extra(&tool.extra, &path);
                 for (j, function) in tool
                     .function_declarations
@@ -133,7 +117,7 @@ pub(super) fn decode(source: &Request, notes: &mut Notes) -> Vec<Function> {
     }
     result
 }
-/// 函数参数是动态 JSON Schema；不允许缺失或非对象的 Schema 进入转换。
+/// 缺省参数表示无参函数；显式 null 或非对象 Schema 不能转换。
 fn add(
     result: &mut Vec<Function>,
     notes: &mut Notes,
@@ -143,19 +127,23 @@ fn add(
     schema: &O<Value>,
     strict: &O<bool>,
 ) {
-    let Some(parameters) = schema.as_option().filter(|value| value.is_object()) else {
-        notes.reject(path, "函数声明缺少有效的参数 Schema");
-        return;
+    let parameters = match schema {
+        O::Missing => serde_json::json!({"type":"object","properties":{}}),
+        O::Value(value) if value.is_object() => value.clone(),
+        _ => {
+            notes.reject(path, "函数声明缺少有效的参数 Schema");
+            return;
+        }
     };
     result.push(Function {
         name: name.into(),
         description: description.as_option().cloned(),
-        parameters: parameters.clone(),
+        parameters,
         strict: strict.as_option().copied(),
     });
 }
 /// Gemini 原生 Schema 的类型枚举使用大写；仅规范化 Schema 节点。
-fn json_schema(mut value: Value) -> Value {
+pub(super) fn json_schema(mut value: Value) -> Value {
     fn normalize(value: &mut Value) {
         if let Value::Object(object) = value {
             if let Some(Value::String(kind)) = object.get_mut("type") {

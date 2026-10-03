@@ -3,6 +3,8 @@
 
 mod codec;
 mod cross;
+mod error;
+pub use error::respond as respond_error;
 mod model;
 mod parse;
 mod request;
@@ -19,7 +21,7 @@ use pingora::{Error, ErrorType, Result};
 use self::cross::CrossConversion;
 
 // 限制单次正文的缓冲内存；同协议超限时回退原样转发，跨协议则报错。
-const MAX_BUFFERED_BODY: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_BUFFERED_BODY: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Default)]
 pub enum BodyKind {
@@ -105,7 +107,7 @@ impl BodyTransform {
     pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
         if let Some((protocol, status)) = self.cross_error {
             *body = Some(if end {
-                cross::error_body(protocol, status)
+                error::body(protocol, status)
             } else {
                 Bytes::new()
             });

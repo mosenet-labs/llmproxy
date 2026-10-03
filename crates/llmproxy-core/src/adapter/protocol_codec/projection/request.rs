@@ -17,7 +17,16 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
         Source::Chat(body) => {
             request.model = Some(body.model.clone());
             request.generation = Generation {
-                max_output_tokens: body.max_completion_tokens.as_option().copied(),
+                max_output_tokens: body
+                    .max_completion_tokens
+                    .as_option()
+                    .or(body.max_tokens.as_option())
+                    .copied(),
+                seed: body.seed.as_option().copied(),
+                frequency_penalty: body.frequency_penalty.as_option().copied(),
+                presence_penalty: body.presence_penalty.as_option().copied(),
+                logprobs: body.logprobs.as_option().copied(),
+                top_logprobs: body.top_logprobs.as_option().copied(),
                 temperature: body.temperature.as_option().copied(),
                 top_p: body.top_p.as_option().copied(),
                 stop_sequences: body.stop.as_option().map(|stop| match stop {
@@ -26,38 +35,27 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
                 }),
                 candidate_count: body.n.as_option().copied(),
                 stream: body.stream.as_option().copied().unwrap_or(false),
+                ..Default::default()
             };
             notes.field(&body.audio, "request.audio");
-            notes.field(&body.frequency_penalty, "request.frequency_penalty");
             notes.field(&body.function_call, "request.function_call");
             notes.field(&body.functions, "request.functions");
             notes.field(&body.logit_bias, "request.logit_bias");
-            notes.field(&body.logprobs, "request.logprobs");
-            notes.field(&body.max_tokens, "request.max_tokens");
             notes.field(&body.metadata, "request.metadata");
             notes.field(&body.modalities, "request.modalities");
             notes.field(&body.moderation, "request.moderation");
-            notes.field(&body.parallel_tool_calls, "request.parallel_tool_calls");
             notes.field(&body.prediction, "request.prediction");
-            notes.field(&body.presence_penalty, "request.presence_penalty");
-            notes.field(&body.prompt_cache_key, "request.prompt_cache_key");
-            notes.field(&body.prompt_cache_options, "request.prompt_cache_options");
-            notes.field(
-                &body.prompt_cache_retention,
-                "request.prompt_cache_retention",
-            );
-            notes.field(&body.reasoning_effort, "request.reasoning_effort");
-            notes.field(&body.response_format, "request.response_format");
+            if let Some(options) = body.prompt_cache_options.as_option() {
+                notes.extra(&options.extra, "prompt_cache_options");
+            }
             notes.field(&body.safety_identifier, "request.safety_identifier");
-            notes.field(&body.seed, "request.seed");
             notes.field(&body.service_tier, "request.service_tier");
             notes.field(&body.store, "request.store");
             notes.field(&body.stream_options, "request.stream_options");
-            notes.field(&body.tool_choice, "request.tool_choice");
-            notes.field(&body.top_logprobs, "request.top_logprobs");
+
             notes.field(&body.user, "request.user");
             notes.field(&body.verbosity, "request.verbosity");
-            notes.field(&body.web_search_options, "request.web_search_options");
+
             notes.extra(&body.extra, "request");
         }
         Source::Responses(body) => {
@@ -95,27 +93,40 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
             notes.field(&body.access_programs, "request.access_programs");
             notes.field(&body.background, "request.background");
             notes.field(&body.context_management, "request.context_management");
-            notes.field(&body.conversation, "request.conversation");
+            if body.conversation.as_option().is_some() {
+                notes.reject(
+                    "request.conversation",
+                    "此字段引用来源 Provider 的服务端状态，必须先提供完整可移植上下文",
+                );
+            }
             notes.field(&body.include, "request.include");
             notes.field(&body.max_tool_calls, "request.max_tool_calls");
             notes.field(&body.metadata, "request.metadata");
             notes.field(&body.moderation, "request.moderation");
-            notes.field(&body.parallel_tool_calls, "request.parallel_tool_calls");
-            notes.field(&body.previous_response_id, "request.previous_response_id");
-            notes.field(&body.prompt, "request.prompt");
-            notes.field(&body.prompt_cache_key, "request.prompt_cache_key");
-            notes.field(&body.prompt_cache_options, "request.prompt_cache_options");
-            notes.field(
-                &body.prompt_cache_retention,
-                "request.prompt_cache_retention",
-            );
-            notes.field(&body.reasoning, "request.reasoning");
+            if body.previous_response_id.as_option().is_some() {
+                notes.reject(
+                    "request.previous_response_id",
+                    "此字段引用来源 Provider 的服务端状态，必须先提供完整可移植上下文",
+                );
+            }
+            if body.prompt.as_option().is_some() {
+                notes.reject(
+                    "request.prompt",
+                    "此字段引用来源 Provider 的服务端状态，必须先提供完整可移植上下文",
+                );
+            }
+            if let Some(options) = body.prompt_cache_options.as_option() {
+                notes.field(
+                    &options.comparison_response_id,
+                    "prompt_cache_options.comparison_response_id",
+                );
+                notes.field(&options.prewarm, "prompt_cache_options.prewarm");
+                notes.extra(&options.extra, "prompt_cache_options");
+            }
             notes.field(&body.safety_identifier, "request.safety_identifier");
             notes.field(&body.service_tier, "request.service_tier");
             notes.field(&body.store, "request.store");
             notes.field(&body.stream_options, "request.stream_options");
-            notes.field(&body.text, "request.text");
-            notes.field(&body.tool_choice, "request.tool_choice");
             notes.field(&body.top_logprobs, "request.top_logprobs");
             notes.field(&body.truncation, "request.truncation");
             notes.field(&body.user, "request.user");
@@ -125,6 +136,7 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
             request.model = Some(body.model.clone());
             request.generation = Generation {
                 max_output_tokens: Some(body.max_tokens),
+                top_k: body.top_k.as_option().copied(),
                 temperature: body.temperature.as_option().copied(),
                 top_p: body.top_p.as_option().copied(),
                 stop_sequences: body.stop_sequences.as_option().cloned(),
@@ -134,21 +146,22 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
             if let O::Value(SystemPrompt::Parts(parts)) = &body.system {
                 for (i, part) in parts.iter().enumerate() {
                     let path = format!("system[{i}]");
-                    notes.field(&part.cache_control, &format!("{path}.cache_control"));
+
                     notes.field(&part.citations, &format!("{path}.citations"));
                     notes.extra(&part.extra, &path);
                 }
             }
-            notes.field(&body.cache_control, "request.cache_control");
-            notes.field(&body.container, "request.container");
+            if body.container.as_option().is_some() {
+                notes.reject(
+                    "request.container",
+                    "此字段引用来源 Provider 的服务端状态，必须先提供完整可移植上下文",
+                );
+            }
             notes.field(&body.diagnostics, "request.diagnostics");
             notes.field(&body.inference_geo, "request.inference_geo");
             notes.field(&body.metadata, "request.metadata");
-            notes.field(&body.output_config, "request.output_config");
             notes.field(&body.service_tier, "request.service_tier");
-            notes.field(&body.thinking, "request.thinking");
-            notes.field(&body.tool_choice, "request.tool_choice");
-            notes.field(&body.top_k, "request.top_k");
+
             notes.extra(&body.extra, "request");
         }
         Source::Gemini(body) => {
@@ -157,43 +170,28 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
             if let Some(config) = body.generation_config.as_option() {
                 request.generation = Generation {
                     max_output_tokens: config.max_output_tokens.as_option().copied(),
+                    top_k: config.top_k.as_option().copied(),
+                    seed: config.seed.as_option().copied(),
+                    frequency_penalty: config.frequency_penalty.as_option().copied(),
+                    presence_penalty: config.presence_penalty.as_option().copied(),
+                    logprobs: config.response_logprobs.as_option().copied(),
+                    top_logprobs: config.logprobs.as_option().copied(),
                     temperature: config.temperature.as_option().copied(),
                     top_p: config.top_p.as_option().copied(),
                     stop_sequences: config.stop_sequences.as_option().cloned(),
                     candidate_count: config.candidate_count.as_option().copied(),
                     stream: false,
+                    ..Default::default()
                 };
-                notes.field(
-                    &config.response_mime_type,
-                    "generationConfig.responseMimeType",
-                );
-                notes.field(&config.response_schema, "generationConfig.responseSchema");
-                notes.field(
-                    &config.response_json_schema,
-                    "generationConfig.responseJsonSchema",
-                );
                 notes.field(
                     &config.response_modalities,
                     "generationConfig.responseModalities",
                 );
-                notes.field(&config.top_k, "generationConfig.topK");
-                notes.field(&config.seed, "generationConfig.seed");
-                notes.field(&config.presence_penalty, "generationConfig.presencePenalty");
-                notes.field(
-                    &config.frequency_penalty,
-                    "generationConfig.frequencyPenalty",
-                );
-                notes.field(
-                    &config.response_logprobs,
-                    "generationConfig.responseLogprobs",
-                );
-                notes.field(&config.logprobs, "generationConfig.logprobs");
                 notes.field(
                     &config.enable_enhanced_civic_answers,
                     "generationConfig.enableEnhancedCivicAnswers",
                 );
                 notes.field(&config.speech_config, "generationConfig.speechConfig");
-                notes.field(&config.thinking_config, "generationConfig.thinkingConfig");
                 notes.field(&config.image_config, "generationConfig.imageConfig");
                 notes.field(&config.media_resolution, "generationConfig.mediaResolution");
                 notes.field(
@@ -243,17 +241,38 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
                     notes.extra(&part.extra, &path);
                 }
             }
-
-            notes.field(&body.tool_config, "request.toolConfig");
             notes.field(&body.safety_settings, "request.safetySettings");
             notes.field(&body.labels, "request.labels");
-            notes.field(&body.cached_content, "request.cachedContent");
             notes.field(&body.service_tier, "request.serviceTier");
             notes.field(&body.store, "request.store");
             notes.extra(&body.extra, "request");
         }
     }
+    super::controls::decode(source, &mut request.generation, &mut notes);
     request.tools = super::tools::decode(source, &mut notes);
+    request.native_tools = super::native::decode(source, &mut notes);
+    super::cache::decode(request, source, &mut notes);
+    // 私有输入引用承载上下文，不能按普通未知字段丢弃后继续生成。
+    for (index, item) in request.items.iter().enumerate() {
+        if let crate::ir::request::Item::Opaque(value) = item
+            && value.get("type").and_then(serde_json::Value::as_str) == Some("item_reference")
+        {
+            notes.reject(&format!("items[{index}]"), "输入项引用必须先物化为完整历史");
+        }
+    }
+    for (index, message) in request.messages.iter().enumerate() {
+        for (part_index, part) in message.parts.iter().enumerate() {
+            if let crate::ir::message::PartKind::Opaque(value) = &part.kind
+                && value.data.get("type").and_then(serde_json::Value::as_str)
+                    == Some("container_upload")
+            {
+                notes.reject(
+                    &format!("messages[{index}].parts[{part_index}]"),
+                    "容器文件引用必须先物化为可移植内容",
+                );
+            }
+        }
+    }
     request.diagnostics = notes.0;
 }
 /// 未完成工具项不能作为已完成历史转换。

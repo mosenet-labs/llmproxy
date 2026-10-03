@@ -71,6 +71,12 @@ pub fn encode_responses(messages: &[IrMessage]) -> Result<Vec<Message>> {
                             text: text.clone(),
                             extra: wire::extra(&part.metadata, PROTOCOL),
                         },
+                        PartKind::Media(media) => {
+                            match crate::adapter::media::encode(media, PROTOCOL)? {
+                                crate::ir::media::OriginalMedia::Responses(part) => part,
+                                _ => unreachable!(),
+                            }
+                        }
                         PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
                             serde_json::from_value(opaque.data.clone())?
                         }

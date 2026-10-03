@@ -35,6 +35,11 @@ pub fn encode_chat(messages: &[IrMessage]) -> Result<Vec<Message>> {
                         seen_refusal = true;
                         refusal = O::Value(text.clone());
                     }
+                    PartKind::Reasoning(value)
+                        if value.is_string() && wire::form(&part.metadata, PROTOCOL).is_some() =>
+                    {
+                        extra.insert("reasoning_content".into(), value.clone());
+                    }
                     PartKind::ToolCall(_) => {
                         calls.push(crate::adapter::request::chat::encode_call(part)?)
                     }

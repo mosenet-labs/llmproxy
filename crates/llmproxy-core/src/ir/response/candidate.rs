@@ -19,7 +19,7 @@ pub enum Status {
     Unknown,
 }
 
-/// 候选的终止原因；当前跨协议仅编码正常结束和工具调用。
+/// 候选的终止原因；与传输状态及正文是否为空独立。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
@@ -31,6 +31,8 @@ pub enum FinishReason {
     Length,
     /// 被安全或内容规则过滤。
     Filtered,
+    /// 模型主动拒绝回答。
+    Refusal,
     /// 未知或未提供。
     #[default]
     Unknown,

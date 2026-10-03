@@ -98,7 +98,23 @@ pub fn decode_messages(messages: &[Message]) -> Result<Vec<IrMessage>> {
                                     extra,
                                 ))
                             }
-                            _ => wire::opaque_value(PROTOCOL, block),
+                            ContentBlock::Known(Block::Thinking {
+                                thinking,
+                                signature,
+                                extra,
+                            }) => {
+                                let mut extra = extra.clone();
+                                extra.insert("signature".into(), Value::String(signature.clone()));
+                                Ok(wire::part(
+                                    PartKind::Reasoning(Value::String(thinking.clone())),
+                                    PROTOCOL,
+                                    "thinking",
+                                    extra,
+                                ))
+                            }
+                            _ => crate::adapter::media::part(
+                                crate::ir::media::OriginalMedia::Messages(block.clone()),
+                            ),
                         })
                         .collect::<Result<_>>()?;
                     ("parts", parts)

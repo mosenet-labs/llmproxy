@@ -1,4 +1,7 @@
 //! 从协议类型直接提取整体 IR；不序列化来源正文。
+mod cache;
+mod controls;
+mod native;
 mod request;
 mod response;
 mod tools;

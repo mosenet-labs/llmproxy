@@ -29,3 +29,23 @@ pub struct CacheUsage {
     /// 写入长时缓存的词元数。
     pub write_long_input_tokens: Option<u64>,
 }
+
+/// 内容前缀的缓存断点；位置在有序消息或工具声明中，而不是请求末尾。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Breakpoint {
+    /// 断点所在内容位置。
+    pub location: CacheLocation,
+    /// 来源显式给出的缓存 TTL。
+    pub ttl: Option<String>,
+}
+
+/// 不依赖来源协议字段路径的缓存位置。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CacheLocation {
+    /// 顶层指令序号。
+    Instruction(usize),
+    /// 普通消息及其内容块序号。
+    Message { message: usize, part: usize },
+    /// 客户端函数声明序号。
+    Tool(usize),
+}

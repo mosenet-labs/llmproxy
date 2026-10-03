@@ -22,6 +22,7 @@ pub(crate) struct ChatSessions {
 struct ChatState {
     messages: Vec<ChatMessage>,
     thinking: HashMap<String, String>,
+    usage: HashMap<String, String>,
     title: String,
     next_id: u64,
     busy: bool,
@@ -68,6 +69,11 @@ impl ChatSession {
     pub(crate) fn snapshot(&self) -> (Vec<ChatMessage>, HashMap<String, String>, bool) {
         let state = self.state.lock().expect("chat state mutex");
         (state.messages.clone(), state.thinking.clone(), state.busy)
+    }
+
+    /// 逐轮统计与消息内容分开存储，避免下一次请求把用量文案当作对话历史。
+    pub(crate) fn usage_snapshot(&self) -> HashMap<String, String> {
+        self.state.lock().expect("chat state mutex").usage.clone()
     }
 
     pub(crate) fn begin(&self, prompt: &str) -> bool {
@@ -141,11 +147,15 @@ impl ChatSession {
             match result {
                 Ok(reply) => {
                     let thinking = reply.visible_thinking().to_owned();
+                    let usage = reply.usage.as_ref().map(usage_label);
                     message.content = reply.content;
                     message.status = ChatMessageStatus::Complete;
                     let id = message.id.clone();
                     if !thinking.is_empty() {
-                        state.thinking.insert(id, thinking);
+                        state.thinking.insert(id.clone(), thinking);
+                    }
+                    if let Some(usage) = usage {
+                        state.usage.insert(id, usage);
                     }
                 }
                 Err(error) => {
@@ -159,6 +169,22 @@ impl ChatSession {
         drop(state);
         let _ = self.changed.send(());
     }
+}
+
+/// 只展示 Provider 报告的计数，零与未报告保持不同。
+fn usage_label(usage: &llmproxy_core::ir::usage::Usage) -> String {
+    [
+        ("输入", usage.input_tokens),
+        ("输出", usage.output_tokens),
+        ("总计", usage.total_tokens),
+        ("缓存读取", usage.cache.read_input_tokens),
+        ("缓存写入", usage.cache.write_input_tokens),
+        ("推理", usage.output_details.reasoning_tokens),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|n| format!("{name} {n}")))
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 impl ChatSessions {
@@ -281,5 +307,24 @@ mod tests {
         assert_eq!(sessions.list(&first, &third).len(), 2);
         let other_page = sessions.create(None, "3", "anthropic_messages").unwrap();
         assert_eq!(sessions.list(&other_page, &other_page).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    #[test]
+    fn usage_is_separate_from_history_and_preserves_zero() {
+        let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
+        assert!(room.begin("hi"));
+        let mut usage = llmproxy_core::ir::usage::Usage::default();
+        usage.cache.read_input_tokens = Some(0);
+        room.finish(Ok(ChatReply {
+            content: "hello".into(),
+            usage: Some(usage),
+            ..Default::default()
+        }));
+        assert_eq!(room.usage_snapshot()["2"], "缓存读取 0");
+        assert_eq!(room.snapshot().0[1].content, "hello");
     }
 }

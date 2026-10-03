@@ -57,7 +57,31 @@ pub(super) fn decode_items(source: &Source, message_count: usize) -> Result<Vec<
                 },
                 item_id: raw.id.as_option().cloned(),
             }),
-            OutputItem::Other(raw) => items.push(Item::Opaque(Value::Object(raw.clone()))),
+            OutputItem::Other(raw)
+                if raw.get("type").and_then(serde_json::Value::as_str) == Some("reasoning") =>
+            {
+                let summary = raw
+                    .get("summary")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !summary.is_empty() {
+                    items.push(Item::Reasoning(summary));
+                } else {
+                    items.push(Item::Opaque(serde_json::Value::Object(raw.clone())));
+                }
+            }
+            OutputItem::Other(raw) => items.push(
+                crate::adapter::server_output::decode(
+                    crate::protocol::Protocol::OpenAiResponses,
+                    raw,
+                )
+                .map(Item::ServerOutput)
+                .unwrap_or_else(|| Item::Opaque(Value::Object(raw.clone()))),
+            ),
         }
     }
     Ok(items)

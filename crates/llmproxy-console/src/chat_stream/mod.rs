@@ -1,11 +1,12 @@
-use llmproxy_core::protocol::{
-    OptionalNullable, Protocol, Request, chat::request as chat, gemini::request as gemini,
-    messages::request as messages, responses::request as responses,
-};
+//! 控制台聊天的 HTTP 边界：非流式读取整包，已有同协议流式路径逐事件读取。
+mod completed;
+mod request;
+use llmproxy_core::protocol::Protocol;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::{Client, RequestBuilder};
+use request::{request_body, with_request_body};
+use reqwest::Client;
 use serde_json::Value;
-use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
+use topcoat_ant_design::ChatMessage;
 
 const MAX_REPLY_BYTES: usize = 256 * 1024;
 const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -16,9 +17,14 @@ const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 
 #[derive(Debug, Default)]
 pub(crate) struct ChatReply {
+    /// 显示给用户的回答正文。
     pub content: String,
+    /// 可见思考内容。
     pub thinking: String,
+    /// 可见思考的摘要。
     pub summary: String,
+    /// 经 IR 统一口径的本轮统计，缺失计数不补零。
+    pub usage: Option<llmproxy_core::ir::usage::Usage>,
 }
 
 impl ChatReply {
@@ -28,111 +34,6 @@ impl ChatReply {
         } else {
             &self.thinking
         }
-    }
-}
-
-/// 从已完成的对话记录直接构造协议请求；Gemini 的模型和流式模式由 URL 指定。
-pub fn request_body(protocol: Protocol, alias: &str, history: &[ChatMessage]) -> Request {
-    let history = history
-        .iter()
-        .filter(|message| message.status == ChatMessageStatus::Complete);
-    match protocol {
-        Protocol::OpenAiChat => Request::Chat(Box::new(chat::Request {
-            model: alias.to_owned(),
-            stream: OptionalNullable::Value(true),
-            messages: history
-                .map(|message| {
-                    if message.role == ChatBubbleRole::User {
-                        chat::Message::User(chat::ContentMessage {
-                            content: chat::Content::Text(message.content.clone()),
-                            name: None,
-                            extra: Default::default(),
-                        })
-                    } else {
-                        chat::Message::Assistant {
-                            audio: OptionalNullable::Missing,
-                            content: OptionalNullable::Value(chat::Content::Text(
-                                message.content.clone(),
-                            )),
-                            function_call: OptionalNullable::Missing,
-                            name: None,
-                            refusal: OptionalNullable::Missing,
-                            tool_calls: None,
-                            extra: Default::default(),
-                        }
-                    }
-                })
-                .collect(),
-            ..Default::default()
-        })),
-        Protocol::OpenAiResponses => Request::Responses(Box::new(responses::Request {
-            model: OptionalNullable::Value(alias.to_owned()),
-            stream: OptionalNullable::Value(true),
-            input: OptionalNullable::Value(responses::body::Input::Items(
-                history
-                    .map(|message| {
-                        responses::body::InputItem::Message(responses::Message::Easy(
-                            responses::EasyInputMessage {
-                                content: responses::Content::Text(message.content.clone()),
-                                role: if message.role == ChatBubbleRole::User {
-                                    responses::Role::User
-                                } else {
-                                    responses::Role::Assistant
-                                },
-                                phase: OptionalNullable::Missing,
-                                r#type: None,
-                                extra: Default::default(),
-                            },
-                        ))
-                    })
-                    .collect(),
-            )),
-            ..Default::default()
-        })),
-        Protocol::AnthropicMessages => Request::Messages(Box::new(messages::Request {
-            model: alias.to_owned(),
-            stream: OptionalNullable::Value(true),
-            max_tokens: 2048,
-            messages: history
-                .map(|message| messages::Message {
-                    content: messages::Content::Text(message.content.clone()),
-                    role: if message.role == ChatBubbleRole::User {
-                        messages::Role::User
-                    } else {
-                        messages::Role::Assistant
-                    },
-                    extra: Default::default(),
-                })
-                .collect(),
-            ..Default::default()
-        })),
-        Protocol::Gemini => Request::Gemini(Box::new(gemini::Request {
-            contents: history
-                .map(|message| gemini::Message {
-                    parts: vec![gemini::Part {
-                        text: OptionalNullable::Value(message.content.clone()),
-                        ..Default::default()
-                    }],
-                    role: Some(if message.role == ChatBubbleRole::User {
-                        gemini::Role::User
-                    } else {
-                        gemini::Role::Model
-                    }),
-                    extra: Default::default(),
-                })
-                .collect(),
-            ..Default::default()
-        })),
-    }
-}
-
-/// 在 HTTP 边界序列化具体协议结构，避免将统一载体的枚举标签写入请求正文。
-fn with_request_body(builder: RequestBuilder, body: &Request) -> RequestBuilder {
-    match body {
-        Request::Chat(body) => builder.json(body),
-        Request::Responses(body) => builder.json(body),
-        Request::Messages(body) => builder.json(body),
-        Request::Gemini(body) => builder.json(body),
     }
 }
 
@@ -263,100 +164,10 @@ fn event(protocol: Protocol, packet: &str) -> Result<(ChatReply, bool), String> 
             content: content.unwrap_or_default().to_owned(),
             thinking: thinking.unwrap_or_default().to_owned(),
             summary: summary.unwrap_or_default().to_owned(),
+            usage: None,
         },
         done,
     ))
-}
-
-fn completed_text(protocol: Protocol, value: &Value) -> String {
-    match protocol {
-        Protocol::OpenAiChat => value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        Protocol::OpenAiResponses => value
-            .get("output_text")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                value["output"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|item| item["content"].as_array().into_iter().flatten())
-                    .filter(|item| item["type"] == "output_text")
-                    .filter_map(|item| item["text"].as_str())
-                    .collect()
-            }),
-        Protocol::AnthropicMessages => value["content"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|item| item["type"] == "text")
-            .filter_map(|item| item["text"].as_str())
-            .collect(),
-        Protocol::Gemini => value
-            .pointer("/candidates/0/content/parts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|part| part["thought"] != true)
-            .filter_map(|part| part["text"].as_str())
-            .collect(),
-    }
-}
-
-fn completed_thinking(protocol: Protocol, value: &Value) -> String {
-    match protocol {
-        Protocol::OpenAiChat => value
-            .pointer("/choices/0/message/reasoning_content")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        Protocol::OpenAiResponses => {
-            let parts: Vec<_> = value["output"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|item| item["type"] == "reasoning")
-                .collect();
-            let raw = parts
-                .iter()
-                .flat_map(|item| item["content"].as_array().into_iter().flatten())
-                .filter(|part| part["type"] == "reasoning_text")
-                .filter_map(|part| part["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !raw.is_empty() {
-                raw
-            } else {
-                parts
-                    .iter()
-                    .flat_map(|item| item["summary"].as_array().into_iter().flatten())
-                    .filter(|part| part["type"] == "summary_text")
-                    .filter_map(|part| part["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        }
-        Protocol::AnthropicMessages => value["content"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|item| item["type"] == "thinking")
-            .filter_map(|item| item["thinking"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Protocol::Gemini => value
-            .pointer("/candidates/0/content/parts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|part| part["thought"] == true)
-            .filter_map(|part| part["text"].as_str())
-            .collect(),
-    }
 }
 
 fn boundary(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -371,24 +182,35 @@ fn boundary(bytes: &[u8]) -> Option<(usize, usize)> {
     })
 }
 
-pub async fn stream_reply(
+pub async fn chat_reply(
     client: &Client,
     gateway_origin: &str,
     protocol: Protocol,
     alias: &str,
     history: &[ChatMessage],
+    stream: bool,
     mut on_update: impl FnMut(&ChatReply),
 ) -> Result<ChatReply, String> {
     let path = if protocol == Protocol::Gemini {
         let model = utf8_percent_encode(alias, MODEL_SEGMENT);
-        format!("/v1beta/models/{model}:streamGenerateContent")
+        let method = if stream {
+            "streamGenerateContent?alt=sse"
+        } else {
+            "generateContent"
+        };
+        format!("/v1beta/models/{model}:{method}")
     } else {
         protocol.upstream_path().to_owned()
     };
-    let builder = client
-        .post(format!("{gateway_origin}{path}"))
-        .header("accept", "text/event-stream");
-    let response = with_request_body(builder, &request_body(protocol, alias, history))
+    let builder = client.post(format!("{gateway_origin}{path}")).header(
+        "accept",
+        if stream {
+            "text/event-stream"
+        } else {
+            "application/json"
+        },
+    );
+    let response = with_request_body(builder, &request_body(protocol, alias, history, stream))
         .send()
         .await
         .map_err(|error| format!("无法连接网关：{error}"))?;
@@ -422,19 +244,21 @@ pub async fn stream_reply(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.contains("application/json"))
     {
-        let value: Value = response.json().await.map_err(|_| "无法解析上游响应")?;
-        let reply = ChatReply {
-            content: completed_text(protocol, &value),
-            thinking: completed_thinking(protocol, &value),
-            summary: String::new(),
-        };
-        if reply.content.is_empty() {
-            return Err("上游未返回文本内容".to_owned());
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| "读取上游响应失败")? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_REPLY_BYTES {
+                return Err("上游响应过大".into());
+            }
+            bytes.extend_from_slice(&chunk);
         }
+        let reply = completed::decode(protocol, &bytes)?;
         on_update(&reply);
         return Ok(reply);
     }
-
+    if !stream {
+        return Err("上游未返回非流式 JSON 响应".into());
+    }
     let mut response = response;
     let mut pending = Vec::new();
     let mut output = ChatReply::default();
@@ -507,9 +331,7 @@ pub async fn stream_reply(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        boundary, completed_text, completed_thinking, event, request_body, with_request_body,
-    };
+    use super::{boundary, event, request_body, with_request_body};
     use llmproxy_core::protocol::Protocol;
     use serde_json::json;
     use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
@@ -540,13 +362,13 @@ mod tests {
             (
                 Protocol::OpenAiChat,
                 json!({
-                    "model": "alias", "stream": true, "messages": messages,
+                    "model": "alias", "stream": true, "max_completion_tokens":2048, "messages": messages,
                 }),
             ),
             (
                 Protocol::OpenAiResponses,
                 json!({
-                    "model": "alias", "stream": true, "input": messages,
+                    "model": "alias", "stream": true, "max_output_tokens":2048, "input": messages,
                 }),
             ),
             (
@@ -557,13 +379,13 @@ mod tests {
             ),
             (
                 Protocol::Gemini,
-                json!({"contents": [
+                json!({"generationConfig":{"maxOutputTokens":2048},"contents": [
                     {"role": "user", "parts": [{"text": "hi"}]},
                     {"role": "model", "parts": [{"text": "你好"}]},
                 ]}),
             ),
         ] {
-            let body = request_body(protocol, "alias", &history);
+            let body = request_body(protocol, "alias", &history, true);
             assert_eq!(body.protocol(), protocol);
             // 检查实际 HTTP 请求正文，确保序列化时没有额外的枚举标签或默认字段。
             let request = with_request_body(client.post("http://localhost/test"), &body)
@@ -573,6 +395,17 @@ mod tests {
             let actual: serde_json::Value =
                 serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
             assert_eq!(actual, expected, "{protocol:?}");
+            let body = request_body(protocol, "alias", &history, false);
+            let request = with_request_body(client.post("http://localhost/test"), &body)
+                .build()
+                .unwrap();
+            let actual: serde_json::Value =
+                serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+            if protocol == Protocol::Gemini {
+                assert!(actual.get("stream").is_none());
+            } else {
+                assert_eq!(actual["stream"], false);
+            }
         }
     }
 
@@ -672,59 +505,6 @@ mod tests {
             .0
             .thinking
             .is_empty()
-        );
-    }
-
-    #[test]
-    fn extracts_non_streaming_fallback() {
-        assert_eq!(
-            completed_text(
-                Protocol::OpenAiChat,
-                &json!({"choices":[{"message":{"content":"chat"}}]})
-            ),
-            "chat"
-        );
-        assert_eq!(
-            completed_text(
-                Protocol::OpenAiResponses,
-                &json!({"output":[{"content":[{"type":"output_text","text":"reply"}]}]})
-            ),
-            "reply"
-        );
-        assert_eq!(
-            completed_text(
-                Protocol::AnthropicMessages,
-                &json!({"content":[{"type":"text","text":"message"}]})
-            ),
-            "message"
-        );
-        assert_eq!(
-            completed_thinking(
-                Protocol::OpenAiChat,
-                &json!({"choices":[{"message":{"reasoning_content":"chat thought"}}]})
-            ),
-            "chat thought"
-        );
-        assert_eq!(
-            completed_thinking(
-                Protocol::OpenAiResponses,
-                &json!({"output":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"response thought"}]}]})
-            ),
-            "response thought"
-        );
-        assert_eq!(
-            completed_thinking(
-                Protocol::OpenAiResponses,
-                &json!({"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"response summary"}]}]})
-            ),
-            "response summary"
-        );
-        assert_eq!(
-            completed_thinking(
-                Protocol::AnthropicMessages,
-                &json!({"content":[{"type":"thinking","thinking":"message thought"}]})
-            ),
-            "message thought"
         );
     }
 }

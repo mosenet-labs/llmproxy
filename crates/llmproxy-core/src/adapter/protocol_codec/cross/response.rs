@@ -10,14 +10,13 @@ use crate::{
     adapter::{Result, response as usage_adapter},
     ir::{
         message::{PartKind, Role, ToolCall},
-        response::{Item as ResponseItem, Response},
-        usage::Usage,
+        response::{FinishReason, Item as ResponseItem, Response},
     },
     protocol::Protocol,
 };
 use serde_json::{Map, Value};
 
-pub(in crate::adapter::protocol_codec) fn encode_response(
+pub(super) fn encode_single(
     protocol: Protocol,
     response: &Response,
     target: &ResponseTarget<'_>,
@@ -32,6 +31,7 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
         &mut warnings,
     )?;
     validate_response(response)?;
+    let finish = response.candidates[0].finish_reason;
     let mut events = Vec::new();
     let mut serial = 0;
     let mut seen_messages = vec![false; response.messages.len()];
@@ -66,8 +66,32 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                         &mut warnings,
                     )?;
                     match &part.kind {
+                        PartKind::ServerOutput(output) => {
+                            if let Some(text) = super::server_output::text(
+                                output,
+                                response.source_protocol(),
+                                protocol,
+                                &part_path,
+                                &mut warnings,
+                            ) {
+                                events.push(OutputEvent::Text(text));
+                            }
+                        }
                         PartKind::Text(text) => events.push(OutputEvent::Text(text.clone())),
                         PartKind::ToolCall(call) => events.push(OutputEvent::Call(call.clone())),
+                        PartKind::Refusal(text) => events.push(OutputEvent::Refusal(text.clone())),
+                        PartKind::Reasoning(value) if value.is_string() => {
+                            events.push(OutputEvent::Reasoning(value.as_str().unwrap().into()))
+                        }
+                        PartKind::Media(media) => {
+                            if protocol != Protocol::Gemini {
+                                return Err(unsupported(
+                                    &part_path,
+                                    "目标响应没有等价的媒体内容块；不能把媒体伪装成文本",
+                                ));
+                            }
+                            events.push(OutputEvent::Media(media.clone()));
+                        }
                         _ => warn(
                             &mut warnings,
                             response.source_protocol(),
@@ -79,6 +103,18 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                 }
             }
             ResponseItem::ToolCall { call, .. } => events.push(OutputEvent::Call(call.clone())),
+            ResponseItem::Reasoning(text) => events.push(OutputEvent::Reasoning(text.clone())),
+            ResponseItem::ServerOutput(output) => {
+                if let Some(text) = super::server_output::text(
+                    output,
+                    response.source_protocol(),
+                    protocol,
+                    &path,
+                    &mut warnings,
+                ) {
+                    events.push(OutputEvent::Text(text));
+                }
+            }
             ResponseItem::Opaque(_) => warn(
                 &mut warnings,
                 response.source_protocol(),
@@ -91,12 +127,30 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
     if seen_messages.iter().any(|seen| !seen) {
         return Err(unsupported("items", "有消息未进入有序输出项"));
     }
-    if events.is_empty() {
+    if events.is_empty()
+        && !response.items.is_empty()
+        && !matches!(
+            finish,
+            FinishReason::Length | FinishReason::Filtered | FinishReason::Refusal
+        )
+    {
         return Err(unsupported("output", "转换后没有可发送的输出"));
     }
     let has_calls = events
         .iter()
         .any(|event| matches!(event, OutputEvent::Call(_)));
+    let refusal = events
+        .iter()
+        .filter_map(|event| match event {
+            OutputEvent::Refusal(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let has_refusal = events
+        .iter()
+        .any(|event| matches!(event, OutputEvent::Refusal(_)));
+    let incomplete = matches!(finish, FinishReason::Length | FinishReason::Filtered);
     let has_text = events
         .iter()
         .any(|event| matches!(event, OutputEvent::Text(_)));
@@ -109,10 +163,55 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
             "文本与工具调用的片段顺序合并到一条 Chat 消息",
         );
     }
+    if (finish == FinishReason::Filtered && protocol == Protocol::AnthropicMessages)
+        || ((finish == FinishReason::Refusal || has_refusal) && protocol == Protocol::Gemini)
+    {
+        warn(
+            &mut warnings,
+            response.source_protocol(),
+            protocol,
+            "finish_reason",
+            "目标协议没有完全等价的拒绝／过滤分类，保留正文并使用最接近的结束原因",
+        );
+    }
+    if events
+        .iter()
+        .any(|e| matches!(e, OutputEvent::Reasoning(_)))
+    {
+        if protocol == Protocol::AnthropicMessages {
+            warn(
+                &mut warnings,
+                response.source_protocol(),
+                protocol,
+                "reasoning",
+                "来源思考没有目标签名，降为可见文本，不能伪造 thinking 签名",
+            );
+        }
+        if protocol == Protocol::OpenAiChat {
+            warn(
+                &mut warnings,
+                response.source_protocol(),
+                protocol,
+                "reasoning",
+                "思考正文写入兼容扩展 reasoning_content",
+            );
+        }
+        if protocol == Protocol::OpenAiResponses {
+            warn(
+                &mut warnings,
+                response.source_protocol(),
+                protocol,
+                "reasoning",
+                "来源可见思考映射为摘要项，不复制不透明签名",
+            );
+        }
+    }
     let usage = response
         .usage
         .as_ref()
-        .map(|usage| normalize_usage(usage, response.source_protocol(), protocol, &mut warnings))
+        .map(|usage| {
+            super::usage::normalize(usage, response.source_protocol(), protocol, &mut warnings)
+        })
         .transpose()?;
     let body = match protocol {
         Protocol::OpenAiChat => {
@@ -163,13 +262,23 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                 object: "chat.completion".into(),
                 choices: vec![Choice {
                     index: 0,
-                    finish_reason: if has_calls { "tool_calls" } else { "stop" }.into(),
+                    finish_reason: match finish {
+                        FinishReason::Length => "length",
+                        FinishReason::Filtered => "content_filter",
+                        _ if has_calls => "tool_calls",
+                        _ => "stop",
+                    }
+                    .into(),
                     logprobs: O::Missing,
                     extra: Default::default(),
                     message: Message {
                         role: chat::response::message::AssistantRole::Assistant,
                         content: if has_text { O::Value(text) } else { O::Null },
-                        refusal: O::Missing,
+                        refusal: if has_refusal {
+                            O::Value(refusal)
+                        } else {
+                            O::Missing
+                        },
                         annotations: O::Missing,
                         audio: O::Missing,
                         function_call: O::Missing,
@@ -178,7 +287,24 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                         } else {
                             O::Value(calls)
                         },
-                        extra: Default::default(),
+                        extra: {
+                            let thinking = events
+                                .iter()
+                                .filter_map(|e| match e {
+                                    OutputEvent::Reasoning(text) => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if thinking.is_empty() {
+                                Default::default()
+                            } else {
+                                Map::from_iter([(
+                                    "reasoning_content".into(),
+                                    Value::String(thinking),
+                                )])
+                            }
+                        },
                     },
                 }],
                 usage: usage
@@ -198,20 +324,47 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
             let mut output = Vec::new();
             for event in &events {
                 match event {
-                    OutputEvent::Text(text) => output.push(OutputItem::Message(m::OutputMessage {
-                        id: format!("{}-msg-{}", target.id, output.len()),
-                        content: vec![m::OutputPart::OutputText {
-                            text: text.clone(),
-                            annotations: vec![],
-                            logprobs: None,
+                    OutputEvent::Text(text) | OutputEvent::Refusal(text) => {
+                        output.push(OutputItem::Message(m::OutputMessage {
+                            id: format!("{}-msg-{}", target.id, output.len()),
+                            content: vec![if matches!(event, OutputEvent::Refusal(_)) {
+                                m::OutputPart::Refusal {
+                                    refusal: text.clone(),
+                                    extra: Default::default(),
+                                }
+                            } else {
+                                m::OutputPart::OutputText {
+                                    text: text.clone(),
+                                    annotations: vec![],
+                                    logprobs: None,
+                                    extra: Default::default(),
+                                }
+                            }],
+                            role: m::AssistantRole::Assistant,
+                            status: if incomplete {
+                                m::Status::Incomplete
+                            } else {
+                                m::Status::Completed
+                            },
+                            r#type: m::MessageType::Message,
+                            phase: O::Missing,
                             extra: Default::default(),
-                        }],
-                        role: m::AssistantRole::Assistant,
-                        status: m::Status::Completed,
-                        r#type: m::MessageType::Message,
-                        phase: O::Missing,
-                        extra: Default::default(),
-                    })),
+                        }))
+                    }
+                    OutputEvent::Reasoning(text) => {
+                        output.push(OutputItem::Other(Map::from_iter([
+                            ("type".into(), Value::String("reasoning".into())),
+                            (
+                                "id".into(),
+                                Value::String(format!("{}-reasoning-{}", target.id, output.len())),
+                            ),
+                            (
+                                "summary".into(),
+                                serde_json::json!([{"type":"summary_text","text":text}]),
+                            ),
+                        ])));
+                    }
+                    OutputEvent::Media(_) => unreachable!("媒体目标已校验"),
                     OutputEvent::Call(call) => {
                         serial += 1;
                         let id = output_call_id(
@@ -227,7 +380,14 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                             call_id: O::Value(id),
                             name: call.name.clone(),
                             arguments: call_arguments(call)?,
-                            status: O::Value("completed".into()),
+                            status: O::Value(
+                                if incomplete {
+                                    "incomplete"
+                                } else {
+                                    "completed"
+                                }
+                                .into(),
+                            ),
                             extra: Default::default(),
                         }));
                     }
@@ -238,7 +398,27 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                 created_at: target.created,
                 model: target.model.into(),
                 object: "response".into(),
-                status: O::Value("completed".into()),
+                status: O::Value(
+                    if incomplete {
+                        "incomplete"
+                    } else {
+                        "completed"
+                    }
+                    .into(),
+                ),
+                incomplete_details: if incomplete {
+                    O::Value(responses::response::body::IncompleteDetails {
+                        reason: if finish == FinishReason::Length {
+                            "max_output_tokens"
+                        } else {
+                            "content_filter"
+                        }
+                        .into(),
+                        extra: Default::default(),
+                    })
+                } else {
+                    O::Null
+                },
                 output,
                 usage: usage
                     .as_ref()
@@ -255,11 +435,14 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
             let mut content = Vec::new();
             for event in &events {
                 content.push(ContentBlock::Known(match event {
-                    OutputEvent::Text(text) => Block::Text {
+                    OutputEvent::Text(text)
+                    | OutputEvent::Refusal(text)
+                    | OutputEvent::Reasoning(text) => Block::Text {
                         text: text.clone(),
                         citations: O::Missing,
                         extra: Default::default(),
                     },
+                    OutputEvent::Media(_) => unreachable!("媒体目标已校验"),
                     OutputEvent::Call(call) => {
                         serial += 1;
                         let id = output_call_id(
@@ -291,7 +474,16 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                 model: target.model.into(),
                 role: AssistantRole::Assistant,
                 stop_details: O::Missing,
-                stop_reason: O::Value(if has_calls { "tool_use" } else { "end_turn" }.into()),
+                stop_reason: O::Value(
+                    match finish {
+                        FinishReason::Length => "max_tokens",
+                        FinishReason::Filtered | FinishReason::Refusal => "refusal",
+                        _ if has_refusal => "refusal",
+                        _ if has_calls => "tool_use",
+                        _ => "end_turn",
+                    }
+                    .into(),
+                ),
                 stop_sequence: O::Missing,
                 usage: usage_adapter::encode_messages_usage(usage, None)?,
                 extra: Default::default(),
@@ -305,10 +497,23 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
             let mut parts = Vec::new();
             for event in &events {
                 parts.push(match event {
-                    OutputEvent::Text(text) => Part {
+                    OutputEvent::Text(text) | OutputEvent::Refusal(text) => Part {
                         text: O::Value(text.clone()),
                         ..Default::default()
                     },
+                    OutputEvent::Reasoning(text) => Part {
+                        text: O::Value(text.clone()),
+                        thought: O::Value(true),
+                        ..Default::default()
+                    },
+                    OutputEvent::Media(media) => {
+                        let mut media = media.clone();
+                        media.original = None;
+                        match crate::adapter::media::encode(&media, protocol)? {
+                            crate::ir::media::OriginalMedia::Gemini(part) => *part,
+                            _ => unreachable!(),
+                        }
+                    }
                     OutputEvent::Call(call) => {
                         serial += 1;
                         let id = output_call_id(
@@ -339,7 +544,14 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                         parts,
                         extra: Default::default(),
                     }),
-                    finish_reason: O::Value("STOP".into()),
+                    finish_reason: O::Value(
+                        match finish {
+                            FinishReason::Length => "MAX_TOKENS",
+                            FinishReason::Filtered => "SAFETY",
+                            _ => "STOP",
+                        }
+                        .into(),
+                    ),
                     ..Default::default()
                 }]),
                 usage_metadata: usage
@@ -355,6 +567,9 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
 
 enum OutputEvent {
     Text(String),
+    Refusal(String),
+    Reasoning(String),
+    Media(crate::ir::media::Media),
     Call(ToolCall),
 }
 
@@ -425,45 +640,11 @@ fn warn_output_metadata(
     warn_metadata(&cleaned, source, target, path, warnings)
 }
 
-fn normalize_usage(
-    usage: &Usage,
-    source: Protocol,
-    target: Protocol,
-    warnings: &mut Vec<ConversionWarning>,
-) -> Result<Usage> {
-    if usage.cache != Default::default()
-        || usage.input_details != Default::default()
-        || usage.output_details != Default::default()
-    {
-        warn(
-            warnings,
-            source,
-            target,
-            "usage.details",
-            "缓存和模态细分用量未映射，已保留总用量",
-        );
-    }
-    let (Some(input), Some(output), Some(total)) =
-        (usage.input_tokens, usage.output_tokens, usage.total_tokens)
-    else {
-        return Err(unsupported("usage", "缺少输入、输出或总词元数"));
-    };
-    if input.checked_add(output) != Some(total) {
-        return Err(unsupported("usage.total_tokens", "与输入输出词元数不一致"));
-    }
-    Ok(Usage {
-        input_tokens: Some(input),
-        output_tokens: Some(output),
-        total_tokens: Some(total),
-        ..Usage::default()
-    })
-}
-
 /// 候选结构和终止状态只检查 IR，避免回读来源报文。
 fn validate_response(response: &Response) -> Result<()> {
     use crate::ir::response::{FinishReason, Status};
-    if response.status != Status::Completed {
-        return Err(unsupported("status", "仅支持正常完成的响应"));
+    if !matches!(response.status, Status::Completed | Status::Incomplete) {
+        return Err(unsupported("status", "响应仍在执行、失败或状态未知"));
     }
     if response.candidates.len() != 1 {
         return Err(unsupported("candidates/choices", "只支持单候选"));
@@ -474,11 +655,15 @@ fn validate_response(response: &Response) -> Result<()> {
     }
     if !matches!(
         candidate.finish_reason,
-        FinishReason::Stop | FinishReason::ToolCall
+        FinishReason::Stop
+            | FinishReason::ToolCall
+            | FinishReason::Length
+            | FinishReason::Filtered
+            | FinishReason::Refusal
     ) {
         return Err(unsupported(
             "finish_reason",
-            "仅支持正常完成或工具调用的响应",
+            "未知结束原因不能伪装为正常结束",
         ));
     }
     Ok(())

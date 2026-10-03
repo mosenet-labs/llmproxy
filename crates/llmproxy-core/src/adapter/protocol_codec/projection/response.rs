@@ -37,11 +37,6 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&body.system_fingerprint, "response.system_fingerprint");
             notes.extra(&body.extra, "response");
             if let Some(usage) = body.usage.as_option() {
-                notes.field(
-                    &usage.completion_tokens_details,
-                    "usage.completion_tokens_details",
-                );
-                notes.field(&usage.prompt_tokens_details, "usage.prompt_tokens_details");
                 notes.extra(&usage.extra, "usage");
             }
         }
@@ -59,30 +54,40 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             response.candidates = vec![Candidate {
                 index: 0,
                 items: (0..response.items.len()).collect(),
-                finish_reason: if response.status == Status::Completed {
-                    FinishReason::Stop
-                } else {
-                    FinishReason::Unknown
+                finish_reason: match body
+                    .incomplete_details
+                    .as_option()
+                    .map(|d| d.reason.as_str())
+                {
+                    Some("max_output_tokens") => FinishReason::Length,
+                    Some("content_filter") => FinishReason::Filtered,
+                    _ if response.status == Status::Completed => FinishReason::Stop,
+                    Some("refusal") => FinishReason::Refusal,
+                    _ => FinishReason::Unknown,
                 },
             }];
             if body.object != "response" {
                 notes.reject("object", "不是 Responses 完成响应");
             }
-            if body.output.is_empty() {
-                notes.reject("output", "输出项不能为空");
-            }
             for (i, item) in body.output.iter().enumerate() {
                 if let OutputItem::FunctionCall(call) = item {
-                    super::request::check_status(
-                        &mut notes,
-                        &call.status,
-                        &format!("output[{i}].status"),
-                    );
+                    // 截断的函数参数仍可在使用字符串参数的协议之间原样表达。
+                    if !(response.status == Status::Incomplete
+                        && call.status.as_option().is_some_and(|s| s == "incomplete"))
+                    {
+                        super::request::check_status(
+                            &mut notes,
+                            &call.status,
+                            &format!("output[{i}].status"),
+                        );
+                    }
                     notes.extra(&call.extra, &format!("output[{i}]"));
                 }
             }
             notes.field(&body.error, "response.error");
-            notes.field(&body.incomplete_details, "response.incomplete_details");
+            if let Some(details) = body.incomplete_details.as_option() {
+                notes.extra(&details.extra, "response.incomplete_details");
+            }
             notes.field(&body.instructions, "response.instructions");
             notes.field(&body.metadata, "response.metadata");
             notes.field(&body.parallel_tool_calls, "response.parallel_tool_calls");
@@ -114,8 +119,6 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&body.truncation, "response.truncation");
             notes.extra(&body.extra, "response");
             if let Some(usage) = body.usage.as_option() {
-                notes.field(&usage.input_tokens_details, "usage.input_tokens_details");
-                notes.field(&usage.output_tokens_details, "usage.output_tokens_details");
                 notes.extra(&usage.extra, "usage");
             }
         }
@@ -135,17 +138,7 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&body.stop_sequence, "response.stop_sequence");
             notes.extra(&body.extra, "response");
             let usage = &body.usage;
-            notes.field(&usage.cache_creation, "usage.cache_creation");
-            notes.field(
-                &usage.cache_creation_input_tokens,
-                "usage.cache_creation_input_tokens",
-            );
-            notes.field(
-                &usage.cache_read_input_tokens,
-                "usage.cache_read_input_tokens",
-            );
             notes.field(&usage.inference_geo, "usage.inference_geo");
-            notes.field(&usage.output_tokens_details, "usage.output_tokens_details");
             notes.field(&usage.server_tool_use, "usage.server_tool_use");
             notes.field(&usage.service_tier, "usage.service_tier");
             notes.extra(&usage.extra, "usage");
@@ -209,25 +202,26 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
                 notes.field(&c.finish_message, &format!("candidates[{i}].finishMessage"));
                 notes.extra(&c.extra, &format!("candidates[{i}]"));
             }
+            if response.candidates.is_empty()
+                && body.prompt_feedback.as_option().is_some_and(|feedback| {
+                    feedback
+                        .block_reason
+                        .as_option()
+                        .is_some_and(|reason| reason != "BLOCK_REASON_UNSPECIFIED")
+                })
+            {
+                // 请求在生成前被过滤时没有候选，但过滤状态仍需返回给客户端。
+                response.candidates.push(Candidate {
+                    index: 0,
+                    items: vec![],
+                    finish_reason: FinishReason::Filtered,
+                });
+            }
             notes.field(&body.prompt_feedback, "response.promptFeedback");
             notes.field(&body.model_status, "response.modelStatus");
             notes.extra(&body.extra, "response");
             if let Some(usage) = body.usage_metadata.as_option() {
-                notes.field(
-                    &usage.cached_content_token_count,
-                    "usage.cachedContentTokenCount",
-                );
-                notes.field(
-                    &usage.tool_use_prompt_token_count,
-                    "usage.toolUsePromptTokenCount",
-                );
-                notes.field(&usage.thoughts_token_count, "usage.thoughtsTokenCount");
-                notes.field(&usage.prompt_tokens_details, "usage.promptTokensDetails");
                 notes.field(&usage.cache_tokens_details, "usage.cacheTokensDetails");
-                notes.field(
-                    &usage.candidates_tokens_details,
-                    "usage.candidatesTokensDetails",
-                );
                 notes.field(
                     &usage.tool_use_prompt_tokens_details,
                     "usage.toolUsePromptTokensDetails",
@@ -243,12 +237,19 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
 fn finish(reason: Option<&str>) -> FinishReason {
     match reason {
         Some("stop" | "end_turn" | "stop_sequence" | "STOP") => FinishReason::Stop,
-        Some("tool_calls" | "tool_use") => FinishReason::ToolCall,
+        Some("tool_calls" | "tool_use" | "function_call") => FinishReason::ToolCall,
         Some("length" | "max_tokens" | "MAX_TOKENS") => FinishReason::Length,
         Some(
-            "content_filter" | "SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
-            | "RECITATION",
+            "content_filter"
+            | "SAFETY"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "RECITATION"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT",
         ) => FinishReason::Filtered,
+        Some("refusal") => FinishReason::Refusal,
         _ => FinishReason::Unknown,
     }
 }

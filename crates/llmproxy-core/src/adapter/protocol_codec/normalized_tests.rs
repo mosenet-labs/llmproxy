@@ -221,7 +221,7 @@ fn source_diagnostics_and_stream_rejection_survive_detachment() {
         .decode_request(&body)
         .unwrap()
         .without_source();
-    let encoded = Protocol::Gemini
+    let error = Protocol::Gemini
         .encode_request_for(
             &ir,
             &RequestTarget {
@@ -229,13 +229,8 @@ fn source_diagnostics_and_stream_rejection_survive_detachment() {
                 max_output_tokens: None,
             },
         )
-        .unwrap();
-    assert!(
-        encoded
-            .warnings
-            .iter()
-            .any(|warning| warning.path.contains("previous_response_id"))
-    );
+        .unwrap_err();
+    assert!(error.to_string().contains("previous_response_id"));
     assert!(
         !serde_json::to_string(&ir.diagnostics)
             .unwrap()
@@ -261,10 +256,14 @@ fn candidates_preserve_boundaries_and_do_not_flatten() {
     let ir = Protocol::OpenAiChat.decode_response(&body).unwrap();
     assert_eq!(ir.candidates[0].items, vec![0]);
     assert_eq!(ir.candidates[1].items, vec![1]);
-    assert!(
+    assert_eq!(
         Protocol::Gemini
             .encode_response(&ir.without_source())
-            .is_err()
+            .unwrap()["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
 }
 
@@ -311,7 +310,13 @@ fn generation_limits_and_loss_are_explicit() {
     );
     ir.generation.temperature = Some(0.5);
     ir.generation.candidate_count = Some(2);
-    assert!(Protocol::Gemini.encode_request_for(&ir, &target).is_err());
+    assert_eq!(
+        Protocol::Gemini
+            .encode_request_for(&ir, &target)
+            .unwrap()
+            .body["generationConfig"]["candidateCount"],
+        2
+    );
 }
 
 #[test]
@@ -321,10 +326,11 @@ fn modifying_readonly_candidate_state_returns_error() {
         .unwrap();
     ir.candidates[0].finish_reason = FinishReason::Length;
     assert!(Protocol::OpenAiChat.encode_response(&ir).is_err());
-    assert!(
+    assert_eq!(
         Protocol::Gemini
             .encode_response(&ir.without_source())
-            .is_err()
+            .unwrap()["candidates"][0]["finishReason"],
+        "MAX_TOKENS"
     );
 }
 

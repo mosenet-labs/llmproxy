@@ -125,6 +125,77 @@ Gateway 在转换过程中记录结构化警告；日志只含来源、目标、
 5. 响应：多候选、有序非消息输出项、拒绝／过滤／未完成原因、错误响应。
 6. Usage：缓存读写和模态细分在各协议中的口径、缺失字段与客户端协议的展示方式。
 7. 流式：Chat delta、Responses 事件、Messages 内容块事件、Gemini 分块的事件级 IR 与状态机。
-8. Gateway：非流式 HTTP 链路已接入；后续处理大于 8 MiB 的正文、响应发头前的失败状态回写，以及流式事件转换。
+8. Gateway：非流式 HTTP 链路已接入；非流式正文继续限制为 8 MiB，响应发头前的失败状态已回写；后续处理流式事件转换。
 
 历史文档 `21-message-codec-pipeline.md` 描述的是旧版消息节点投影；当前整体同协议入口已改为 `adapter::protocol_codec::ProtocolCodec`。
+
+
+## 第六阶段：完整非流式能力（优先于流式）
+
+2026-10-03 确认：先补齐全部非流式能力，再启动流式。这里的“完整”指对已声明字段给出明确的映射或不兼容处理；不同 Provider 的私有资源、服务端执行环境与加密数据不能伪造等价物。跨协议仍只经类型化协议载体和 IR，JSON 解析／序列化留在 HTTP 边界。
+
+实施顺序及验收：
+
+- [ ] F1：结束状态、拒绝、空输出和候选边界；支持截断／过滤，不能伪装为正常结束。
+- [ ] F2：cache / usage 按目标能力映射；校验计数一致性，保留缺失与零的区别，仅对无法表达的细分发出警告。
+- [ ] F3：生成参数、工具选择、并行调用、结构化输出及推理配置；校验目标范围，专属字段显式诊断。
+- [ ] F4：图片、音频、视频、文件和工具结果内容；保留顺序与可移植数据，对 Provider 文件 ID 等资源引用明确报错。
+- [x] F5：缓存配置、断点、会话引用、服务端工具和专有输出；可映射时映射，依赖远端状态且无法转换时明确拒绝。
+- [x] F6：非流式错误及 HTTP 边界；完善转换失败返回、正文与模型上下文处理。
+- [ ] F7：页面可选择非流式，使用协议 struct 发起请求及读取完整响应，展示实际 usage/cache。
+- [ ] F8：四协议方向矩阵、同协议回归、Gateway 与页面验证，更新支持表后才开始流式。
+
+流式后续：事件 IR、四协议事件编解码状态机、SSE 分帧与取消、usage/cache 累积、Gateway 逐事件转换以及页面验证。禁止通过先收完整响应再伪装成流来代替事件级实现。
+
+### 本轮落地与剩余验收
+
+| 能力 | 已实现 | 尚待完成 |
+| --- | --- | --- |
+| 状态与候选 | 截断、过滤、拒绝、Gemini 生成前过滤；Chat/Gemini 多候选；单候选目标选择最小序号并警告 | Responses 失败／后台状态与统一错误 IR 的衔接 |
+| 用量 | 输入、输出、总量、缓存读写、推理及目标支持的模态细分；一致性校验；缺失不伪造零 | 缓存／工具输入的模态细分完整归一化 |
+| 请求控制 | 采样参数、具名／允许列表工具选择、并行控制、输出 Schema、推理等级／预算；同协议编辑保护 | 专属生成配置的逐字段验收与模型能力约束 |
+| 输入媒体 | 图片／PDF 的四协议转换；Chat↔Gemini 支持的内联音频；Gemini 视频载体；私有文件引用拒绝 | 文本文档、媒体附加配置和输出音视频的完整映射 |
+| 工具结果 | Messages／Responses／Gemini 的文本和媒体；错误标志；服务端代码／搜索输出进入独立 IR，可见内容转换为文本；不伪造客户端调用 | 特殊附件的跨 Provider 物化和原生展示不在本次转换范围，明确告警或拒绝 |
+| 缓存与状态 | 指令、消息片段、函数声明的断点进入 IR；保留可表达的边界／TTL；验证位置、数量、TTL 顺序；会话／缓存／容器私有引用拒绝 | 资源物化需要调用来源服务，当前不自动下载或上传 |
+| Gateway | 父请求缓冲跨协议转换结果后发头；错误 JSON、提前断开、读取超时分别返回 502／504；原始请求前缀只回放一次；遥测完成统计去重 | 超过 8 MiB 明确拒绝；客户端断开时的主动中止与真实 Provider 长请求仍需专项验收 |
+| 页面 | 默认保持已有同协议流式，可通过开关选择非流式；类型化请求／完整响应；逐轮 usage/cache，统计不进入下一轮历史 | 浏览器端完整验收与多模态／工具输出展示 |
+
+### 缓存断点、专属工具与响应头补齐（2026-10-03）
+
+代码组织：
+
+- `ir/cache.rs`：`Breakpoint` 与 `CacheLocation`；断点关联指令、消息片段或函数位置。
+- `ir/request/native.rs`：服务端搜索／代码执行声明，与客户端函数分开。
+- `ir/server_output.rs`：服务端输出的可见正文、语言和状态；原始执行记录仅用于同协议往返。
+- `adapter/protocol_codec/projection/{cache,native}.rs`：从来源类型提取公共语义、记录无法转换的字段；只解释开放的局部叶子。
+- `adapter/protocol_codec/cross/{cache,native,server_output}.rs`：目标能力校验和构造；跨协议不读取来源副本。
+- `gateway/src/proxy/{mod,buffered}.rs`：Pingora 回调与延迟提交响应分别负责；回调保持简洁。
+
+| 内容 | 转换规则 |
+| --- | --- |
+| Messages 内容／系统／函数断点 | 解码为明确位置与 TTL；目标 Messages 保持边界，支持 `5m`、`1h`，最多四个显式断点，长 TTL 在短 TTL 前；自动缓存可与末尾同 TTL 断点共用位置 |
+| Chat／Responses 内容断点 | 映射已有协议类型的 `prompt_cache_breakpoint`；不复制 Messages TTL；函数声明无对应断点字段时告警；Responses 指令有断点时整组转 system 输入保持顺序 |
+| Gemini 内容断点 | 生成接口没有等价位置，告警丢弃缓存配置，保留实际输入内容；缓存资源 ID 不能作为可移植上下文 |
+| Web search | 四协议构造各自声明；Responses／Messages 保持域名限制；Chat 与 Gemini Developer API 无等价域名过滤时拒绝，不能扩大搜索范围；搜索引擎和排序差异告警 |
+| Code execution | Responses 自动新容器、Messages `code_execution_20250825`、Gemini `codeExecution`；Chat 没有此能力，告警丢弃。运行环境差异告警，不复制容器／文件 ID |
+| 工具选择约束 | 必须调用但目标无法保证时拒绝；禁用工具或仅允许客户端函数时，不额外启用服务端工具；不把服务端输出生成客户端 `tool_calls` |
+| 服务端可见输出 | Gemini 代码／结果、Responses 执行日志、Messages 执行结果／搜索标题与 URL 经 IR 转成有损文本，记录警告；执行 ID、加密结果及专属附件不复制 |
+| 其他专属工具 | 计算机操作、地图、MCP、自定义非函数工具等无等价公共能力时按既定策略告警丢弃；若显式工具选择依赖被丢弃声明则拒绝。文件库、输入项引用、容器文件上传等承载私有上下文时拒绝 |
+| 同协议往返 | 原始专属字段保持不变；修改断点或内置声明后需移除来源副本进行规范化重建，禁止静默忽略编辑 |
+
+HTTP 流程：父请求完成路由、保存已读模型前缀并缓冲剩余原始请求体；通过 `SubrequestSpawner::create_subrequest` 创建子请求，移动已选 Provider 快照与转换上下文；子请求沿用现有鉴权、连接、请求／响应转换回调；父请求收完 `HttpTask`、核对结束标记与失败通道后才提交真实响应头和正文，并重算 Content-Length。正文发送完仍保持请求通道发送端存活，避免被框架误判为客户端断开。子请求归还上下文，由父请求记录一次完成统计。没有游离后台任务；父 future 被取消时，子请求 future 一起销毁。
+
+验收覆盖：三种缓存位置、TTL 丢弃与非法顺序、断点越界／重复／数量、自动缓存共用断点、四协议搜索矩阵、搜索限制、私有执行状态、代码工具有无能力、服务端输出不变成客户端调用、同协议原文保留、未知工具告警；HTTP 覆盖转换成功、429、上游 200 后正文错误／截断／超时、100 KB 请求前缀回放及统计去重。另修复 Responses 字符串 `input` 未进入消息 IR 的问题。
+
+参考文档：
+
+- [Messages 缓存](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+- [Responses 搜索](https://developers.openai.com/api/docs/guides/tools-web-search)、[代码执行](https://developers.openai.com/api/docs/guides/tools-code-interpreter)
+- [Messages 搜索](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool)、[代码执行](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool)
+- [Gemini 搜索](https://ai.google.dev/gemini-api/docs/google-search)、[代码执行](https://ai.google.dev/gemini-api/docs/code-execution)、[GoogleSearch SDK 字段边界](https://googleapis.github.io/js-genai/release_docs/interfaces/types.GoogleSearch.html)
+
+上述剩余项仍属于非流式阶段；未全部验收前不启动跨协议流式实现。
+
+上一轮验证：`cargo test --workspace` 共 204 项通过；`cargo clippy --workspace --all-targets -- -D warnings`、格式检查与 `git diff --check` 通过。验证包含模拟 Provider 的 HTTP 集成测试；尚未进行真实 Provider 或浏览器端完整验收。
+
+本次补齐验证：`cargo test --workspace` 共 215 项通过（21 个测试套件）；`cargo clippy --workspace --all-targets -- -D warnings`、格式检查与 `git diff --check` 通过。包含模拟 Provider 的真实 HTTP 测试；未进行真实 Provider 与浏览器完整验收，其他非流式待验收项保持开放。

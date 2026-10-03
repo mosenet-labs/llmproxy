@@ -14,6 +14,16 @@ pub(super) fn request(
     body: &mut RawRequest,
 ) -> Result<()> {
     let before = protocol.decode_request(source)?;
+    if edited.native_tools != before.native_tools {
+        return Err(Error::Unsupported(
+            "编辑内置工具时请移除来源副本后重新编码".into(),
+        ));
+    }
+    if edited.cache_breakpoints != before.cache_breakpoints {
+        return Err(Error::Unsupported(
+            "修改断点位置时请使用不含来源副本的 IR 重新构造请求".into(),
+        ));
+    }
     if edited.model != before.model {
         match body {
             RawRequest::Chat(b) => b.model = required(&edited.model, "model")?,
@@ -64,6 +74,7 @@ pub(super) fn request(
     }
     let actual = protocol.decode_request(body)?;
     if actual.model != edited.model
+        || actual.native_tools != edited.native_tools
         || actual.tools != edited.tools
         || actual.generation != edited.generation
     {

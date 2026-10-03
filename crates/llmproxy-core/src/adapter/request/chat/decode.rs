@@ -196,7 +196,7 @@ impl DecodePart for UserPart {
                 )?;
                 Ok(wire::text_part(text.clone(), PROTOCOL, "text", extra))
             }
-            _ => wire::opaque_value(PROTOCOL, self),
+            _ => crate::adapter::media::part(crate::ir::media::OriginalMedia::Chat(self.clone())),
         }
     }
 }

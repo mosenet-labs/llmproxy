@@ -29,8 +29,24 @@ async fn chat_route_to_messages_provider_converts_request_and_response() {
     let store = ProviderStore::connect(&url, &master_key).await.unwrap();
     store.migrate().await.unwrap();
     let (upstream, requests) = Mock::http(|request, stream| {
-        if request.body.windows(6).any(|part| part == b"reject") {
+        if request.body.windows(9).any(|part| part == b"malformed") {
+            respond(
+                stream,
+                200,
+                "Content-Type: application/json\r\nETag: stale\r\n",
+                b"provider-private-invalid-json",
+            );
+        } else if request.body.windows(9).any(|part| part == b"truncated") {
+            use std::io::Write;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"private\":").unwrap();
+        } else if request.body.windows(7).any(|part| part == b"timeout") {
+            use std::io::Write;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n").unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+        } else if request.body.windows(6).any(|part| part == b"reject") {
             respond(stream, 429, "Content-Type: application/json\r\n", br#"{"type":"error","error":{"type":"rate_limit_error","message":"provider secret details"}}"#);
+        } else if request.body.windows(8).any(|part| part == b"describe") {
+            respond(stream, 200, "Content-Type: application/json\r\n", br#"{"type":"message","id":"msg_2","model":"claude-model","role":"assistant","content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":2,"output_tokens":2}}"#);
         } else {
             respond(
                 stream,
@@ -44,6 +60,7 @@ async fn chat_route_to_messages_provider_converts_request_and_response() {
     provider.paths = ProviderPaths::single(Protocol::AnthropicMessages);
     provider.models_protocol = Protocol::AnthropicMessages;
     provider.anthropic_version = Some("2023-06-01".into());
+    provider.read_timeout_ms = 250;
     let provider = store.create(provider).await.unwrap();
     let model = store
         .create_model(ModelMappingInput {
@@ -98,9 +115,71 @@ async fn chat_route_to_messages_provider_converts_request_and_response() {
     );
     assert_eq!(failure.status, 429);
     let body: serde_json::Value = serde_json::from_slice(&failure.body()).unwrap();
-    assert_eq!(body["error"]["type"], "upstream_error");
+    assert_eq!(body["error"]["type"], "rate_limit_error");
     assert!(!body.to_string().contains("provider secret details"));
     let _ = requests.recv_timeout(DEADLINE).unwrap();
+    let response = gateway.request("POST", "/v1/chat/completions", "Content-Type: application/json\r\n", br#"{"model":"public-chat","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,YQ=="}}]}],"max_completion_tokens":32,"n":2}"#);
+    assert_eq!(response.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&response.body()).unwrap();
+    assert_eq!(body["choices"][0]["finish_reason"], "length");
+    assert_eq!(body["usage"]["prompt_tokens"], 10);
+    assert_eq!(body["usage"]["prompt_tokens_details"]["cached_tokens"], 5);
+    let request = requests.recv_timeout(DEADLINE).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["messages"][0]["content"][1]["type"], "image");
+    assert_eq!(
+        body["messages"][0]["content"][1]["source"]["media_type"],
+        "image/png"
+    );
+    assert!(body.get("n").is_none());
+    // 上游已经发出 200 后再发生正文错误，客户端仍应得到完整的 502/504。
+    for (text, status) in [("malformed", 502), ("truncated", 502), ("timeout", 504)] {
+        let input = serde_json::json!({"model":"public-chat","messages":[{"role":"user","content":text}],"max_completion_tokens":32});
+        let failed = gateway.request(
+            "POST",
+            "/v1/chat/completions",
+            "Content-Type: application/json\r\n",
+            &serde_json::to_vec(&input).unwrap(),
+        );
+        assert_eq!(failed.status, status, "{text}: {}", gateway.logs());
+        assert!(values(&failed.headers, "etag").is_empty());
+        let body = failed.body();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(error["error"].is_object());
+        assert!(!String::from_utf8_lossy(&body).contains("private"));
+        requests.recv_timeout(DEADLINE).unwrap();
+    }
+    // 前缀预读之外的大正文必须完整送入子请求，并且只改写一次模型。
+    let long_text = "a".repeat(100_000);
+    let input = format!(
+        r#"{{"model":"public-chat","messages":[{{"role":"user","content":"{long_text}"}}],"max_completion_tokens":32}}"#
+    );
+    let response = gateway.request(
+        "POST",
+        "/v1/chat/completions",
+        "Content-Type: application/json\r\n",
+        input.as_bytes(),
+    );
+    assert_eq!(response.status, 200);
+    assert!(values(&response.headers, "transfer-encoding").is_empty());
+    let length = values(&response.headers, "content-length")[0]
+        .parse::<usize>()
+        .unwrap();
+    assert_eq!(response.body().len(), length);
+    let input: serde_json::Value =
+        serde_json::from_slice(&requests.recv_timeout(DEADLINE).unwrap().body).unwrap();
+    assert_eq!(input["messages"][0]["content"], long_text);
+    let completed = gateway
+        .logs()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| {
+            line["fields"]["message"] == "request completed"
+                && line["fields"]["route"] == "/v1/chat/completions"
+        })
+        .count();
+    assert_eq!(completed, 7, "父子请求不能重复记录完成统计");
+
     drop(gateway);
     drop(store);
     std::fs::remove_dir_all(directory).unwrap();

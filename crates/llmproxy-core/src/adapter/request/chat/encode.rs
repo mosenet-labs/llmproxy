@@ -246,6 +246,10 @@ impl EncodePart for UserPart {
                 prompt_cache_breakpoint: wire::take(&mut extra, "prompt_cache_breakpoint")?,
                 extra,
             }),
+            PartKind::Media(media) => match crate::adapter::media::encode(media, PROTOCOL)? {
+                crate::ir::media::OriginalMedia::Chat(part) => Ok(part),
+                _ => unreachable!(),
+            },
             PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
                 Ok(serde_json::from_value(opaque.data.clone())?)
             }

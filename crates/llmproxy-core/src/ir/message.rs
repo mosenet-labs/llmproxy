@@ -39,14 +39,8 @@ pub struct Part {
 pub enum PartKind {
     /// 可直接读取或压缩的文本。
     Text(String),
-    /// 图片来源；具体 URL、文件 ID 或内联数据暂以 JSON 保存。
-    Image(Value),
-    /// 音频来源；具体表示暂以 JSON 保存。
-    Audio(Value),
-    /// 视频来源；具体表示暂以 JSON 保存。
-    Video(Value),
-    /// 文件或文档来源；具体表示暂以 JSON 保存。
-    File(Value),
+    /// 具有可移植来源信息的图片、音频、视频或文件。
+    Media(super::media::Media),
     /// 模型发出的工具调用。
     ToolCall(ToolCall),
     /// 客户端返回的工具执行结果。
@@ -57,6 +51,8 @@ pub enum PartKind {
     Refusal(String),
     /// 暂不能归一化的协议片段；跨协议编码时需显式处理。
     Opaque(OpaquePart),
+    /// Provider 已执行的工具输出，不参与客户端工具调用配对。
+    ServerOutput(super::server_output::ServerOutput),
 }
 
 /// 通用工具调用信息。

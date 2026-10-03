@@ -18,4 +18,8 @@ pub enum Item {
     },
     /// 推理或服务端工具等尚无跨协议语义的输出项。
     Opaque(Value),
+    /// 可见推理摘要；不包含 Provider 的不透明加密数据。
+    Reasoning(String),
+    /// Provider 已执行的工具产生的独立输出。
+    ServerOutput(crate::ir::server_output::ServerOutput),
 }

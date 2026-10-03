@@ -35,3 +35,7 @@ impl From<serde_json::Error> for Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+mod media;
+
+mod server_output;

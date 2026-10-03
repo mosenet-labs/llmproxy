@@ -16,6 +16,15 @@ pub fn decode_chat(messages: &[Message]) -> Result<Vec<IrMessage>> {
             wire::put(&mut extra, "audio", &m.audio)?;
             wire::put(&mut extra, "function_call", &m.function_call)?;
             let mut parts = Vec::new();
+            if let Some(Value::String(text)) = extra.get("reasoning_content") {
+                parts.push(wire::part(
+                    PartKind::Reasoning(Value::String(text.clone())),
+                    PROTOCOL,
+                    "reasoning_content",
+                    Map::new(),
+                ));
+                extra.remove("reasoning_content");
+            }
             let form = match &m.content {
                 O::Value(text) => {
                     parts.push(wire::text_part(

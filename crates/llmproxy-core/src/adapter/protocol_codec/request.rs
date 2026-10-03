@@ -31,6 +31,19 @@ pub(super) fn decode_messages(source: &Source) -> Result<Vec<Message>> {
 
 /// 顶层指令独立于消息历史，避免跨协议时丢失权限位置。
 pub(super) fn decode_instructions(source: &Source) -> Vec<Instruction> {
+    if let Source::Messages(body) = source
+        && let OptionalNullable::Value(
+            crate::protocol::messages::request::body::SystemPrompt::Parts(parts),
+        ) = &body.system
+    {
+        return parts
+            .iter()
+            .map(|part| Instruction {
+                role: Role::System,
+                text: part.text.clone(),
+            })
+            .collect();
+    }
     let text = match source {
         Source::Chat(_) => None,
         Source::Responses(body) => match &body.instructions {
@@ -41,15 +54,6 @@ pub(super) fn decode_instructions(source: &Source) -> Vec<Instruction> {
             OptionalNullable::Value(
                 crate::protocol::messages::request::body::SystemPrompt::Text(text),
             ) => Some(text.clone()),
-            OptionalNullable::Value(
-                crate::protocol::messages::request::body::SystemPrompt::Parts(parts),
-            ) => Some(
-                parts
-                    .iter()
-                    .map(|part| part.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
             _ => None,
         },
         Source::Gemini(body) => match &body.system_instruction {
@@ -82,7 +86,7 @@ pub(super) fn decode_items(source: &Source, message_count: usize) -> Result<Vec<
         return Ok((0..message_count).map(Item::Message).collect());
     };
     let OptionalNullable::Value(Input::Items(input)) = &body.input else {
-        return Ok(Vec::new());
+        return Ok((0..message_count).map(Item::Message).collect());
     };
     let mut items = Vec::with_capacity(input.len());
     let mut index = 0;
@@ -106,9 +110,38 @@ pub(super) fn decode_items(source: &Source, message_count: usize) -> Result<Vec<
                 name: None,
                 content: raw.output.clone(),
             })),
-            InputItem::Other(raw) => {
-                items.push(Item::Opaque(serde_json::Value::Object(raw.clone())))
+            InputItem::Other(raw)
+                if raw.get("type").and_then(serde_json::Value::as_str) == Some("reasoning") =>
+            {
+                let summary = raw
+                    .get("summary")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !summary.is_empty() {
+                    items.push(Item::Reasoning(summary));
+                } else {
+                    items.push(
+                        crate::adapter::server_output::decode(
+                            crate::protocol::Protocol::OpenAiResponses,
+                            raw,
+                        )
+                        .map(Item::ServerOutput)
+                        .unwrap_or_else(|| Item::Opaque(serde_json::Value::Object(raw.clone()))),
+                    );
+                }
             }
+            InputItem::Other(raw) => items.push(
+                crate::adapter::server_output::decode(
+                    crate::protocol::Protocol::OpenAiResponses,
+                    raw,
+                )
+                .map(Item::ServerOutput)
+                .unwrap_or_else(|| Item::Opaque(serde_json::Value::Object(raw.clone()))),
+            ),
         }
     }
     Ok(items)
@@ -129,20 +162,39 @@ pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result
         }
         Source::Responses(body) => {
             let original = response_input_messages(&body.input);
-            if let (Some(messages), OptionalNullable::Value(Input::Items(items))) = (
-                encode_changed(
-                    &original,
-                    edited,
-                    request::decode_responses,
-                    request::encode_responses,
-                )?,
-                &mut body.input,
-            ) {
-                let mut messages = messages.into_iter();
-                for item in items {
-                    if let InputItem::Message(message) = item {
-                        *message = messages.next().expect("消息数量已验证");
+            if let Some(messages) = encode_changed(
+                &original,
+                edited,
+                request::decode_responses,
+                request::encode_responses,
+            )? {
+                match &mut body.input {
+                    OptionalNullable::Value(Input::Items(items)) => {
+                        let mut messages = messages.into_iter();
+                        for item in items {
+                            if let InputItem::Message(message) = item {
+                                *message = messages.next().expect("消息数量已验证");
+                            }
+                        }
                     }
+                    OptionalNullable::Value(Input::Text(text)) => {
+                        use crate::protocol::responses::request::message as m;
+                        if let [
+                            m::Message::Easy(m::EasyInputMessage {
+                                content: m::Content::Text(edited),
+                                role: m::Role::User,
+                                ..
+                            }),
+                        ] = messages.as_slice()
+                        {
+                            *text = edited.clone();
+                        } else {
+                            body.input = OptionalNullable::Value(Input::Items(
+                                messages.into_iter().map(InputItem::Message).collect(),
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -174,6 +226,16 @@ pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result
 fn response_input_messages(
     input: &OptionalNullable<Input>,
 ) -> Vec<crate::protocol::responses::request::message::Message> {
+    if let OptionalNullable::Value(Input::Text(text)) = input {
+        use crate::protocol::responses::request::message as m;
+        return vec![m::Message::Easy(m::EasyInputMessage {
+            content: m::Content::Text(text.clone()),
+            role: m::Role::User,
+            phase: OptionalNullable::Missing,
+            r#type: None,
+            extra: Default::default(),
+        })];
+    }
     let OptionalNullable::Value(Input::Items(items)) = input else {
         return Vec::new();
     };

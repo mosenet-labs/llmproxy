@@ -12,7 +12,9 @@ use crate::{
     protocol::Protocol,
 };
 use serde_json::{Map, Value};
+mod cache;
 mod items;
+mod results;
 use items::Items;
 use std::collections::{HashMap, HashSet};
 
@@ -24,16 +26,8 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
     if protocol != Protocol::Gemini {
         nonempty(target.model, "target.model")?;
     }
+    super::cache::validate(request)?;
     let mut warnings = Vec::new();
-    if request.cache != Default::default() {
-        warn(
-            &mut warnings,
-            request.source_protocol(),
-            protocol,
-            "cache",
-            "目标请求未保留来源缓存设置",
-        );
-    }
     super::apply_diagnostics(
         &request.diagnostics,
         request.source_protocol(),
@@ -52,11 +46,15 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
     let limit = limit.or(target.max_output_tokens);
     let mut items = Items::new(protocol);
     let mut high = Vec::new();
-    for instruction in &request.instructions {
+    for (index, instruction) in request.instructions.iter().enumerate() {
         high.push((
             instruction.role,
             instruction.text.clone(),
             "instructions".to_owned(),
+            breakpoint(
+                request,
+                &crate::ir::cache::CacheLocation::Instruction(index),
+            ),
         ));
     }
     let mut seen_dialogue = false;
@@ -82,14 +80,27 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                 )?;
                 let role = message.role;
                 if matches!(role, Role::System | Role::Developer) && !seen_dialogue {
-                    let text = text_parts(
-                        &message.parts,
-                        request.source_protocol(),
-                        protocol,
-                        &path,
-                        &mut warnings,
-                    )?;
-                    high.push((role, text, path));
+                    for (part_index, part) in message.parts.iter().enumerate() {
+                        let text = text_parts(
+                            std::slice::from_ref(part),
+                            request.source_protocol(),
+                            protocol,
+                            &path,
+                            &mut warnings,
+                        )?;
+                        high.push((
+                            role,
+                            text,
+                            path.clone(),
+                            breakpoint(
+                                request,
+                                &crate::ir::cache::CacheLocation::Message {
+                                    message: *index,
+                                    part: part_index,
+                                },
+                            ),
+                        ));
+                    }
                     continue;
                 }
                 if role == Role::Unspecified && protocol != Protocol::Gemini {
@@ -119,14 +130,35 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                 };
                 for (part_index, part) in message.parts.iter().enumerate() {
                     let part_path = format!("{path}.parts[{part_index}]");
-                    warn_metadata(
-                        &part.metadata,
-                        request.source_protocol(),
-                        protocol,
-                        &part_path,
-                        &mut warnings,
-                    )?;
+                    if !matches!(part.kind, PartKind::ToolResult(_)) {
+                        warn_metadata(
+                            &part.metadata,
+                            request.source_protocol(),
+                            protocol,
+                            &part_path,
+                            &mut warnings,
+                        )?;
+                    }
                     match &part.kind {
+                        PartKind::ServerOutput(output) => {
+                            if let Some(text) = super::server_output::text(
+                                output,
+                                request.source_protocol(),
+                                protocol,
+                                &part_path,
+                                &mut warnings,
+                            ) {
+                                emit_text(
+                                    protocol,
+                                    &mut items,
+                                    role,
+                                    &text,
+                                    request.source_protocol(),
+                                    &part_path,
+                                    &mut warnings,
+                                )?;
+                            }
+                        }
                         PartKind::Text(text) => emit_text(
                             protocol,
                             &mut items,
@@ -136,6 +168,53 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                             &part_path,
                             &mut warnings,
                         )?,
+                        PartKind::Reasoning(value) => {
+                            if let Some(text) = value.as_str() {
+                                warn(
+                                    &mut warnings,
+                                    request.source_protocol(),
+                                    protocol,
+                                    &part_path,
+                                    "可见思考历史降为 assistant 文本，签名不跨协议复制",
+                                );
+                                emit_text(
+                                    protocol,
+                                    &mut items,
+                                    role,
+                                    text,
+                                    request.source_protocol(),
+                                    &part_path,
+                                    &mut warnings,
+                                )?;
+                            } else {
+                                warn(
+                                    &mut warnings,
+                                    request.source_protocol(),
+                                    protocol,
+                                    &part_path,
+                                    "不透明思考数据仅在来源协议保留",
+                                );
+                            }
+                        }
+                        PartKind::Media(media) => items.media(role, media)?,
+                        PartKind::Refusal(text) => {
+                            warn(
+                                &mut warnings,
+                                request.source_protocol(),
+                                protocol,
+                                &part_path,
+                                "历史拒绝说明映射为文本",
+                            );
+                            emit_text(
+                                protocol,
+                                &mut items,
+                                role,
+                                text,
+                                request.source_protocol(),
+                                &part_path,
+                                &mut warnings,
+                            )?;
+                        }
                         PartKind::ToolCall(call) => {
                             if role != Role::Assistant {
                                 return Err(unsupported(&part_path, "工具调用必须来自 assistant"));
@@ -153,7 +232,7 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                         PartKind::ToolResult(result) => emit_result(
                             protocol,
                             &mut items,
-                            result,
+                            (result, Some(&part.metadata)),
                             &mut calls,
                             request.source_protocol(),
                             &part_path,
@@ -166,6 +245,34 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                             &part_path,
                             "内容片段尚无目标协议映射，已丢弃",
                         ),
+                    }
+                    if let Some(point) = breakpoint(
+                        request,
+                        &crate::ir::cache::CacheLocation::Message {
+                            message: *index,
+                            part: part_index,
+                        },
+                    ) {
+                        if !matches!(&part.kind, PartKind::Opaque(_) | PartKind::ServerOutput(_))
+                            && !matches!(&part.kind, PartKind::Reasoning(v) if !v.is_string())
+                        {
+                            mark(
+                                &mut items,
+                                point,
+                                request.source_protocol(),
+                                protocol,
+                                &part_path,
+                                &mut warnings,
+                            );
+                        } else {
+                            warn(
+                                &mut warnings,
+                                request.source_protocol(),
+                                protocol,
+                                &part_path,
+                                "内容已丢弃，缓存断点同步丢弃",
+                            );
+                        }
                     }
                 }
             }
@@ -186,12 +293,50 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                 emit_result(
                     protocol,
                     &mut items,
-                    result,
+                    (result, None),
                     &mut calls,
                     request.source_protocol(),
                     &path,
                     &mut warnings,
                 )?;
+            }
+            RequestItem::Reasoning(text) => {
+                seen_dialogue = true;
+                warn(
+                    &mut warnings,
+                    request.source_protocol(),
+                    protocol,
+                    &path,
+                    "历史思考摘要降为 assistant 文本",
+                );
+                emit_text(
+                    protocol,
+                    &mut items,
+                    Role::Assistant,
+                    text,
+                    request.source_protocol(),
+                    &path,
+                    &mut warnings,
+                )?;
+            }
+            RequestItem::ServerOutput(output) => {
+                if let Some(text) = super::server_output::text(
+                    output,
+                    request.source_protocol(),
+                    protocol,
+                    &path,
+                    &mut warnings,
+                ) {
+                    emit_text(
+                        protocol,
+                        &mut items,
+                        Role::Assistant,
+                        &text,
+                        request.source_protocol(),
+                        &path,
+                        &mut warnings,
+                    )?;
+                }
             }
             RequestItem::Opaque(_) => warn(
                 &mut warnings,
@@ -207,7 +352,11 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
     }
     let mut system = Vec::new();
     let mut prefix = Items::new(protocol);
-    for (role, text, path) in high {
+    let mut system_points = Vec::new();
+    // Responses 顶层指令不能标记断点；需要断点时整组改为 system 输入，保持顺序。
+    let instructions_as_messages = protocol == Protocol::OpenAiResponses
+        && high.iter().any(|(_, _, _, point)| point.is_some());
+    for (role, text, path, point) in high {
         match protocol {
             Protocol::OpenAiChat => {
                 if path == "instructions" {
@@ -220,11 +369,51 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                     );
                 }
                 prefix.text(role, &text)?;
+                if let Some(point) = point {
+                    mark(
+                        &mut prefix,
+                        point,
+                        request.source_protocol(),
+                        protocol,
+                        &path,
+                        &mut warnings,
+                    );
+                }
             }
-            Protocol::OpenAiResponses if path != "instructions" => {
+            Protocol::OpenAiResponses if path != "instructions" || instructions_as_messages => {
+                if path == "instructions" {
+                    warn(
+                        &mut warnings,
+                        request.source_protocol(),
+                        protocol,
+                        &path,
+                        "为保留缓存断点和指令顺序，将顶层指令映射为 system 输入项",
+                    );
+                }
                 prefix.text(role, &text)?;
+                if let Some(point) = point {
+                    mark(
+                        &mut prefix,
+                        point,
+                        request.source_protocol(),
+                        protocol,
+                        &path,
+                        &mut warnings,
+                    );
+                }
             }
-            Protocol::OpenAiResponses => system.push(text),
+            Protocol::OpenAiResponses => {
+                system.push(text);
+                if point.is_some() {
+                    warn(
+                        &mut warnings,
+                        request.source_protocol(),
+                        protocol,
+                        &path,
+                        "Responses 顶层 instructions 不支持内容块断点，已丢弃断点",
+                    );
+                }
+            }
             Protocol::AnthropicMessages | Protocol::Gemini => {
                 if role == Role::Developer {
                     warn(
@@ -235,6 +424,19 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                         "developer 与 system 的优先级合并",
                     );
                 }
+                let control = point.map(|point| {
+                    super::cache::control(point, request.source_protocol(), protocol, &mut warnings)
+                });
+                if point.is_some() && protocol == Protocol::Gemini {
+                    warn(
+                        &mut warnings,
+                        request.source_protocol(),
+                        protocol,
+                        &path,
+                        "Gemini 生成请求没有内容块缓存断点，已丢弃断点",
+                    );
+                }
+                system_points.push(control);
                 system.push(text);
             }
         }
@@ -244,13 +446,36 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
     if items.is_empty() {
         return Err(unsupported("messages", "转换后没有可发送的输入"));
     }
-    let mut body = items.finish(target.model, system);
+    let mut body = items.finish(target.model, system.clone());
+    if let crate::protocol::Request::Messages(body) = &mut body
+        && system_points.iter().any(Option::is_some)
+    {
+        body.system = crate::protocol::OptionalNullable::Value(
+            crate::protocol::messages::request::body::SystemPrompt::Parts(
+                system
+                    .into_iter()
+                    .zip(system_points)
+                    .map(|(text, cache_control)| {
+                        crate::protocol::messages::request::body::SystemText {
+                            text,
+                            cache_control: cache_control.into(),
+                            citations: crate::protocol::OptionalNullable::Missing,
+                            r#type: "text".into(),
+                            extra: Default::default(),
+                        }
+                    })
+                    .collect(),
+            ),
+        );
+    }
     super::tools::encode_tools(
         request.source_protocol(),
         &mut body,
         &request.tools,
         &mut warnings,
     )?;
+    super::cache::tools(request, &mut body, &mut warnings)?;
+    super::native::encode(request, &mut body, &mut warnings)?;
     let mut generation = request.generation.clone();
     generation.max_output_tokens = limit;
     super::generation::encode(
@@ -260,6 +485,13 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
         &mut body,
         &mut warnings,
     )?;
+    super::cache::encode(
+        request.source_protocol(),
+        &mut body,
+        &request.cache,
+        &mut warnings,
+    )?;
+    super::cache::validate_messages(&body)?;
     Ok(Conversion { body, warnings })
 }
 
@@ -371,12 +603,13 @@ fn emit_call(
 fn emit_result(
     target: Protocol,
     items: &mut Items,
-    result: &ToolResult,
+    result: (&ToolResult, Option<&Map<String, Value>>),
     calls: &mut ToolState,
     source: Protocol,
     path: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Result<()> {
+    let (result, metadata) = result;
     let id = match &result.id {
         Some(id) if calls.pending.contains_key(id) => id.clone(),
         Some(_) => return Err(unsupported(path, "工具结果找不到对应调用 ID")),
@@ -406,32 +639,38 @@ fn emit_result(
     if result.name.as_ref().is_some_and(|actual| actual != &name) {
         return Err(unsupported(path, "工具结果名称与调用不一致"));
     }
-    if (target == Protocol::Gemini && !result.content.is_object())
-        || (target != Protocol::Gemini && !result.content.is_string())
-    {
+    results::emit(items, id.clone(), name, result, metadata, source, warnings)?;
+    calls.pending.remove(&id);
+    Ok(())
+}
+
+/// 断点通过规范化位置关联，不依赖来源报文的 JSON 路径。
+fn breakpoint<'a>(
+    request: &'a Request,
+    location: &crate::ir::cache::CacheLocation,
+) -> Option<&'a crate::ir::cache::Breakpoint> {
+    request
+        .cache_breakpoints
+        .iter()
+        .find(|point| &point.location == location)
+}
+/// 目标没有断点位置时明确记录降级。
+fn mark(
+    items: &mut Items,
+    point: &crate::ir::cache::Breakpoint,
+    source: Protocol,
+    target: Protocol,
+    path: &str,
+    warnings: &mut Vec<ConversionWarning>,
+) {
+    let control = super::cache::control(point, source, target, warnings);
+    if !items.cache_breakpoint(control) {
         warn(
             warnings,
             source,
             target,
             path,
-            if target == Protocol::Gemini {
-                "非对象工具结果已包装为 result 对象"
-            } else {
-                "非文本工具结果已序列化为 JSON 文本"
-            },
+            "目标内容项没有缓存断点字段，已丢弃断点",
         );
     }
-    let content = if let Some(text) = result.content.as_str() {
-        text.to_owned()
-    } else {
-        serde_json::to_string(&result.content)?
-    };
-    let response = result
-        .content
-        .as_object()
-        .cloned()
-        .unwrap_or_else(|| Map::from_iter([("result".into(), result.content.clone())]));
-    items.result(id.clone(), name, content, response);
-    calls.pending.remove(&id);
-    Ok(())
 }

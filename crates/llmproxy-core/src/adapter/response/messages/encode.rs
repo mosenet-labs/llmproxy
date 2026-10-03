@@ -41,6 +41,17 @@ pub fn encode_messages(messages: &[IrMessage]) -> Result<Vec<Message>> {
                             caller: wire::take(&mut extra, "caller")?,
                             extra,
                         }),
+                        PartKind::Reasoning(value) => ContentBlock::Known(Block::Thinking {
+                            thinking: value
+                                .as_str()
+                                .ok_or_else(|| Error::Unsupported("思考正文必须是文本".into()))?
+                                .into(),
+                            signature: wire::required(&mut extra, "signature")?,
+                            extra,
+                        }),
+                        PartKind::ServerOutput(output) => serde_json::from_value(
+                            crate::adapter::server_output::original(output, PROTOCOL)?.clone(),
+                        )?,
                         PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
                             serde_json::from_value(opaque.data.clone())?
                         }
