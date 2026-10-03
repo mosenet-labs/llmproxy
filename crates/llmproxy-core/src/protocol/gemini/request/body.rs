@@ -8,7 +8,7 @@ use super::message::Message;
 use crate::protocol::OptionalNullable;
 
 /// Gemini 生成请求；模型 ID 位于 URL 路径，不在请求正文中。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     /// 对话历史和当前输入。
@@ -46,7 +46,7 @@ pub struct Request {
 }
 
 /// 可选的函数、搜索、代码执行等工具集合。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
     /// 客户端可执行的函数声明。
@@ -82,7 +82,7 @@ pub struct Tool {
 }
 
 /// 模型可以请求客户端执行的函数。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionDeclaration {
     /// 函数名称。
@@ -150,7 +150,7 @@ pub struct SafetySetting {
 }
 
 /// 生成策略及响应格式配置。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationConfig {
     /// 生成停止序列。

@@ -1,61 +1,105 @@
-//! IR 消息序列编码为 gemini。
-
-use crate::{
-    ir::request::{Message as IrMessage, PartKind, Role},
-    protocol::gemini::request::message::Message,
-};
-use serde_json::{Value, json};
-use std::collections::HashMap;
-
+//! IR 消息直接构造 Gemini Content 和 Part。
 use super::super::{Error, Result, wire};
 use super::PROTOCOL;
-
-/// 工具调用和结果分别映射为 `functionCall`、`functionResponse`。
+use crate::{
+    ir::request::{Message as IrMessage, PartKind, Role},
+    protocol::{
+        OptionalNullable as O,
+        gemini::request::message::{
+            FunctionCall, FunctionResponse, Message, Part, Role as RawRole,
+        },
+    },
+};
+use serde_json::Map;
+use std::collections::HashMap;
+/// 按调用 ID 补足工具结果名称并保持相邻用户片段顺序。
 pub fn encode_gemini(messages: &[IrMessage]) -> Result<Vec<Message>> {
-    let mut output: Vec<Value> = Vec::new();
+    let mut output: Vec<Message> = Vec::new();
     let mut call_names = HashMap::new();
     for message in messages {
         wire::reject_unmapped_source(message, PROTOCOL)?;
         let role = match message.role {
-            Role::User | Role::Tool => Some("user"),
-            Role::Assistant => Some("model"),
+            Role::User | Role::Tool => Some(RawRole::User),
+            Role::Assistant => Some(RawRole::Model),
             Role::Unspecified if wire::form(&message.metadata, PROTOCOL).is_some() => None,
             role => return Err(wire::unsupported_role(role)),
         };
-        let mut blocks = Vec::new();
+        let mut parts = Vec::new();
         for part in &message.parts {
-            let block = match &part.kind {
-                PartKind::Text(text) => json!({"text":text}),
+            if let PartKind::Opaque(opaque) = &part.kind {
+                if opaque.protocol != PROTOCOL {
+                    return Err(Error::Unsupported("无法转换不透明内容块".into()));
+                }
+                parts.push(serde_json::from_value(opaque.data.clone())?);
+                continue;
+            }
+            let mut extra = wire::extra(&part.metadata, PROTOCOL);
+            let call_extra = extra
+                .remove("functionCall")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            let result_extra = extra
+                .remove("functionResponse")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            let mut block = Part {
+                thought: wire::take(&mut extra, "thought")?,
+                thought_signature: wire::take(&mut extra, "thoughtSignature")?,
+                part_metadata: wire::take(&mut extra, "partMetadata")?,
+                media_resolution: wire::take(&mut extra, "mediaResolution")?,
+                media_processing: wire::take(&mut extra, "mediaProcessing")?,
+                audio_transcription: wire::take(&mut extra, "audioTranscription")?,
+                speech_metadata: wire::take(&mut extra, "speechMetadata")?,
+                inline_data: wire::take(&mut extra, "inlineData")?,
+                file_data: wire::take(&mut extra, "fileData")?,
+                executable_code: wire::take(&mut extra, "executableCode")?,
+                code_execution_result: wire::take(&mut extra, "codeExecutionResult")?,
+                tool_call: wire::take(&mut extra, "toolCall")?,
+                tool_response: wire::take(&mut extra, "toolResponse")?,
+                video_metadata: wire::take(&mut extra, "videoMetadata")?,
+                extra,
+                ..Default::default()
+            };
+            match &part.kind {
+                PartKind::Text(text) => block.text = O::Value(text.clone()),
                 PartKind::ToolCall(call)
-                    if role == Some("model")
+                    if role == Some(RawRole::Model)
                         || (role.is_none()
                             && wire::form(&part.metadata, PROTOCOL)
                                 .is_some_and(|form| form.starts_with("function_call"))) =>
                 {
-                    if !call.arguments.is_object()
-                        && !(call.arguments.is_null()
-                            && wire::form(&part.metadata, PROTOCOL).is_some())
-                    {
-                        return Err(Error::Unsupported("Gemini 函数参数必须是 JSON 对象".into()));
-                    }
-                    let mut function = wire::extra(&part.metadata, PROTOCOL)
-                        .remove("functionCall")
-                        .and_then(|v| v.as_object().cloned())
-                        .unwrap_or_default();
-                    function.insert("name".into(), json!(call.name));
-                    if let Some(id) = &call.id {
-                        function.insert("id".into(), json!(id));
+                    let mut extra = call_extra;
+                    let original_id = wire::take(&mut extra, "id")?;
+                    let id = if let Some(id) = &call.id {
                         call_names.insert(id.clone(), call.name.clone());
-                    }
-                    if wire::form(&part.metadata, PROTOCOL) != Some("function_call_no_args")
-                        || call.arguments != json!({})
+                        O::Value(id.clone())
+                    } else {
+                        original_id
+                    };
+                    extra.remove("args");
+                    let args = if wire::form(&part.metadata, PROTOCOL)
+                        == Some("function_call_no_args")
+                        && call.arguments.as_object().is_some_and(Map::is_empty)
                     {
-                        function.insert("args".into(), call.arguments.clone());
-                    }
-                    json!({"functionCall":function})
+                        O::Missing
+                    } else if call.arguments.is_null()
+                        && wire::form(&part.metadata, PROTOCOL).is_some()
+                    {
+                        O::Null
+                    } else {
+                        O::Value(call.arguments.as_object().cloned().ok_or_else(|| {
+                            Error::Unsupported("Gemini 函数参数必须是 JSON 对象".into())
+                        })?)
+                    };
+                    block.function_call = O::Value(FunctionCall {
+                        id,
+                        name: call.name.clone(),
+                        args,
+                        extra,
+                    });
                 }
                 PartKind::ToolResult(result)
-                    if role == Some("user")
+                    if role == Some(RawRole::User)
                         || (role.is_none()
                             && wire::form(&part.metadata, PROTOCOL)
                                 == Some("function_response")) =>
@@ -65,41 +109,44 @@ pub fn encode_gemini(messages: &[IrMessage]) -> Result<Vec<Message>> {
                         .as_ref()
                         .or_else(|| result.id.as_ref().and_then(|id| call_names.get(id)))
                         .ok_or_else(|| Error::Unsupported("Gemini 函数结果缺少名称".into()))?;
-                    let mut function = wire::extra(&part.metadata, PROTOCOL)
-                        .remove("functionResponse")
-                        .and_then(|v| v.as_object().cloned())
-                        .unwrap_or_default();
-                    function.insert("name".into(), json!(name));
-                    if let Some(id) = &result.id {
-                        function.insert("id".into(), json!(id));
-                    }
-                    let response = if result.content.is_object() {
-                        result.content.clone()
+                    let mut extra = result_extra;
+                    let original_id = wire::take(&mut extra, "id")?;
+                    let id = if let Some(id) = &result.id {
+                        O::Value(id.clone())
                     } else {
-                        json!({"result": result.content})
+                        original_id
                     };
-                    function.insert("response".into(), response);
-                    json!({"functionResponse":function})
+                    block.function_response = O::Value(FunctionResponse {
+                        id,
+                        name: name.clone(),
+                        response: result.content.as_object().cloned().unwrap_or_else(|| {
+                            Map::from_iter([("result".into(), result.content.clone())])
+                        }),
+                        parts: wire::take(&mut extra, "parts")?,
+                        will_continue: wire::take(&mut extra, "willContinue")?,
+                        scheduling: wire::take(&mut extra, "scheduling")?,
+                        extra,
+                    });
                 }
-                PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => opaque.data.clone(),
-                _ => return Err(Error::Unsupported("Gemini 消息不支持此角色或内容块".into())),
-            };
-            blocks.push(wire::encode_block(part, PROTOCOL, block)?);
+                _ => return Err(Error::Unsupported("Gemini 不支持此角色或内容块".into())),
+            }
+            parts.push(block);
         }
         if message.role == Role::Tool
-            && wire::append_to_previous_user(&mut output, "parts", &mut blocks)
+            && let Some(Message {
+                role: Some(RawRole::User),
+                parts: previous,
+                ..
+            }) = output.last_mut()
         {
+            previous.append(&mut parts);
             continue;
         }
-        let mut raw = wire::extra(&message.metadata, PROTOCOL);
-        raw.insert("parts".into(), Value::Array(blocks));
-        if let Some(role) = role {
-            raw.insert("role".into(), json!(role));
-        }
-        output.push(Value::Object(raw));
+        output.push(Message {
+            role,
+            parts,
+            extra: wire::extra(&message.metadata, PROTOCOL),
+        });
     }
-    output
-        .into_iter()
-        .map(|v| serde_json::from_value(v).map_err(Into::into))
-        .collect()
+    Ok(output)
 }

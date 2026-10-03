@@ -1,6 +1,7 @@
+use super::json_test_support::JsonCodec;
 use serde_json::{Value, json};
 
-use super::{ProtocolCodec, RequestTarget, ResponseTarget};
+use super::{RequestTarget, ResponseTarget};
 use crate::{
     ir::{message::PartKind, request::Item as RequestItem, response::Item as ResponseItem},
     protocol::Protocol,
@@ -13,7 +14,7 @@ const ALL: [Protocol; 4] = [
     Protocol::Gemini,
 ];
 
-fn request(protocol: Protocol) -> Value {
+pub(super) fn request(protocol: Protocol) -> Value {
     match protocol {
         Protocol::OpenAiChat => {
             json!({"model":"source","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}],"max_completion_tokens":64})
@@ -30,7 +31,7 @@ fn request(protocol: Protocol) -> Value {
     }
 }
 
-fn response(protocol: Protocol) -> Value {
+pub(super) fn response(protocol: Protocol) -> Value {
     let usage = match protocol {
         Protocol::OpenAiChat => json!({"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}),
         Protocol::OpenAiResponses => json!({"input_tokens":10,"output_tokens":3,"total_tokens":13}),
@@ -492,7 +493,7 @@ fn maps_function_declarations_from_all_sources() {
         ),
     ];
     for (source, body) in definitions {
-        let ir = source.decode_request(&body).unwrap();
+        let ir = source.decode_request(&body).unwrap().without_source();
         for target in ALL.into_iter().filter(|target| *target != source) {
             let converted = target
                 .encode_request_for(

@@ -1,17 +1,19 @@
 //! 四协议非流式跨协议转换及结构化警告。
 
+pub(super) mod generation;
 mod request;
 mod response;
+pub(super) mod tools;
 
 pub(super) use request::encode_request;
 pub(super) use response::encode_response;
 
 use crate::{
     adapter::{Error, Result, wire},
-    protocol::{Protocol, chat, gemini, messages, responses},
+    protocol::Protocol,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 /// 目标请求所在路由的模型及可选输出上限。
 #[derive(Clone, Copy, Debug)]
@@ -35,16 +37,16 @@ pub struct ResponseTarget<'a> {
 
 /// 转换后的正文和需要由接入方记录的语义损失。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Conversion {
-    /// 目标协议的 JSON 正文。
-    pub body: Value,
+pub struct Conversion<T> {
+    /// 目标协议的类型化正文。
+    pub body: T,
     /// 不包含提示词或工具结果正文的警告。
     pub warnings: Vec<ConversionWarning>,
 }
 
-impl Conversion {
+impl<T> Conversion<T> {
     /// 同协议无损回写。
-    pub fn exact(body: Value) -> Self {
+    pub fn exact(body: T) -> Self {
         Self {
             body,
             warnings: Vec::new(),
@@ -66,7 +68,7 @@ pub struct ConversionWarning {
 }
 
 /// 只保存字段路径与原因，避免在日志中泄露对话内容。
-fn warn(
+pub(super) fn warn(
     warnings: &mut Vec<ConversionWarning>,
     source: Protocol,
     target: Protocol,
@@ -79,29 +81,6 @@ fn warn(
         path: path.into(),
         reason: reason.into(),
     });
-}
-
-fn warn_keys(
-    value: &Value,
-    allowed: &[&str],
-    path: &str,
-    source: Protocol,
-    target: Protocol,
-    warnings: &mut Vec<ConversionWarning>,
-) -> Result<()> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| unsupported(path, "必须是 JSON 对象"))?;
-    for key in object.keys().filter(|key| !allowed.contains(&key.as_str())) {
-        warn(
-            warnings,
-            source,
-            target,
-            &format!("{path}.{key}"),
-            "字段尚无目标协议映射，已丢弃",
-        );
-    }
-    Ok(())
 }
 
 fn warn_metadata(
@@ -124,7 +103,10 @@ fn warn_metadata(
         "tool_calls",
     ] {
         if extra.get(key).is_some_and(Value::is_null)
-            || key == "annotations" && extra.get(key) == Some(&json!([]))
+            || key == "annotations"
+                && extra
+                    .get(key)
+                    .is_some_and(|value| value.as_array().is_some_and(Vec::is_empty))
         {
             extra.remove(key);
         }
@@ -153,40 +135,28 @@ fn nonempty(value: &str, path: &str) -> Result<()> {
     }
 }
 
-fn unsupported(path: &str, reason: &str) -> Error {
+pub(super) fn unsupported(path: &str, reason: &str) -> Error {
     Error::Unsupported(format!("{path}: {reason}"))
 }
 
-fn typed_request(protocol: Protocol, body: Value) -> Result<Value> {
-    Ok(match protocol {
-        Protocol::OpenAiChat => {
-            serde_json::to_value(serde_json::from_value::<chat::request::Request>(body)?)?
+/// 编码时只消费解码阶段的诊断，不需要重新访问来源报文。
+fn apply_diagnostics(
+    diagnostics: &[crate::ir::diagnostic::Diagnostic],
+    source: Protocol,
+    target: Protocol,
+    warnings: &mut Vec<ConversionWarning>,
+) -> Result<()> {
+    for diagnostic in diagnostics {
+        if diagnostic.reject {
+            return Err(unsupported(&diagnostic.path, &diagnostic.reason));
         }
-        Protocol::OpenAiResponses => {
-            serde_json::to_value(serde_json::from_value::<responses::request::Request>(body)?)?
-        }
-        Protocol::AnthropicMessages => {
-            serde_json::to_value(serde_json::from_value::<messages::request::Request>(body)?)?
-        }
-        Protocol::Gemini => {
-            serde_json::to_value(serde_json::from_value::<gemini::request::Request>(body)?)?
-        }
-    })
-}
-
-fn typed_response(protocol: Protocol, body: Value) -> Result<Value> {
-    Ok(match protocol {
-        Protocol::OpenAiChat => {
-            serde_json::to_value(serde_json::from_value::<chat::response::Completion>(body)?)?
-        }
-        Protocol::OpenAiResponses => serde_json::to_value(serde_json::from_value::<
-            responses::response::Response,
-        >(body)?)?,
-        Protocol::AnthropicMessages => {
-            serde_json::to_value(serde_json::from_value::<messages::response::Message>(body)?)?
-        }
-        Protocol::Gemini => {
-            serde_json::to_value(serde_json::from_value::<gemini::response::Response>(body)?)?
-        }
-    })
+        warn(
+            warnings,
+            source,
+            target,
+            &diagnostic.path,
+            &diagnostic.reason,
+        );
+    }
+    Ok(())
 }

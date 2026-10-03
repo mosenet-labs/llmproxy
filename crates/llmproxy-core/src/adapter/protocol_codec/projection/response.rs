@@ -1,0 +1,254 @@
+//! 响应外壳、状态、候选和诊断的直接类型投影。
+use super::Notes;
+use crate::{
+    ir::response::{Candidate, FinishReason, Response, Status},
+    protocol::{Response as Source, responses::response::body::OutputItem},
+};
+
+/// 从协议结构体读取响应信息，不解释整包 JSON。
+pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source: &Source) {
+    let mut notes = Notes::default();
+    match source {
+        Source::Chat(body) => {
+            response.model = Some(body.model.clone());
+            response.id = Some(body.id.clone());
+            response.created_at = Some(body.created);
+            response.status = Status::Completed;
+            response.candidates = body
+                .choices
+                .iter()
+                .enumerate()
+                .map(|(i, c)| Candidate {
+                    index: c.index,
+                    items: vec![i],
+                    finish_reason: finish(Some(&c.finish_reason)),
+                })
+                .collect();
+            if body.object != "chat.completion" {
+                notes.reject("object", "不是 Chat 完成响应");
+            }
+            for (i, c) in body.choices.iter().enumerate() {
+                notes.extra(&c.extra, &format!("choices[{i}]"));
+                notes.field(&c.logprobs, &format!("choices[{i}].logprobs"));
+            }
+            notes.field(&body.metadata, "response.metadata");
+            notes.field(&body.moderation, "response.moderation");
+            notes.field(&body.service_tier, "response.service_tier");
+            notes.field(&body.system_fingerprint, "response.system_fingerprint");
+            notes.extra(&body.extra, "response");
+            if let Some(usage) = body.usage.as_option() {
+                notes.field(
+                    &usage.completion_tokens_details,
+                    "usage.completion_tokens_details",
+                );
+                notes.field(&usage.prompt_tokens_details, "usage.prompt_tokens_details");
+                notes.extra(&usage.extra, "usage");
+            }
+        }
+        Source::Responses(body) => {
+            response.model = Some(body.model.clone());
+            response.id = Some(body.id.clone());
+            response.created_at = Some(body.created_at);
+            response.status = match body.status.as_option().map(String::as_str) {
+                Some("completed") => Status::Completed,
+                Some("incomplete") => Status::Incomplete,
+                Some("failed" | "cancelled") => Status::Failed,
+                Some("in_progress" | "queued") => Status::InProgress,
+                _ => Status::Unknown,
+            };
+            response.candidates = vec![Candidate {
+                index: 0,
+                items: (0..response.items.len()).collect(),
+                finish_reason: if response.status == Status::Completed {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::Unknown
+                },
+            }];
+            if body.object != "response" {
+                notes.reject("object", "不是 Responses 完成响应");
+            }
+            if body.output.is_empty() {
+                notes.reject("output", "输出项不能为空");
+            }
+            for (i, item) in body.output.iter().enumerate() {
+                if let OutputItem::FunctionCall(call) = item {
+                    super::request::check_status(
+                        &mut notes,
+                        &call.status,
+                        &format!("output[{i}].status"),
+                    );
+                    notes.extra(&call.extra, &format!("output[{i}]"));
+                }
+            }
+            notes.field(&body.error, "response.error");
+            notes.field(&body.incomplete_details, "response.incomplete_details");
+            notes.field(&body.instructions, "response.instructions");
+            notes.field(&body.metadata, "response.metadata");
+            notes.field(&body.parallel_tool_calls, "response.parallel_tool_calls");
+            notes.field(&body.temperature, "response.temperature");
+            notes.field(&body.tool_choice, "response.tool_choice");
+            notes.field(&body.tools, "response.tools");
+            notes.field(&body.top_p, "response.top_p");
+            notes.field(&body.background, "response.background");
+            notes.field(&body.completed_at, "response.completed_at");
+            notes.field(&body.conversation, "response.conversation");
+            notes.field(&body.max_output_tokens, "response.max_output_tokens");
+            notes.field(&body.max_tool_calls, "response.max_tool_calls");
+            notes.field(&body.moderation, "response.moderation");
+            notes.field(&body.previous_response_id, "response.previous_response_id");
+            notes.field(&body.prompt, "response.prompt");
+            notes.field(
+                &body.prompt_cache_diagnostics,
+                "response.prompt_cache_diagnostics",
+            );
+            notes.field(&body.prompt_cache_key, "response.prompt_cache_key");
+            notes.field(&body.prompt_cache_options, "response.prompt_cache_options");
+            notes.field(
+                &body.prompt_cache_retention,
+                "response.prompt_cache_retention",
+            );
+            notes.field(&body.reasoning, "response.reasoning");
+            notes.field(&body.service_tier, "response.service_tier");
+            notes.field(&body.text, "response.text");
+            notes.field(&body.truncation, "response.truncation");
+            notes.extra(&body.extra, "response");
+            if let Some(usage) = body.usage.as_option() {
+                notes.field(&usage.input_tokens_details, "usage.input_tokens_details");
+                notes.field(&usage.output_tokens_details, "usage.output_tokens_details");
+                notes.extra(&usage.extra, "usage");
+            }
+        }
+        Source::Messages(body) => {
+            response.model = Some(body.model.clone());
+            response.id = Some(body.id.clone());
+            response.created_at = None;
+            response.status = Status::Completed;
+            response.candidates = vec![Candidate {
+                index: 0,
+                items: (0..response.items.len()).collect(),
+                finish_reason: finish(body.stop_reason.as_option().map(String::as_str)),
+            }];
+            notes.field(&body.container, "response.container");
+            notes.field(&body.diagnostics, "response.diagnostics");
+            notes.field(&body.stop_details, "response.stop_details");
+            notes.field(&body.stop_sequence, "response.stop_sequence");
+            notes.extra(&body.extra, "response");
+            let usage = &body.usage;
+            notes.field(&usage.cache_creation, "usage.cache_creation");
+            notes.field(
+                &usage.cache_creation_input_tokens,
+                "usage.cache_creation_input_tokens",
+            );
+            notes.field(
+                &usage.cache_read_input_tokens,
+                "usage.cache_read_input_tokens",
+            );
+            notes.field(&usage.inference_geo, "usage.inference_geo");
+            notes.field(&usage.output_tokens_details, "usage.output_tokens_details");
+            notes.field(&usage.server_tool_use, "usage.server_tool_use");
+            notes.field(&usage.service_tier, "usage.service_tier");
+            notes.extra(&usage.extra, "usage");
+        }
+        Source::Gemini(body) => {
+            response.model = body.model_version.as_option().cloned();
+            response.id = body.response_id.as_option().cloned();
+            response.created_at = None;
+            response.status = Status::Completed;
+            let mut index = 0;
+            response.candidates = body
+                .candidates
+                .as_option()
+                .into_iter()
+                .flatten()
+                .map(|c| {
+                    let items = if c.content.as_option().is_some() {
+                        let i = index;
+                        index += 1;
+                        vec![i]
+                    } else {
+                        vec![]
+                    };
+                    Candidate {
+                        index: c.index.as_option().copied().unwrap_or(0),
+                        items,
+                        finish_reason: finish(c.finish_reason.as_option().map(String::as_str)),
+                    }
+                })
+                .collect();
+            for (i, c) in body
+                .candidates
+                .as_option()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                notes.field(&c.safety_ratings, &format!("candidates[{i}].safetyRatings"));
+                notes.field(
+                    &c.citation_metadata,
+                    &format!("candidates[{i}].citationMetadata"),
+                );
+                notes.field(&c.token_count, &format!("candidates[{i}].tokenCount"));
+                notes.field(
+                    &c.grounding_attributions,
+                    &format!("candidates[{i}].groundingAttributions"),
+                );
+                notes.field(
+                    &c.grounding_metadata,
+                    &format!("candidates[{i}].groundingMetadata"),
+                );
+                notes.field(&c.avg_logprobs, &format!("candidates[{i}].avgLogprobs"));
+                notes.field(
+                    &c.logprobs_result,
+                    &format!("candidates[{i}].logprobsResult"),
+                );
+                notes.field(
+                    &c.url_context_metadata,
+                    &format!("candidates[{i}].urlContextMetadata"),
+                );
+                notes.field(&c.finish_message, &format!("candidates[{i}].finishMessage"));
+                notes.extra(&c.extra, &format!("candidates[{i}]"));
+            }
+            notes.field(&body.prompt_feedback, "response.promptFeedback");
+            notes.field(&body.model_status, "response.modelStatus");
+            notes.extra(&body.extra, "response");
+            if let Some(usage) = body.usage_metadata.as_option() {
+                notes.field(
+                    &usage.cached_content_token_count,
+                    "usage.cachedContentTokenCount",
+                );
+                notes.field(
+                    &usage.tool_use_prompt_token_count,
+                    "usage.toolUsePromptTokenCount",
+                );
+                notes.field(&usage.thoughts_token_count, "usage.thoughtsTokenCount");
+                notes.field(&usage.prompt_tokens_details, "usage.promptTokensDetails");
+                notes.field(&usage.cache_tokens_details, "usage.cacheTokensDetails");
+                notes.field(
+                    &usage.candidates_tokens_details,
+                    "usage.candidatesTokensDetails",
+                );
+                notes.field(
+                    &usage.tool_use_prompt_tokens_details,
+                    "usage.toolUsePromptTokensDetails",
+                );
+                notes.field(&usage.service_tier, "usage.serviceTier");
+                notes.extra(&usage.extra, "usage");
+            }
+        }
+    }
+    response.diagnostics = notes.0;
+}
+/// 未识别结束原因保持 Unknown，不伪造成功。
+fn finish(reason: Option<&str>) -> FinishReason {
+    match reason {
+        Some("stop" | "end_turn" | "stop_sequence" | "STOP") => FinishReason::Stop,
+        Some("tool_calls" | "tool_use") => FinishReason::ToolCall,
+        Some("length" | "max_tokens" | "MAX_TOKENS") => FinishReason::Length,
+        Some(
+            "content_filter" | "SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
+            | "RECITATION",
+        ) => FinishReason::Filtered,
+        _ => FinishReason::Unknown,
+    }
+}

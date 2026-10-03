@@ -1,66 +1,73 @@
-//! Anthropic 非流式响应消息解码。
-
-use serde_json::Value;
-
+//! Messages 响应消息的直接类型投影。
+use super::super::{Result, wire};
+use super::PROTOCOL;
 use crate::{
     ir::response::{Message as IrMessage, PartKind, Role, ToolCall},
-    protocol::messages::response::message::Message,
+    protocol::messages::response::message::{ContentBlock, KnownContentBlock as Block, Message},
 };
-
-use super::super::{Error, Result, wire};
-use super::PROTOCOL;
-
-/// 顶层 ID、模型、停止原因和用量保留在消息元数据中。
+use serde_json::Value;
+/// 顶层外壳保留为叶子元数据，内容块直接访问类型字段。
 pub fn decode_messages(messages: &[Message]) -> Result<Vec<IrMessage>> {
     messages
         .iter()
-        .map(|message| {
-            let mut raw = wire::object(serde_json::to_value(message)?)?;
-            if wire::take_string(&mut raw, "role")? != "assistant" {
-                return Err(Error::Invalid("Messages 响应角色必须是 assistant".into()));
-            }
-            let blocks = raw
-                .remove("content")
-                .and_then(|v| v.as_array().cloned())
-                .ok_or_else(|| Error::Invalid("Messages 响应 content 必须是数组".into()))?;
-            let mut parts = Vec::new();
-            for block in blocks {
-                let mut block = wire::object(block)?;
-                let part = match block.get("type").and_then(Value::as_str) {
-                    Some("text") => wire::typed_text(block, PROTOCOL, "text")?,
-                    Some("tool_use")
-                        if block.get("caller").is_none_or(|caller| {
-                            caller.is_null()
-                                || caller.get("type").and_then(Value::as_str) == Some("direct")
-                        }) =>
+        .map(|m| {
+            let mut extra = m.extra.clone();
+            extra.insert("id".into(), Value::String(m.id.clone()));
+            extra.insert("model".into(), Value::String(m.model.clone()));
+            extra.insert("type".into(), serde_json::to_value(m.r#type)?);
+            extra.insert("usage".into(), serde_json::to_value(&m.usage)?);
+            wire::put(&mut extra, "container", &m.container)?;
+            wire::put(&mut extra, "diagnostics", &m.diagnostics)?;
+            wire::put(&mut extra, "stop_details", &m.stop_details)?;
+            wire::put(&mut extra, "stop_reason", &m.stop_reason)?;
+            wire::put(&mut extra, "stop_sequence", &m.stop_sequence)?;
+
+            let parts = m
+                .content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Known(Block::Text {
+                        text,
+                        citations,
+                        extra,
+                    }) => {
+                        let mut extra = extra.clone();
+                        wire::put(&mut extra, "citations", citations)?;
+                        Ok(wire::text_part(text.clone(), PROTOCOL, "text", extra))
+                    }
+                    ContentBlock::Known(Block::ToolUse {
+                        id,
+                        name,
+                        input,
+                        caller,
+                        extra,
+                    }) if caller.as_option().is_none_or(|caller| {
+                        caller.is_null()
+                            || caller.get("type").and_then(Value::as_str) == Some("direct")
+                    }) =>
                     {
-                        block.remove("type");
-                        let id = wire::take_string(&mut block, "id")?;
-                        let name = wire::take_string(&mut block, "name")?;
-                        let arguments = block
-                            .remove("input")
-                            .ok_or_else(|| Error::Invalid("tool_use 缺少 input".into()))?;
-                        wire::part(
+                        let mut extra = extra.clone();
+                        wire::put(&mut extra, "caller", caller)?;
+                        Ok(wire::part(
                             PartKind::ToolCall(ToolCall {
-                                id: Some(id),
-                                name,
-                                arguments,
+                                id: Some(id.clone()),
+                                name: name.clone(),
+                                arguments: Value::Object(input.clone()),
                             }),
                             PROTOCOL,
                             "tool_use",
-                            block,
-                        )
+                            extra,
+                        ))
                     }
-                    _ => wire::opaque(PROTOCOL, block),
-                };
-                parts.push(part);
-            }
+                    _ => wire::opaque_value(PROTOCOL, block),
+                })
+                .collect::<Result<_>>()?;
             Ok(wire::response_message(
                 Role::Assistant,
                 parts,
                 PROTOCOL,
                 "parts",
-                raw,
+                extra,
             ))
         })
         .collect()

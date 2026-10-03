@@ -3,6 +3,7 @@
 pub mod body;
 pub mod cache;
 pub mod message;
+pub mod tool;
 
 pub use body::Request;
 

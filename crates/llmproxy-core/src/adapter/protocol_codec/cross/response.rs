@@ -1,8 +1,10 @@
 //! 非流式响应、函数调用与用量的跨协议映射。
 
 use super::{
-    Conversion, ConversionWarning, ResponseTarget, nonempty, typed_response, unsupported, warn,
-    warn_keys, warn_metadata,
+    Conversion, ConversionWarning, ResponseTarget, nonempty, unsupported, warn, warn_metadata,
+};
+use crate::protocol::{
+    OptionalNullable as O, Response as RawResponse, chat, gemini, messages, responses,
 };
 use crate::{
     adapter::{Result, response as usage_adapter},
@@ -13,18 +15,23 @@ use crate::{
     },
     protocol::Protocol,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 pub(in crate::adapter::protocol_codec) fn encode_response(
     protocol: Protocol,
     response: &Response,
     target: &ResponseTarget<'_>,
-) -> Result<Conversion> {
+) -> Result<Conversion<RawResponse>> {
     nonempty(target.model, "target.model")?;
     nonempty(target.id, "target.id")?;
-    let source = response.source.clone().into_body()?;
     let mut warnings = Vec::new();
-    validate_response_source(response.source_protocol(), protocol, &source, &mut warnings)?;
+    super::apply_diagnostics(
+        &response.diagnostics,
+        response.source_protocol(),
+        protocol,
+        &mut warnings,
+    )?;
+    validate_response(response)?;
     let mut events = Vec::new();
     let mut serial = 0;
     let mut seen_messages = vec![false; response.messages.len()];
@@ -107,73 +114,152 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
         .as_ref()
         .map(|usage| normalize_usage(usage, response.source_protocol(), protocol, &mut warnings))
         .transpose()?;
-    let usage_value = match (protocol, usage.as_ref()) {
-        (Protocol::OpenAiChat, Some(value)) => Some(serde_json::to_value(
-            usage_adapter::encode_chat_usage(value, None)?,
-        )?),
-        (Protocol::OpenAiResponses, Some(value)) => Some(serde_json::to_value(
-            usage_adapter::encode_responses_usage(value, None)?,
-        )?),
-        (Protocol::AnthropicMessages, Some(value)) => Some(serde_json::to_value(
-            usage_adapter::encode_messages_usage(value, None)?,
-        )?),
-        (Protocol::Gemini, Some(value)) => Some(serde_json::to_value(
-            usage_adapter::encode_gemini_usage(value, None),
-        )?),
-        (Protocol::AnthropicMessages, None) => {
-            return Err(unsupported("usage", "Messages 响应必须包含用量"));
-        }
-        (_, None) => None,
-    };
-    let mut body = match protocol {
+    let body = match protocol {
         Protocol::OpenAiChat => {
+            use chat::{
+                request::message::{FunctionCall, ToolCall as Call},
+                response::{
+                    completion::{Choice, Completion},
+                    message::Message,
+                },
+            };
             let text = events
                 .iter()
-                .filter_map(|event| match event {
-                    OutputEvent::Text(text) => Some(text.as_str()),
-                    _ => None,
+                .filter_map(|event| {
+                    if let OutputEvent::Text(text) = event {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let mut message = json!({"role":"assistant","content":if has_text { json!(text) } else { Value::Null }});
-            if has_calls {
-                let mut calls = Vec::new();
-                for event in &events {
-                    if let OutputEvent::Call(call) = event {
-                        serial += 1;
-                        let id = output_call_id(
-                            call,
-                            serial,
-                            response.source_protocol(),
-                            protocol,
-                            &mut warnings,
-                        );
-                        calls.push(json!({"id":id,"type":"function","function":{"name":call.name,"arguments":call_arguments(call)?}}));
-                    }
+            let mut calls = Vec::new();
+            for event in &events {
+                if let OutputEvent::Call(call) = event {
+                    serial += 1;
+                    let id = output_call_id(
+                        call,
+                        serial,
+                        response.source_protocol(),
+                        protocol,
+                        &mut warnings,
+                    );
+                    calls.push(Call::Function {
+                        id,
+                        function: FunctionCall {
+                            name: call.name.clone(),
+                            arguments: call_arguments(call)?,
+                            extra: Default::default(),
+                        },
+                        extra: Default::default(),
+                    });
                 }
-                message["tool_calls"] = json!(calls);
             }
-            json!({"id":target.id,"created":target.created,"model":target.model,"object":"chat.completion","choices":[{"index":0,"finish_reason":if has_calls { "tool_calls" } else { "stop" },"message":message}]})
+            RawResponse::Chat(Box::new(Completion {
+                id: target.id.into(),
+                created: target.created,
+                model: target.model.into(),
+                object: "chat.completion".into(),
+                choices: vec![Choice {
+                    index: 0,
+                    finish_reason: if has_calls { "tool_calls" } else { "stop" }.into(),
+                    logprobs: O::Missing,
+                    extra: Default::default(),
+                    message: Message {
+                        role: chat::response::message::AssistantRole::Assistant,
+                        content: if has_text { O::Value(text) } else { O::Null },
+                        refusal: O::Missing,
+                        annotations: O::Missing,
+                        audio: O::Missing,
+                        function_call: O::Missing,
+                        tool_calls: if calls.is_empty() {
+                            O::Missing
+                        } else {
+                            O::Value(calls)
+                        },
+                        extra: Default::default(),
+                    },
+                }],
+                usage: usage
+                    .as_ref()
+                    .map(|usage| usage_adapter::encode_chat_usage(usage, None))
+                    .transpose()?
+                    .into(),
+                ..Default::default()
+            }))
         }
         Protocol::OpenAiResponses => {
+            use responses::{
+                function as f,
+                request::message as m,
+                response::body::{OutputItem, Response},
+            };
             let mut output = Vec::new();
             for event in &events {
                 match event {
-                OutputEvent::Text(text) => output.push(json!({"id":format!("{}-msg-{}",target.id,output.len()),"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]})),
-                OutputEvent::Call(call) => {
-                    serial += 1;
-                    let id = output_call_id(call, serial, response.source_protocol(), protocol, &mut warnings);
-                    output.push(json!({"type":"function_call","id":format!("{}-call-{}",target.id,serial),"call_id":id,"name":call.name,"arguments":call_arguments(call)?,"status":"completed"}));
+                    OutputEvent::Text(text) => output.push(OutputItem::Message(m::OutputMessage {
+                        id: format!("{}-msg-{}", target.id, output.len()),
+                        content: vec![m::OutputPart::OutputText {
+                            text: text.clone(),
+                            annotations: vec![],
+                            logprobs: None,
+                            extra: Default::default(),
+                        }],
+                        role: m::AssistantRole::Assistant,
+                        status: m::Status::Completed,
+                        r#type: m::MessageType::Message,
+                        phase: O::Missing,
+                        extra: Default::default(),
+                    })),
+                    OutputEvent::Call(call) => {
+                        serial += 1;
+                        let id = output_call_id(
+                            call,
+                            serial,
+                            response.source_protocol(),
+                            protocol,
+                            &mut warnings,
+                        );
+                        output.push(OutputItem::FunctionCall(f::Call {
+                            r#type: f::CallType::FunctionCall,
+                            id: O::Value(format!("{}-call-{}", target.id, serial)),
+                            call_id: O::Value(id),
+                            name: call.name.clone(),
+                            arguments: call_arguments(call)?,
+                            status: O::Value("completed".into()),
+                            extra: Default::default(),
+                        }));
+                    }
                 }
             }
-            }
-            json!({"id":target.id,"created_at":target.created,"model":target.model,"object":"response","status":"completed","output":output})
+            RawResponse::Responses(Box::new(Response {
+                id: target.id.into(),
+                created_at: target.created,
+                model: target.model.into(),
+                object: "response".into(),
+                status: O::Value("completed".into()),
+                output,
+                usage: usage
+                    .as_ref()
+                    .map(|usage| usage_adapter::encode_responses_usage(usage, None))
+                    .transpose()?
+                    .into(),
+                ..Default::default()
+            }))
         }
         Protocol::AnthropicMessages => {
+            use messages::response::message::{
+                AssistantRole, ContentBlock, KnownContentBlock as Block, Message, MessageType,
+            };
             let mut content = Vec::new();
             for event in &events {
-                match event {
-                    OutputEvent::Text(text) => content.push(json!({"type":"text","text":text})),
+                content.push(ContentBlock::Known(match event {
+                    OutputEvent::Text(text) => Block::Text {
+                        text: text.clone(),
+                        citations: O::Missing,
+                        extra: Default::default(),
+                    },
                     OutputEvent::Call(call) => {
                         serial += 1;
                         let id = output_call_id(
@@ -183,17 +269,46 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                             protocol,
                             &mut warnings,
                         );
-                        content.push(json!({"type":"tool_use","id":id,"name":call.name,"input":call_arguments_object(call)?}));
+                        Block::ToolUse {
+                            id,
+                            name: call.name.clone(),
+                            input: call_arguments_object(call)?,
+                            caller: O::Missing,
+                            extra: Default::default(),
+                        }
                     }
-                }
+                }));
             }
-            json!({"type":"message","id":target.id,"model":target.model,"role":"assistant","content":content,"stop_reason":if has_calls { "tool_use" } else { "end_turn" }})
+            let usage = usage
+                .as_ref()
+                .ok_or_else(|| unsupported("usage", "Messages 响应必须包含用量"))?;
+            RawResponse::Messages(Box::new(Message {
+                r#type: MessageType::Message,
+                id: target.id.into(),
+                container: O::Missing,
+                content,
+                diagnostics: O::Missing,
+                model: target.model.into(),
+                role: AssistantRole::Assistant,
+                stop_details: O::Missing,
+                stop_reason: O::Value(if has_calls { "tool_use" } else { "end_turn" }.into()),
+                stop_sequence: O::Missing,
+                usage: usage_adapter::encode_messages_usage(usage, None)?,
+                extra: Default::default(),
+            }))
         }
         Protocol::Gemini => {
+            use gemini::{
+                request::message::{FunctionCall, Message, Part, Role},
+                response::body::{Candidate, Response},
+            };
             let mut parts = Vec::new();
             for event in &events {
-                match event {
-                    OutputEvent::Text(text) => parts.push(json!({"text":text})),
+                parts.push(match event {
+                    OutputEvent::Text(text) => Part {
+                        text: O::Value(text.clone()),
+                        ..Default::default()
+                    },
                     OutputEvent::Call(call) => {
                         serial += 1;
                         let id = output_call_id(
@@ -203,23 +318,39 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
                             protocol,
                             &mut warnings,
                         );
-                        parts.push(json!({"functionCall":{"id":id,"name":call.name,"args":call_arguments_object(call)?}}));
+                        Part {
+                            function_call: O::Value(FunctionCall {
+                                id: O::Value(id),
+                                name: call.name.clone(),
+                                args: O::Value(call_arguments_object(call)?),
+                                extra: Default::default(),
+                            }),
+                            ..Default::default()
+                        }
                     }
-                }
+                });
             }
-            json!({"responseId":target.id,"modelVersion":target.model,"candidates":[{"content":{"role":"model","parts":parts},"finishReason":"STOP"}]})
+            RawResponse::Gemini(Box::new(Response {
+                response_id: O::Value(target.id.into()),
+                model_version: O::Value(target.model.into()),
+                candidates: O::Value(vec![Candidate {
+                    content: O::Value(Message {
+                        role: Some(Role::Model),
+                        parts,
+                        extra: Default::default(),
+                    }),
+                    finish_reason: O::Value("STOP".into()),
+                    ..Default::default()
+                }]),
+                usage_metadata: usage
+                    .as_ref()
+                    .map(|usage| usage_adapter::encode_gemini_usage(usage, None))
+                    .into(),
+                ..Default::default()
+            }))
         }
     };
-    if let Some(usage) = usage_value {
-        body[match protocol {
-            Protocol::Gemini => "usageMetadata",
-            _ => "usage",
-        }] = usage;
-    }
-    Ok(Conversion {
-        body: typed_response(protocol, body)?,
-        warnings,
-    })
+    Ok(Conversion { body, warnings })
 }
 
 enum OutputEvent {
@@ -234,7 +365,7 @@ fn call_arguments(call: &ToolCall) -> Result<String> {
     }
 }
 
-fn call_arguments_object(call: &ToolCall) -> Result<Value> {
+fn call_arguments_object(call: &ToolCall) -> Result<Map<String, Value>> {
     let value = if let Value::String(raw) = &call.arguments {
         serde_json::from_str(raw)
             .map_err(|_| unsupported("tool.arguments", "工具参数不是合法 JSON"))?
@@ -244,7 +375,7 @@ fn call_arguments_object(call: &ToolCall) -> Result<Value> {
     if !value.is_object() {
         return Err(unsupported("tool.arguments", "工具参数必须是 JSON 对象"));
     }
-    Ok(value)
+    Ok(value.as_object().expect("参数对象已验证").clone())
 }
 
 fn output_call_id(
@@ -294,173 +425,6 @@ fn warn_output_metadata(
     warn_metadata(&cleaned, source, target, path, warnings)
 }
 
-fn validate_response_source(
-    protocol: Protocol,
-    target: Protocol,
-    body: &Value,
-    warnings: &mut Vec<ConversionWarning>,
-) -> Result<()> {
-    let (allowed, finish_path, expected) = match protocol {
-        Protocol::OpenAiChat => (
-            &["id", "created", "model", "object", "choices", "usage"][..],
-            "/choices/0/finish_reason",
-            "stop",
-        ),
-        Protocol::OpenAiResponses => (
-            &[
-                "id",
-                "created_at",
-                "model",
-                "object",
-                "output",
-                "status",
-                "usage",
-            ][..],
-            "/status",
-            "completed",
-        ),
-        Protocol::AnthropicMessages => (
-            &[
-                "type",
-                "id",
-                "model",
-                "role",
-                "content",
-                "stop_reason",
-                "stop_sequence",
-                "usage",
-            ][..],
-            "/stop_reason",
-            "end_turn",
-        ),
-        Protocol::Gemini => (
-            &["candidates", "usageMetadata", "modelVersion", "responseId"][..],
-            "/candidates/0/finishReason",
-            "STOP",
-        ),
-    };
-    warn_keys(body, allowed, "response", protocol, target, warnings)?;
-    let usage = body.get(if protocol == Protocol::Gemini {
-        "usageMetadata"
-    } else {
-        "usage"
-    });
-    if let Some(usage) = usage.filter(|usage| !usage.is_null()) {
-        let allowed_usage = match protocol {
-            Protocol::OpenAiChat => &["prompt_tokens", "completion_tokens", "total_tokens"][..],
-            Protocol::OpenAiResponses => &["input_tokens", "output_tokens", "total_tokens"][..],
-            Protocol::AnthropicMessages => &["input_tokens", "output_tokens"][..],
-            Protocol::Gemini => &[
-                "promptTokenCount",
-                "candidatesTokenCount",
-                "totalTokenCount",
-            ][..],
-        };
-        warn_keys(usage, allowed_usage, "usage", protocol, target, warnings)?;
-    }
-    let finish = body.pointer(finish_path).and_then(Value::as_str);
-    let tool_finish = match protocol {
-        Protocol::OpenAiChat => Some("tool_calls"),
-        Protocol::AnthropicMessages => Some("tool_use"),
-        _ => None,
-    };
-    if finish != Some(expected) && finish != tool_finish {
-        return Err(unsupported(finish_path, "仅支持正常完成的响应"));
-    }
-    match protocol {
-        Protocol::OpenAiChat => {
-            if body["object"] != "chat.completion" {
-                return Err(unsupported("object", "不是 Chat 完成响应"));
-            }
-            let choices = body["choices"]
-                .as_array()
-                .ok_or_else(|| unsupported("choices", "必须是数组"))?;
-            if choices.len() != 1 {
-                return Err(unsupported("choices", "只支持单候选"));
-            }
-            warn_keys(
-                &choices[0],
-                &["index", "finish_reason", "message", "logprobs"],
-                "choices[0]",
-                protocol,
-                target,
-                warnings,
-            )?;
-            if choices[0]["index"] != 0 {
-                return Err(unsupported("choices[0].index", "单候选序号必须为零"));
-            }
-            if choices[0].get("logprobs").is_some_and(|v| !v.is_null()) {
-                warn(
-                    warnings,
-                    protocol,
-                    target,
-                    "choices[0].logprobs",
-                    "对数概率未映射，已丢弃",
-                );
-            }
-        }
-        Protocol::OpenAiResponses => {
-            if body["object"] != "response" {
-                return Err(unsupported("object", "不是 Responses 完成响应"));
-            }
-            if body["output"].as_array().is_none_or(Vec::is_empty) {
-                return Err(unsupported("output", "输出项不能为空"));
-            }
-            if let Some(output) = body["output"].as_array() {
-                for (index, item) in output.iter().enumerate() {
-                    if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                        if item.get("status").is_some_and(|value| value != "completed") {
-                            return Err(unsupported(
-                                &format!("output[{index}].status"),
-                                "函数调用尚未完成",
-                            ));
-                        }
-                        warn_keys(
-                            item,
-                            &["type", "id", "call_id", "name", "arguments", "status"],
-                            &format!("output[{index}]"),
-                            protocol,
-                            target,
-                            warnings,
-                        )?;
-                    }
-                }
-            }
-        }
-        Protocol::AnthropicMessages => {
-            if body.get("stop_sequence").is_some_and(|v| !v.is_null()) {
-                warn(
-                    warnings,
-                    protocol,
-                    target,
-                    "stop_sequence",
-                    "自定义停止序列未映射，已丢弃",
-                );
-            }
-        }
-        Protocol::Gemini => {
-            let candidates = body["candidates"]
-                .as_array()
-                .ok_or_else(|| unsupported("candidates", "必须是数组"))?;
-            if candidates.len() != 1 {
-                return Err(unsupported("candidates", "只支持单候选"));
-            }
-            warn_keys(
-                &candidates[0],
-                &["content", "finishReason", "index"],
-                "candidates[0]",
-                protocol,
-                target,
-                warnings,
-            )?;
-            if candidates[0].get("index").is_some_and(|v| v != 0) {
-                return Err(unsupported("candidates[0].index", "单候选序号必须为零"));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn normalize_usage(
     usage: &Usage,
     source: Protocol,
@@ -493,4 +457,29 @@ fn normalize_usage(
         total_tokens: Some(total),
         ..Usage::default()
     })
+}
+
+/// 候选结构和终止状态只检查 IR，避免回读来源报文。
+fn validate_response(response: &Response) -> Result<()> {
+    use crate::ir::response::{FinishReason, Status};
+    if response.status != Status::Completed {
+        return Err(unsupported("status", "仅支持正常完成的响应"));
+    }
+    if response.candidates.len() != 1 {
+        return Err(unsupported("candidates/choices", "只支持单候选"));
+    }
+    let candidate = &response.candidates[0];
+    if candidate.index != 0 || candidate.items != (0..response.items.len()).collect::<Vec<_>>() {
+        return Err(unsupported("candidates", "候选序号或输出项边界无效"));
+    }
+    if !matches!(
+        candidate.finish_reason,
+        FinishReason::Stop | FinishReason::ToolCall
+    ) {
+        return Err(unsupported(
+            "finish_reason",
+            "仅支持正常完成或工具调用的响应",
+        ));
+    }
+    Ok(())
 }

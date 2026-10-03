@@ -12,3 +12,6 @@ pub use encode::encode_chat;
 use crate::protocol::Protocol;
 
 const PROTOCOL: Protocol = Protocol::OpenAiChat;
+
+pub(in crate::adapter) use decode::decode_call;
+pub(in crate::adapter) use encode::encode_call;

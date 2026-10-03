@@ -6,7 +6,11 @@ pub mod gemini;
 pub mod messages;
 pub mod moderation;
 mod optional_nullable;
+mod request;
+mod response;
 pub mod responses;
+pub use request::Request;
+pub use response::Response;
 
 pub use optional_nullable::OptionalNullable;
 

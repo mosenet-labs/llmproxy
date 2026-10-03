@@ -48,35 +48,15 @@ pub(super) fn decode_items(source: &Source, message_count: usize) -> Result<Vec<
                 items.push(Item::Message(index));
                 index += 1;
             }
-            OutputItem::Other(raw)
-                if raw.get("type").and_then(Value::as_str) == Some("function_call") =>
-            {
-                let name = raw
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| Error::Invalid("function_call 缺少 name".into()))?;
-                let arguments = raw
-                    .get("arguments")
-                    .cloned()
-                    .ok_or_else(|| Error::Invalid("function_call 缺少 arguments".into()))?;
-                let arguments = arguments
-                    .as_str()
-                    .map(|value| {
-                        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.into()))
-                    })
-                    .unwrap_or(arguments);
-                items.push(Item::ToolCall {
-                    call: ToolCall {
-                        id: raw
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        name: name.into(),
-                        arguments,
-                    },
-                    item_id: raw.get("id").and_then(Value::as_str).map(str::to_owned),
-                });
-            }
+            OutputItem::FunctionCall(raw) => items.push(Item::ToolCall {
+                call: ToolCall {
+                    id: raw.call_id.as_option().cloned(),
+                    name: raw.name.clone(),
+                    arguments: serde_json::from_str(&raw.arguments)
+                        .unwrap_or_else(|_| Value::String(raw.arguments.clone())),
+                },
+                item_id: raw.id.as_option().cloned(),
+            }),
             OutputItem::Other(raw) => items.push(Item::Opaque(Value::Object(raw.clone()))),
         }
     }
@@ -159,7 +139,7 @@ fn response_output_messages(
         .iter()
         .filter_map(|item| match item {
             OutputItem::Message(message) => Some(message.clone()),
-            OutputItem::Other(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -242,29 +222,109 @@ pub(super) fn changed_usage_fields_match(
     original: &Option<Usage>,
     requested: &Option<Usage>,
     encoded: &Option<Usage>,
-) -> Result<bool> {
-    Ok(changed_fields_match(
-        &serde_json::to_value(original)?,
-        &serde_json::to_value(requested)?,
-        &serde_json::to_value(encoded)?,
-    ))
-}
-
-/// 递归比较对象中发生变化的叶子字段。
-fn changed_fields_match(original: &Value, requested: &Value, encoded: &Value) -> bool {
-    if original == requested {
-        return true;
-    }
-    match (original, requested, encoded) {
-        (Value::Object(before), Value::Object(after), Value::Object(actual)) => {
-            after.iter().all(|(key, value)| {
-                changed_fields_match(
-                    before.get(key).unwrap_or(&Value::Null),
-                    value,
-                    actual.get(key).unwrap_or(&Value::Null),
-                )
-            })
-        }
-        _ => requested == encoded,
-    }
+) -> bool {
+    let (Some(before), Some(after), Some(actual)) = (original, requested, encoded) else {
+        return original == requested || requested == encoded;
+    };
+    [
+        (before.input_tokens, after.input_tokens, actual.input_tokens),
+        (
+            before.output_tokens,
+            after.output_tokens,
+            actual.output_tokens,
+        ),
+        (before.total_tokens, after.total_tokens, actual.total_tokens),
+        (
+            before.cache.read_input_tokens,
+            after.cache.read_input_tokens,
+            actual.cache.read_input_tokens,
+        ),
+        (
+            before.cache.write_input_tokens,
+            after.cache.write_input_tokens,
+            actual.cache.write_input_tokens,
+        ),
+        (
+            before.cache.write_short_input_tokens,
+            after.cache.write_short_input_tokens,
+            actual.cache.write_short_input_tokens,
+        ),
+        (
+            before.cache.write_long_input_tokens,
+            after.cache.write_long_input_tokens,
+            actual.cache.write_long_input_tokens,
+        ),
+        (
+            before.input_details.uncached_tokens,
+            after.input_details.uncached_tokens,
+            actual.input_details.uncached_tokens,
+        ),
+        (
+            before.input_details.text_tokens,
+            after.input_details.text_tokens,
+            actual.input_details.text_tokens,
+        ),
+        (
+            before.input_details.audio_tokens,
+            after.input_details.audio_tokens,
+            actual.input_details.audio_tokens,
+        ),
+        (
+            before.input_details.image_tokens,
+            after.input_details.image_tokens,
+            actual.input_details.image_tokens,
+        ),
+        (
+            before.input_details.video_tokens,
+            after.input_details.video_tokens,
+            actual.input_details.video_tokens,
+        ),
+        (
+            before.input_details.document_tokens,
+            after.input_details.document_tokens,
+            actual.input_details.document_tokens,
+        ),
+        (
+            before.input_details.tool_tokens,
+            after.input_details.tool_tokens,
+            actual.input_details.tool_tokens,
+        ),
+        (
+            before.output_details.text_tokens,
+            after.output_details.text_tokens,
+            actual.output_details.text_tokens,
+        ),
+        (
+            before.output_details.audio_tokens,
+            after.output_details.audio_tokens,
+            actual.output_details.audio_tokens,
+        ),
+        (
+            before.output_details.image_tokens,
+            after.output_details.image_tokens,
+            actual.output_details.image_tokens,
+        ),
+        (
+            before.output_details.video_tokens,
+            after.output_details.video_tokens,
+            actual.output_details.video_tokens,
+        ),
+        (
+            before.output_details.reasoning_tokens,
+            after.output_details.reasoning_tokens,
+            actual.output_details.reasoning_tokens,
+        ),
+        (
+            before.output_details.accepted_prediction_tokens,
+            after.output_details.accepted_prediction_tokens,
+            actual.output_details.accepted_prediction_tokens,
+        ),
+        (
+            before.output_details.rejected_prediction_tokens,
+            after.output_details.rejected_prediction_tokens,
+            actual.output_details.rejected_prediction_tokens,
+        ),
+    ]
+    .into_iter()
+    .all(|(before, after, actual)| before == after || after == actual)
 }

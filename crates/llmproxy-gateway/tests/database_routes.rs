@@ -7,8 +7,172 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::protocol::{MessagesAuth, Protocol};
-use llmproxy_store::{ModelMappingInput, ProviderInput, ProviderPaths, ProviderStore};
+use llmproxy_store::{
+    ModelMappingInput, ModelRouteInput, ModelRouteTargetInput, ProviderInput, ProviderPaths,
+    ProviderStore,
+};
 use support::*;
+
+#[tokio::test]
+async fn chat_route_to_messages_provider_converts_request_and_response() {
+    let directory = std::env::temp_dir().join(format!(
+        "llmproxy-cross-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+    let master_key = STANDARD.encode([23; 32]);
+    let store = ProviderStore::connect(&url, &master_key).await.unwrap();
+    store.migrate().await.unwrap();
+    let (upstream, requests) = Mock::http(|request, stream| {
+        if request.body.windows(6).any(|part| part == b"reject") {
+            respond(stream, 429, "Content-Type: application/json\r\n", br#"{"type":"error","error":{"type":"rate_limit_error","message":"provider secret details"}}"#);
+        } else {
+            respond(
+                stream,
+                200,
+                "Content-Type: application/json\r\n",
+                br#"{"type":"message","id":"msg_1","model":"claude-model","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":2}}"#,
+            )
+        }
+    });
+    let mut provider = input("Claude", upstream.address.port(), "provider-secret");
+    provider.paths = ProviderPaths::single(Protocol::AnthropicMessages);
+    provider.models_protocol = Protocol::AnthropicMessages;
+    provider.anthropic_version = Some("2023-06-01".into());
+    let provider = store.create(provider).await.unwrap();
+    let model = store
+        .create_model(ModelMappingInput {
+            alias: "internal/claude".into(),
+            provider_id: provider.id,
+            upstream_model_id: "claude-model".into(),
+            protocols: vec![Protocol::AnthropicMessages],
+            reference_price: None,
+        })
+        .await
+        .unwrap();
+    store
+        .create_route(ModelRouteInput {
+            name: "public-chat".into(),
+            protocol: Protocol::OpenAiChat,
+            provider_protocol: Protocol::AnthropicMessages,
+            enabled: true,
+            targets: vec![ModelRouteTargetInput {
+                model_id: model.id,
+                enabled: true,
+            }],
+        })
+        .await
+        .unwrap();
+    let gateway = Gateway::database(&url, &master_key);
+    let response = gateway.request(
+        "POST",
+        "/v1/chat/completions",
+        "Content-Type: application/json\r\nAuthorization: Bearer client-key\r\n",
+        br#"{"model":"public-chat","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":32}"#,
+    );
+    assert_eq!(response.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&response.body()).unwrap();
+    assert_eq!(body["model"], "public-chat");
+    assert_eq!(body["choices"][0]["message"]["content"], "hello");
+    assert_eq!(body["usage"]["prompt_tokens"], 3);
+    let request = requests.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(request.target, "/v1/messages");
+    assert_eq!(values(&request.headers, "x-api-key"), ["provider-secret"]);
+    assert!(values(&request.headers, "authorization").is_empty());
+    assert!(values(&request.headers, "content-length").is_empty());
+    assert_eq!(values(&request.headers, "transfer-encoding"), ["chunked"]);
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["model"], "claude-model");
+    assert_eq!(body["max_tokens"], 32);
+    assert_eq!(body["messages"][0]["content"], "hi");
+    let failure = gateway.request(
+        "POST",
+        "/v1/chat/completions",
+        "Content-Type: application/json\r\n",
+        br#"{"model":"public-chat","messages":[{"role":"user","content":"reject"}],"max_completion_tokens":32}"#,
+    );
+    assert_eq!(failure.status, 429);
+    let body: serde_json::Value = serde_json::from_slice(&failure.body()).unwrap();
+    assert_eq!(body["error"]["type"], "upstream_error");
+    assert!(!body.to_string().contains("provider secret details"));
+    let _ = requests.recv_timeout(DEADLINE).unwrap();
+    drop(gateway);
+    drop(store);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn chat_route_to_gemini_provider_places_model_in_url() {
+    let directory = std::env::temp_dir().join(format!(
+        "llmproxy-cross-gemini-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let url = format!("sqlite:{}", directory.join("providers.sqlite3").display());
+    let master_key = STANDARD.encode([24; 32]);
+    let store = ProviderStore::connect(&url, &master_key).await.unwrap();
+    store.migrate().await.unwrap();
+    let (upstream, requests) = Mock::http(|_, stream| {
+        respond(stream, 200, "Content-Type: application/json\r\n", br#"{"responseId":"source","modelVersion":"gemini-model","candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}"#)
+    });
+    let mut provider = input("Gemini", upstream.address.port(), "gemini-secret");
+    provider.paths = ProviderPaths::single(Protocol::Gemini);
+    provider.models_protocol = Protocol::Gemini;
+    let provider = store.create(provider).await.unwrap();
+    let model = store
+        .create_model(ModelMappingInput {
+            alias: "internal/gemini".into(),
+            provider_id: provider.id,
+            upstream_model_id: "gemini-model".into(),
+            protocols: vec![Protocol::Gemini],
+            reference_price: None,
+        })
+        .await
+        .unwrap();
+    store
+        .create_route(ModelRouteInput {
+            name: "public-chat".into(),
+            protocol: Protocol::OpenAiChat,
+            provider_protocol: Protocol::Gemini,
+            enabled: true,
+            targets: vec![ModelRouteTargetInput {
+                model_id: model.id,
+                enabled: true,
+            }],
+        })
+        .await
+        .unwrap();
+    let gateway = Gateway::database(&url, &master_key);
+    let response = gateway.request("POST", "/v1/chat/completions", "Content-Type: application/json\r\n", br#"{"model":"public-chat","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":32}"#);
+    assert_eq!(response.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&response.body()).unwrap();
+    assert_eq!(body["model"], "public-chat");
+    assert_eq!(body["choices"][0]["message"]["content"], "hello");
+    let request = requests.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        request.target,
+        "/v1beta/models/gemini-model:generateContent"
+    );
+    assert_eq!(
+        values(&request.headers, "x-goog-api-key"),
+        ["gemini-secret"]
+    );
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert!(body.get("model").is_none());
+    assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
+    drop(gateway);
+    drop(store);
+    std::fs::remove_dir_all(directory).unwrap();
+}
 
 #[tokio::test]
 async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {

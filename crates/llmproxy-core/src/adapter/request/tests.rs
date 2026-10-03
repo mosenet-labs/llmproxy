@@ -163,3 +163,61 @@ fn gemini_optional_shapes_and_messages_null_content_survive() {
         messages_source
     );
 }
+
+#[test]
+fn edited_null_leaves_do_not_survive_as_duplicate_extra_fields() {
+    let raw: Vec<chat::request::message::Message> =
+        serde_json::from_value(json!([{"role":"assistant","content":null,"tool_calls":[]}]))
+            .unwrap();
+    let mut ir = decode_chat(&raw).unwrap();
+    ir[0].parts.push(crate::ir::message::Part {
+        kind: PartKind::Text("new".into()),
+        metadata: Default::default(),
+    });
+    ir[0].parts.push(crate::ir::message::Part {
+        kind: PartKind::ToolCall(crate::ir::message::ToolCall {
+            id: Some("c1".into()),
+            name: "f".into(),
+            arguments: json!({}),
+        }),
+        metadata: Default::default(),
+    });
+    let encoded = encode_chat(&ir).unwrap();
+    let chat::request::message::Message::Assistant { extra, .. } = &encoded[0] else {
+        panic!("assistant expected")
+    };
+    assert!(!extra.contains_key("content"));
+    assert!(!extra.contains_key("tool_calls"));
+    let roundtrip: Vec<chat::request::message::Message> =
+        serde_json::from_slice(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+    assert_eq!(roundtrip, encoded);
+    let raw:Vec<messages::request::message::Message>=serde_json::from_value(json!([{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":null}]}])).unwrap();
+    let mut ir = decode_messages(&raw).unwrap();
+    if let PartKind::ToolResult(result) = &mut ir[0].parts[0].kind {
+        result.content = json!("done");
+    }
+    let encoded = encode_messages(&ir).unwrap();
+    let roundtrip: Vec<messages::request::message::Message> =
+        serde_json::from_slice(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+    assert_eq!(roundtrip, encoded);
+    assert_eq!(
+        serde_json::to_value(encoded).unwrap()[0]["content"][0]["content"],
+        "done"
+    );
+    let raw: Vec<gemini::request::message::Message> = serde_json::from_value(
+        json!([{"role":"model","parts":[{"functionCall":{"id":null,"name":"f","args":{}}}]}]),
+    )
+    .unwrap();
+    let mut ir = decode_gemini(&raw).unwrap();
+    if let PartKind::ToolCall(call) = &mut ir[0].parts[0].kind {
+        call.id = Some("new-id".into());
+    }
+    let encoded = encode_gemini(&ir).unwrap();
+    let roundtrip: Vec<gemini::request::message::Message> =
+        serde_json::from_slice(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+    assert_eq!(roundtrip, encoded);
+    assert_eq!(
+        serde_json::to_value(encoded).unwrap()[0]["parts"][0]["functionCall"]["id"],
+        "new-id"
+    );
+}

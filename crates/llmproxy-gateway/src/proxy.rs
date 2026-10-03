@@ -1,6 +1,9 @@
 use std::{
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -29,6 +32,7 @@ const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'.')
     .remove(b'~');
+static RESPONSE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct Gateway {
     providers: ProviderSnapshots,
@@ -39,6 +43,9 @@ pub struct Gateway {
 pub struct RequestContext {
     telemetry: RequestTelemetry,
     protocol: Option<Protocol>,
+    client_model: Option<String>,
+    response_id: String,
+    response_created: i64,
     provider: Option<Arc<ResolvedProvider>>,
     console: bool,
     gemini_model_id: Option<String>,
@@ -75,6 +82,9 @@ impl ProxyHttp for Gateway {
         RequestContext {
             telemetry: RequestTelemetry::new(),
             protocol: None,
+            client_model: None,
+            response_id: String::new(),
+            response_created: 0,
             provider: None,
             console: false,
             gemini_model_id: None,
@@ -112,6 +122,27 @@ impl ProxyHttp for Gateway {
                     }
                 };
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
+                if provider.protocol != protocol && stream {
+                    session.respond_error(422).await?;
+                    return Ok(true);
+                }
+                let content_encoding = session.get_header_bytes("content-encoding");
+                if provider.protocol != protocol
+                    && !content_encoding.is_empty()
+                    && !content_encoding.eq_ignore_ascii_case(b"identity")
+                {
+                    session.respond_error(415).await?;
+                    return Ok(true);
+                }
+                ctx.client_model = Some(alias);
+                if provider.protocol != protocol {
+                    ctx.request_body.set_cross_protocol(
+                        protocol,
+                        provider.protocol,
+                        &upstream_model_id,
+                    );
+                    prepare_response_shell(ctx);
+                }
                 ctx.provider = Some(provider);
                 ctx.gemini_model_id = Some(upstream_model_id);
                 ctx.gemini_stream = stream;
@@ -152,6 +183,18 @@ impl ProxyHttp for Gateway {
                     .map_err(|_| {
                         Error::explain(ErrorType::InternalError, "cannot encode upstream model")
                     })?;
+                ctx.client_model = Some(alias);
+                if provider.protocol != protocol {
+                    ctx.request_body.set_cross_protocol(
+                        protocol,
+                        provider.protocol,
+                        &upstream_model_id,
+                    );
+                    prepare_response_shell(ctx);
+                }
+                if provider.protocol == Protocol::Gemini {
+                    ctx.gemini_model_id = Some(upstream_model_id);
+                }
                 // Pin one immutable provider for the full request, including SSE.
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
                 ctx.provider = Some(provider);
@@ -251,11 +294,12 @@ impl ProxyHttp for Gateway {
         request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        let protocol = ctx.protocol.expect("request_filter set protocol");
+        let client_protocol = ctx.protocol.expect("request_filter set protocol");
         let provider = ctx
             .provider
             .as_ref()
             .expect("request_filter selected provider");
+        let protocol = provider.protocol;
         let base_path = if protocol == Protocol::Gemini {
             let model = ctx
                 .gemini_model_id
@@ -276,7 +320,11 @@ impl ProxyHttp for Gateway {
         } else {
             provider.upstream_path.clone()
         };
-        let query = request.uri.query().unwrap_or_default();
+        let query = if protocol == client_protocol {
+            request.uri.query().unwrap_or_default()
+        } else {
+            ""
+        };
         let path = if ctx.gemini_stream && !query.split('&').any(|part| part == "alt=sse") {
             format!(
                 "{base_path}?{query}{}alt=sse",
@@ -296,7 +344,12 @@ impl ProxyHttp for Gateway {
         request.remove_header("x-api-key");
         request.remove_header("x-goog-api-key");
         request.insert_header("host", provider.authority())?;
-        if let Some(length) = request.headers.get("content-length") {
+        if protocol != client_protocol {
+            request.remove_header("content-length");
+            request.remove_header("transfer-encoding");
+            request.insert_header("content-type", "application/json")?;
+            request.insert_header("accept", "application/json")?;
+        } else if let Some(length) = request.headers.get("content-length") {
             let length = length
                 .to_str()
                 .ok()
@@ -316,6 +369,14 @@ impl ProxyHttp for Gateway {
         }
         request.remove_header("content-md5");
         request.remove_header("digest");
+        if protocol != client_protocol {
+            request.remove_header("anthropic-version");
+            request.remove_header("anthropic-beta");
+            request.remove_header("openai-organization");
+            request.remove_header("openai-project");
+            request.remove_header("x-goog-api-client");
+            request.remove_header("x-goog-user-project");
+        }
         match protocol {
             Protocol::AnthropicMessages => {
                 if provider.messages_auth == MessagesAuth::Bearer {
@@ -356,7 +417,7 @@ impl ProxyHttp for Gateway {
     ) -> Result<()> {
         ctx.telemetry.response_headers(response.status.as_u16());
         // 在正文回调开始前，根据上游响应头选择分帧方式。
-        ctx.response_body.replace_kind(response_kind(
+        let kind = response_kind(
             response
                 .headers
                 .get("content-type")
@@ -365,7 +426,37 @@ impl ProxyHttp for Gateway {
                 .headers
                 .get("content-encoding")
                 .map(|value| value.as_bytes()),
-        ));
+        );
+        let client_protocol = ctx.protocol.expect("request_filter set protocol");
+        let provider_protocol = ctx.provider.as_ref().expect("provider selected").protocol;
+        if client_protocol != provider_protocol {
+            response.remove_header("content-length");
+            response.remove_header("content-md5");
+            response.remove_header("digest");
+            response.insert_header("content-type", "application/json")?;
+            if response.status.is_success() {
+                if !matches!(kind, crate::transform::BodyKind::Json) {
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(502),
+                        "cross-protocol response must be JSON",
+                    )
+                    .into_up());
+                }
+                ctx.response_body.set_cross_response(
+                    provider_protocol,
+                    client_protocol,
+                    ctx.client_model.as_deref().expect("client model selected"),
+                    &ctx.response_id,
+                    ctx.response_created,
+                );
+            } else {
+                ctx.response_body
+                    .set_cross_error(client_protocol, response.status.as_u16());
+                response.remove_header("content-encoding");
+                response.remove_header("etag");
+            }
+        }
+        ctx.response_body.replace_kind(kind);
         ctx.response_body.set_codec(
             ctx.protocol.expect("request_filter set protocol"),
             MessagePhase::Response,
@@ -428,7 +519,7 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        ctx.response_body.push(body, end_of_stream);
+        ctx.response_body.push(body, end_of_stream)?;
         Ok(None)
     }
 
@@ -507,6 +598,16 @@ impl ProxyHttp for Gateway {
             .map(|header| header.status.as_u16());
         self.telemetry.finish(&mut ctx.telemetry, status, error);
     }
+}
+
+/// 在选定跨协议路由时固定客户端响应外壳，避免逐块创建不同 ID。
+fn prepare_response_shell(ctx: &mut RequestContext) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let sequence = RESPONSE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    ctx.response_id = format!("llmproxy-{}-{sequence}", now.as_nanos());
+    ctx.response_created = now.as_secs() as i64;
 }
 
 fn error_status(error: &Error) -> u16 {

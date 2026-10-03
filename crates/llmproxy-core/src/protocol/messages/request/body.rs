@@ -8,7 +8,7 @@ use super::{cache::CacheControl, message::Message};
 use crate::protocol::OptionalNullable;
 
 /// Messages 请求外壳，流式与非流式请求使用同一结构。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// 模型最多生成的词元数。
     pub max_tokens: u64,
@@ -57,7 +57,7 @@ pub struct Request {
     pub tool_choice: OptionalNullable<ToolChoice>,
     /// 客户端工具或服务端工具声明；具体工具类型保持开放。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-    pub tools: OptionalNullable<Vec<Map<String, Value>>>,
+    pub tools: OptionalNullable<Vec<super::tool::Tool>>,
     /// 从候选词元中采样的数量。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub top_k: OptionalNullable<u64>,

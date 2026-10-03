@@ -71,6 +71,7 @@ pub(crate) struct ModelRouteRow {
     pub id: i64,
     pub name: String,
     pub protocol: String,
+    pub provider_protocol: String,
     pub enabled: bool,
     #[version]
     pub version: u64,

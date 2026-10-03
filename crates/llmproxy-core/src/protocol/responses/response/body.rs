@@ -12,7 +12,7 @@ use crate::protocol::{
 };
 
 /// 完整响应外壳；输出项的开放联合由 `OutputItem` 保留。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     /// 响应 ID。
     pub id: String,
@@ -47,7 +47,7 @@ pub struct Response {
     pub tool_choice: OptionalNullable<Value>,
     /// 本次可用工具定义。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-    pub tools: OptionalNullable<Vec<Map<String, Value>>>,
+    pub tools: OptionalNullable<Vec<crate::protocol::responses::function::Tool>>,
     /// 实际使用的核采样阈值。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub top_p: OptionalNullable<f64>,
@@ -111,13 +111,36 @@ pub struct Response {
 }
 
 /// 输出消息已强类型化，其他工具和推理输出项保持原始对象。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum OutputItem {
+    /// 独立客户端函数调用。
+    FunctionCall(crate::protocol::responses::function::Call),
     /// 助手输出消息。
     Message(Message),
     /// 工具调用、推理或其他输出项。
     Other(Map<String, Value>),
+}
+/// 按显式类型选择工具项，已知类型无效时不能降为未知扩展。
+impl<'de> serde::Deserialize<'de> for OutputItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let kind = value.get("type").and_then(Value::as_str);
+        match kind {
+            Some("function_call") => serde_json::from_value(value)
+                .map(Self::FunctionCall)
+                .map_err(serde::de::Error::custom),
+            _ => {
+                if let Ok(message) = serde_json::from_value(value.clone()) {
+                    return Ok(Self::Message(message));
+                }
+                match value {
+                    Value::Object(value) => Ok(Self::Other(value)),
+                    _ => Err(serde::de::Error::custom("协议项必须是对象")),
+                }
+            }
+        }
+    }
 }
 
 /// 生成失败时返回的错误。

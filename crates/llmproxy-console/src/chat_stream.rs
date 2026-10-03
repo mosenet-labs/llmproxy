@@ -1,7 +1,10 @@
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::protocol::{
+    OptionalNullable, Protocol, Request, chat::request as chat, gemini::request as gemini,
+    messages::request as messages, responses::request as responses,
+};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::Client;
-use serde_json::{Value, json};
+use reqwest::{Client, RequestBuilder};
+use serde_json::Value;
 use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
 
 const MAX_REPLY_BYTES: usize = 256 * 1024;
@@ -28,26 +31,108 @@ impl ChatReply {
     }
 }
 
-pub fn request_body(protocol: Protocol, alias: &str, history: &[ChatMessage]) -> Value {
-    let messages: Vec<_> = history
+/// 从已完成的对话记录直接构造协议请求；Gemini 的模型和流式模式由 URL 指定。
+pub fn request_body(protocol: Protocol, alias: &str, history: &[ChatMessage]) -> Request {
+    let history = history
         .iter()
-        .filter(|message| message.status == ChatMessageStatus::Complete)
-        .map(|message| {
-            json!({
-                "role": if message.role == ChatBubbleRole::User { "user" } else { "assistant" },
-                "content": message.content,
-            })
-        })
-        .collect();
+        .filter(|message| message.status == ChatMessageStatus::Complete);
     match protocol {
-        Protocol::OpenAiChat => json!({ "model": alias, "stream": true, "messages": messages }),
-        Protocol::OpenAiResponses => json!({ "model": alias, "stream": true, "input": messages }),
-        Protocol::AnthropicMessages => {
-            json!({ "model": alias, "stream": true, "max_tokens": 2048, "messages": messages })
-        }
-        Protocol::Gemini => json!({ "contents": messages.iter().map(|message| {
-            json!({ "role": if message["role"] == "assistant" { "model" } else { "user" }, "parts": [{"text": message["content"]}] })
-        }).collect::<Vec<_>>() }),
+        Protocol::OpenAiChat => Request::Chat(Box::new(chat::Request {
+            model: alias.to_owned(),
+            stream: OptionalNullable::Value(true),
+            messages: history
+                .map(|message| {
+                    if message.role == ChatBubbleRole::User {
+                        chat::Message::User(chat::ContentMessage {
+                            content: chat::Content::Text(message.content.clone()),
+                            name: None,
+                            extra: Default::default(),
+                        })
+                    } else {
+                        chat::Message::Assistant {
+                            audio: OptionalNullable::Missing,
+                            content: OptionalNullable::Value(chat::Content::Text(
+                                message.content.clone(),
+                            )),
+                            function_call: OptionalNullable::Missing,
+                            name: None,
+                            refusal: OptionalNullable::Missing,
+                            tool_calls: None,
+                            extra: Default::default(),
+                        }
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        })),
+        Protocol::OpenAiResponses => Request::Responses(Box::new(responses::Request {
+            model: OptionalNullable::Value(alias.to_owned()),
+            stream: OptionalNullable::Value(true),
+            input: OptionalNullable::Value(responses::body::Input::Items(
+                history
+                    .map(|message| {
+                        responses::body::InputItem::Message(responses::Message::Easy(
+                            responses::EasyInputMessage {
+                                content: responses::Content::Text(message.content.clone()),
+                                role: if message.role == ChatBubbleRole::User {
+                                    responses::Role::User
+                                } else {
+                                    responses::Role::Assistant
+                                },
+                                phase: OptionalNullable::Missing,
+                                r#type: None,
+                                extra: Default::default(),
+                            },
+                        ))
+                    })
+                    .collect(),
+            )),
+            ..Default::default()
+        })),
+        Protocol::AnthropicMessages => Request::Messages(Box::new(messages::Request {
+            model: alias.to_owned(),
+            stream: OptionalNullable::Value(true),
+            max_tokens: 2048,
+            messages: history
+                .map(|message| messages::Message {
+                    content: messages::Content::Text(message.content.clone()),
+                    role: if message.role == ChatBubbleRole::User {
+                        messages::Role::User
+                    } else {
+                        messages::Role::Assistant
+                    },
+                    extra: Default::default(),
+                })
+                .collect(),
+            ..Default::default()
+        })),
+        Protocol::Gemini => Request::Gemini(Box::new(gemini::Request {
+            contents: history
+                .map(|message| gemini::Message {
+                    parts: vec![gemini::Part {
+                        text: OptionalNullable::Value(message.content.clone()),
+                        ..Default::default()
+                    }],
+                    role: Some(if message.role == ChatBubbleRole::User {
+                        gemini::Role::User
+                    } else {
+                        gemini::Role::Model
+                    }),
+                    extra: Default::default(),
+                })
+                .collect(),
+            ..Default::default()
+        })),
+    }
+}
+
+/// 在 HTTP 边界序列化具体协议结构，避免将统一载体的枚举标签写入请求正文。
+fn with_request_body(builder: RequestBuilder, body: &Request) -> RequestBuilder {
+    match body {
+        Request::Chat(body) => builder.json(body),
+        Request::Responses(body) => builder.json(body),
+        Request::Messages(body) => builder.json(body),
+        Request::Gemini(body) => builder.json(body),
     }
 }
 
@@ -300,10 +385,10 @@ pub async fn stream_reply(
     } else {
         protocol.upstream_path().to_owned()
     };
-    let response = client
+    let builder = client
         .post(format!("{gateway_origin}{path}"))
-        .header("accept", "text/event-stream")
-        .json(&request_body(protocol, alias, history))
+        .header("accept", "text/event-stream");
+    let response = with_request_body(builder, &request_body(protocol, alias, history))
         .send()
         .await
         .map_err(|error| format!("无法连接网关：{error}"))?;
@@ -422,7 +507,9 @@ pub async fn stream_reply(
 
 #[cfg(test)]
 mod tests {
-    use super::{boundary, completed_text, completed_thinking, event, request_body};
+    use super::{
+        boundary, completed_text, completed_thinking, event, request_body, with_request_body,
+    };
     use llmproxy_core::protocol::Protocol;
     use serde_json::json;
     use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
@@ -434,28 +521,59 @@ mod tests {
             ChatMessage::new(
                 "2",
                 ChatBubbleRole::Assistant,
+                ChatMessageStatus::Complete,
+                "你好",
+            ),
+            ChatMessage::new(
+                "3",
+                ChatBubbleRole::Assistant,
                 ChatMessageStatus::Sending,
-                "",
+                "未完成的回复",
             ),
         ];
-        let chat = request_body(Protocol::OpenAiChat, "alias", &history);
-        assert_eq!(
-            chat["messages"],
-            json!([{ "role": "user", "content": "hi" }])
-        );
-        assert_eq!(chat["model"], "alias");
-        assert_eq!(
-            request_body(Protocol::OpenAiResponses, "alias", &history)["input"],
-            chat["messages"]
-        );
-        assert_eq!(
-            request_body(Protocol::AnthropicMessages, "alias", &history)["max_tokens"],
-            2048
-        );
-        assert_eq!(
-            request_body(Protocol::Gemini, "alias", &history)["contents"],
-            json!([{"role":"user","parts":[{"text":"hi"}]}])
-        );
+        let messages = json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "你好"},
+        ]);
+        let client = reqwest::Client::new();
+        for (protocol, expected) in [
+            (
+                Protocol::OpenAiChat,
+                json!({
+                    "model": "alias", "stream": true, "messages": messages,
+                }),
+            ),
+            (
+                Protocol::OpenAiResponses,
+                json!({
+                    "model": "alias", "stream": true, "input": messages,
+                }),
+            ),
+            (
+                Protocol::AnthropicMessages,
+                json!({
+                    "model": "alias", "stream": true, "max_tokens": 2048, "messages": messages,
+                }),
+            ),
+            (
+                Protocol::Gemini,
+                json!({"contents": [
+                    {"role": "user", "parts": [{"text": "hi"}]},
+                    {"role": "model", "parts": [{"text": "你好"}]},
+                ]}),
+            ),
+        ] {
+            let body = request_body(protocol, "alias", &history);
+            assert_eq!(body.protocol(), protocol);
+            // 检查实际 HTTP 请求正文，确保序列化时没有额外的枚举标签或默认字段。
+            let request = with_request_body(client.post("http://localhost/test"), &body)
+                .build()
+                .unwrap();
+            assert_eq!(request.headers()["content-type"], "application/json");
+            let actual: serde_json::Value =
+                serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+            assert_eq!(actual, expected, "{protocol:?}");
+        }
     }
 
     #[test]

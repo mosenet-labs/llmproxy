@@ -1,117 +1,129 @@
-//! gemini 原始消息序列解码。
-
+//! Gemini 请求内容的直接类型投影。
+use super::super::{Result, wire};
+use super::PROTOCOL;
 use crate::{
     ir::request::{Message as IrMessage, PartKind, Role, ToolCall, ToolResult},
-    protocol::gemini::request::message::Message,
+    protocol::{
+        OptionalNullable as O,
+        gemini::request::message::{Message, Role as RawRole},
+    },
 };
-use serde_json::{Value, json};
-
-use super::super::{Error, Result, wire};
-use super::PROTOCOL;
-
-/// 省略的 `role` 原样映射为 IR 未指定角色。
+use serde_json::{Map, Value};
+/// 对互斥正文读取类型字段，缺失角色和不透明块保持原样。
 pub fn decode_gemini(messages: &[Message]) -> Result<Vec<IrMessage>> {
     messages
         .iter()
-        .map(|message| {
-            let mut raw = wire::object(serde_json::to_value(message)?)?;
-            let role = match raw.remove("role").as_ref().and_then(Value::as_str) {
-                Some("user") => Role::User,
-                Some("model") => Role::Assistant,
+        .map(|m| {
+            let role = match m.role {
+                Some(RawRole::User) => Role::User,
+                Some(RawRole::Model) => Role::Assistant,
                 None => Role::Unspecified,
-                Some(other) => return Err(Error::Invalid(format!("未知 Gemini 角色 {other}"))),
             };
-            let blocks = raw
-                .remove("parts")
-                .and_then(|v| v.as_array().cloned())
-                .ok_or_else(|| Error::Invalid("Gemini parts 必须是数组".into()))?;
             let mut parts = Vec::new();
-            for block in blocks {
-                let mut block = wire::object(block)?;
-                let main_fields = [
-                    "text",
-                    "functionCall",
-                    "functionResponse",
-                    "inlineData",
-                    "fileData",
-                    "toolCall",
-                    "toolResponse",
-                    "executableCode",
+            for block in &m.parts {
+                let count = [
+                    !block.text.is_missing(),
+                    !block.function_call.is_missing(),
+                    !block.function_response.is_missing(),
+                    !block.inline_data.is_missing(),
+                    !block.file_data.is_missing(),
+                    !block.tool_call.is_missing(),
+                    !block.tool_response.is_missing(),
+                    !block.executable_code.is_missing(),
+                    !block.code_execution_result.is_missing(),
+                ]
+                .into_iter()
+                .filter(|present| *present)
+                .count();
+                if count != 1 {
+                    parts.push(wire::opaque_value(PROTOCOL, block)?);
+                    continue;
+                }
+                let mut extra = block.extra.clone();
+                wire::put(&mut extra, "thought", &block.thought)?;
+                wire::put(&mut extra, "thoughtSignature", &block.thought_signature)?;
+                wire::put(&mut extra, "partMetadata", &block.part_metadata)?;
+                wire::put(&mut extra, "mediaResolution", &block.media_resolution)?;
+                wire::put(&mut extra, "mediaProcessing", &block.media_processing)?;
+                wire::put(&mut extra, "audioTranscription", &block.audio_transcription)?;
+                wire::put(&mut extra, "speechMetadata", &block.speech_metadata)?;
+                wire::put(&mut extra, "inlineData", &block.inline_data)?;
+                wire::put(&mut extra, "fileData", &block.file_data)?;
+                wire::put(&mut extra, "executableCode", &block.executable_code)?;
+                wire::put(
+                    &mut extra,
                     "codeExecutionResult",
-                ];
-                let count = main_fields
-                    .iter()
-                    .filter(|key| block.contains_key(**key))
-                    .count();
-                let part = if count == 1 && block.get("text").and_then(Value::as_str).is_some() {
-                    wire::text_part(
-                        wire::take_string(&mut block, "text")?,
-                        PROTOCOL,
-                        "text",
-                        block,
-                    )
-                } else if count == 1 && block.contains_key("functionCall") {
-                    let mut call = wire::object(block.remove("functionCall").unwrap())?;
-                    let name = wire::take_string(&mut call, "name")?;
-                    let id_value = call.remove("id");
-                    let id = id_value.as_ref().and_then(Value::as_str).map(str::to_owned);
-                    if id_value == Some(Value::Null) {
-                        call.insert("id".into(), Value::Null);
+                    &block.code_execution_result,
+                )?;
+                wire::put(&mut extra, "toolCall", &block.tool_call)?;
+                wire::put(&mut extra, "toolResponse", &block.tool_response)?;
+                wire::put(&mut extra, "videoMetadata", &block.video_metadata)?;
+
+                let part = if let Some(text) = block.text.as_option() {
+                    wire::text_part(text.clone(), PROTOCOL, "text", extra)
+                } else if let Some(call) = block.function_call.as_option() {
+                    let mut nested = call.extra.clone();
+                    if matches!(call.id, O::Null) {
+                        nested.insert("id".into(), Value::Null);
                     }
-                    let args = call.remove("args");
-                    if args == Some(Value::Null) {
-                        call.insert("args".into(), Value::Null);
+                    if matches!(call.args, O::Null) {
+                        nested.insert("args".into(), Value::Null);
                     }
-                    let form = if args.is_some() {
-                        "function_call"
-                    } else {
-                        "function_call_no_args"
+                    if !nested.is_empty() {
+                        extra.insert("functionCall".into(), Value::Object(nested));
+                    }
+                    let args = match &call.args {
+                        O::Value(args) => Value::Object(args.clone()),
+                        O::Null => Value::Null,
+                        O::Missing => Value::Object(Map::new()),
                     };
-                    let mut residual = block;
-                    if !call.is_empty() {
-                        residual.insert("functionCall".into(), Value::Object(call));
-                    }
                     wire::part(
                         PartKind::ToolCall(ToolCall {
-                            id,
-                            name,
-                            arguments: args.unwrap_or(json!({})),
+                            id: call.id.as_option().cloned(),
+                            name: call.name.clone(),
+                            arguments: args,
                         }),
                         PROTOCOL,
-                        form,
-                        residual,
+                        if call.args.is_missing() {
+                            "function_call_no_args"
+                        } else {
+                            "function_call"
+                        },
+                        extra,
                     )
-                } else if count == 1 && block.contains_key("functionResponse") {
-                    let mut result = wire::object(block.remove("functionResponse").unwrap())?;
-                    let name = wire::take_string(&mut result, "name")?;
-                    let id_value = result.remove("id");
-                    let id = id_value.as_ref().and_then(Value::as_str).map(str::to_owned);
-                    if id_value == Some(Value::Null) {
-                        result.insert("id".into(), Value::Null);
+                } else if let Some(result) = block.function_response.as_option() {
+                    let mut nested = result.extra.clone();
+                    if matches!(result.id, O::Null) {
+                        nested.insert("id".into(), Value::Null);
                     }
-                    let content = result
-                        .remove("response")
-                        .ok_or_else(|| Error::Invalid("functionResponse 缺少 response".into()))?;
-                    let mut residual = block;
-                    if !result.is_empty() {
-                        residual.insert("functionResponse".into(), Value::Object(result));
+                    wire::put(&mut nested, "parts", &result.parts)?;
+                    wire::put(&mut nested, "willContinue", &result.will_continue)?;
+                    wire::put(&mut nested, "scheduling", &result.scheduling)?;
+                    if !nested.is_empty() {
+                        extra.insert("functionResponse".into(), Value::Object(nested));
                     }
                     wire::part(
                         PartKind::ToolResult(ToolResult {
-                            id,
-                            name: Some(name),
-                            content,
+                            id: result.id.as_option().cloned(),
+                            name: Some(result.name.clone()),
+                            content: Value::Object(result.response.clone()),
                         }),
                         PROTOCOL,
                         "function_response",
-                        residual,
+                        extra,
                     )
                 } else {
-                    wire::opaque(PROTOCOL, block)
+                    wire::opaque_value(PROTOCOL, block)?
                 };
                 parts.push(part);
             }
-            Ok(wire::message(role, parts, PROTOCOL, "parts", raw))
+            Ok(wire::message(
+                role,
+                parts,
+                PROTOCOL,
+                "parts",
+                m.extra.clone(),
+            ))
         })
         .collect()
 }

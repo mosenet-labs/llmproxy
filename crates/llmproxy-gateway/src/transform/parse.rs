@@ -1,49 +1,5 @@
-use bytes::Bytes;
+//! SSE 事件边界及事件数据读取。
 use serde_json::Value;
-
-// 同时保留原始字节和解析结果；未修改时不改变空白、字段顺序或数字写法。
-pub struct JsonDocument {
-    original: Bytes,
-    value: Value,
-    changed: bool,
-}
-
-impl JsonDocument {
-    /// 解析完整 JSON，同时保存原始字节；解析失败时交还原始字节。
-    pub fn decode(original: Bytes) -> Result<Self, Bytes> {
-        // 无效 JSON 保持原样，沿用现有的上游和客户端行为。
-        match serde_json::from_slice(&original) {
-            Ok(value) => Ok(Self {
-                original,
-                value,
-                changed: false,
-            }),
-            Err(_) => Err(original),
-        }
-    }
-
-    #[cfg(test)]
-    /// 返回解析后的 JSON，供单元测试检查。
-    pub fn value(&self) -> &Value {
-        &self.value
-    }
-
-    /// 应用编辑并按返回值记录是否需要重新序列化。
-    pub fn apply<E>(&mut self, edit: impl FnOnce(&mut Value) -> Result<bool, E>) -> Result<(), E> {
-        // 编解码未改变 IR 时保留原始字节；实际编辑才重新序列化正文。
-        self.changed |= edit(&mut self.value)?;
-        Ok(())
-    }
-
-    /// 无编辑时返回原始字节，有编辑时输出重新序列化的 JSON。
-    pub fn encode(self) -> Bytes {
-        if self.changed {
-            Bytes::from(serde_json::to_vec(&self.value).expect("JSON value must serialize"))
-        } else {
-            self.original
-        }
-    }
-}
 
 /// 找到最后一个完整 SSE 事件的结束位置；流结束时返回全部长度。
 pub fn complete_sse_prefix(bytes: &[u8], end: bool) -> Option<usize> {
@@ -98,29 +54,8 @@ fn process_sse_data(data: &str, process: &mut impl FnMut(&Value)) {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonDocument, sse_json};
-    use bytes::Bytes;
+    use super::sse_json;
     use serde_json::json;
-
-    #[test]
-    fn json_document_keeps_raw_bytes_until_changed() {
-        let raw = Bytes::from_static(br#" { "model": "alias" } "#);
-        let document = JsonDocument::decode(raw.clone()).unwrap();
-        assert_eq!(document.value()["model"], "alias");
-        assert_eq!(document.encode(), raw);
-
-        let mut document = JsonDocument::decode(raw).unwrap();
-        document
-            .apply(|value| {
-                value["model"] = json!("provider-model");
-                Ok::<bool, ()>(true)
-            })
-            .unwrap();
-        assert_eq!(
-            document.encode(),
-            Bytes::from_static(br#"{"model":"provider-model"}"#)
-        );
-    }
 
     #[test]
     fn sse_parser_exposes_json_events() {

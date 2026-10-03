@@ -937,6 +937,7 @@ async fn exercise_http(database_url: &str) {
         "",
         "smart-chat",
         "openai_chat",
+        "openai_chat",
         true,
         serde_json::json!([{"model_id": model_id, "enabled": true}]).to_string()
     ]);
@@ -1002,6 +1003,7 @@ async fn exercise_http(database_url: &str) {
         saved_route.id.to_string(),
         saved_route.version.to_string(),
         "smart-chat-v2",
+        "openai_chat",
         "openai_chat",
         false,
         serde_json::json!([{"model_id": model_id, "enabled": true}]).to_string()

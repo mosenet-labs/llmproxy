@@ -1,90 +1,110 @@
-//! messages 原始消息序列解码。
-
+//! 从 Messages 请求类型直接提取内容。
+use super::super::{Result, wire};
+use super::PROTOCOL;
 use crate::{
     ir::request::{Message as IrMessage, PartKind, Role, ToolCall, ToolResult},
-    protocol::messages::request::message::Message,
+    protocol::messages::request::message::{
+        Content, ContentBlock, KnownContentBlock as Block, Message, Role as RawRole,
+    },
 };
 use serde_json::{Map, Value};
-
-use super::super::{Error, Result, wire};
-use super::PROTOCOL;
-
-/// 保持内容块顺序，把标准工具调用和结果规范化。
+/// 保持字符串与块数组形状，逐个读取已知块字段。
 pub fn decode_messages(messages: &[Message]) -> Result<Vec<IrMessage>> {
     messages
         .iter()
-        .map(|message| {
-            let mut raw = wire::object(serde_json::to_value(message)?)?;
-            let role = match wire::take_string(&mut raw, "role")?.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                other => return Err(Error::Invalid(format!("未知 Messages 角色 {other}"))),
+        .map(|m| {
+            let role = match m.role {
+                RawRole::User => Role::User,
+                RawRole::Assistant => Role::Assistant,
+                RawRole::System => Role::System,
             };
-            let content = raw
-                .remove("content")
-                .ok_or_else(|| Error::Invalid("缺少 content".into()))?;
-            let (form, parts) = match content {
-                Value::String(text) => (
+            let (form, parts) = match &m.content {
+                Content::Text(text) => (
                     "text",
-                    vec![wire::text_part(text, PROTOCOL, "scalar", Map::new())],
+                    vec![wire::text_part(
+                        text.clone(),
+                        PROTOCOL,
+                        "scalar",
+                        Map::new(),
+                    )],
                 ),
-                Value::Array(blocks) => {
-                    let mut parts = Vec::new();
-                    for block in blocks {
-                        let mut block = wire::object(block)?;
-                        let kind = block
-                            .get("type")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_owned();
-                        let part = match kind.as_str() {
-                            "text" => wire::typed_text(block, PROTOCOL, "text")?,
-                            "tool_use" => {
-                                block.remove("type");
-                                let id = wire::take_string(&mut block, "id")?;
-                                let name = wire::take_string(&mut block, "name")?;
-                                let arguments = block
-                                    .remove("input")
-                                    .ok_or_else(|| Error::Invalid("tool_use 缺少 input".into()))?;
-                                wire::part(
+                Content::Parts(blocks) => {
+                    let parts = blocks
+                        .iter()
+                        .map(|block| match block {
+                            ContentBlock::Known(Block::Text {
+                                text,
+                                cache_control,
+                                citations,
+                                extra,
+                            }) => {
+                                let mut extra = extra.clone();
+                                wire::put(&mut extra, "cache_control", cache_control)?;
+                                wire::put(&mut extra, "citations", citations)?;
+                                Ok(wire::text_part(text.clone(), PROTOCOL, "text", extra))
+                            }
+                            ContentBlock::Known(Block::ToolUse {
+                                id,
+                                name,
+                                input,
+                                cache_control,
+                                caller,
+                                toolset_name,
+                                extra,
+                            }) => {
+                                let mut extra = extra.clone();
+                                wire::put(&mut extra, "cache_control", cache_control)?;
+                                wire::put(&mut extra, "caller", caller)?;
+                                wire::put(&mut extra, "toolset_name", toolset_name)?;
+                                Ok(wire::part(
                                     PartKind::ToolCall(ToolCall {
-                                        id: Some(id),
-                                        name,
-                                        arguments,
+                                        id: Some(id.clone()),
+                                        name: name.clone(),
+                                        arguments: Value::Object(input.clone()),
                                     }),
                                     PROTOCOL,
                                     "tool_use",
-                                    block,
-                                )
+                                    extra,
+                                ))
                             }
-                            "tool_result" => {
-                                block.remove("type");
-                                let id = wire::take_string(&mut block, "tool_use_id")?;
-                                let content = block.remove("content").unwrap_or(Value::Null);
-                                if content.is_null() {
-                                    block.insert("content".into(), Value::Null);
+                            ContentBlock::Known(Block::ToolResult {
+                                tool_use_id,
+                                content,
+                                cache_control,
+                                is_error,
+                                toolset_name,
+                                extra,
+                            }) => {
+                                let mut extra = extra.clone();
+                                wire::put(&mut extra, "cache_control", cache_control)?;
+                                wire::put(&mut extra, "is_error", is_error)?;
+                                wire::put(&mut extra, "toolset_name", toolset_name)?;
+                                let value = content
+                                    .as_option()
+                                    .map(serde_json::to_value)
+                                    .transpose()?
+                                    .unwrap_or(Value::Null);
+                                if value.is_null() {
+                                    wire::put(&mut extra, "content", content)?;
                                 }
-                                wire::part(
+                                Ok(wire::part(
                                     PartKind::ToolResult(ToolResult {
-                                        id: Some(id),
+                                        id: Some(tool_use_id.clone()),
                                         name: None,
-                                        content,
+                                        content: value,
                                     }),
                                     PROTOCOL,
                                     "tool_result",
-                                    block,
-                                )
+                                    extra,
+                                ))
                             }
-                            _ => wire::opaque(PROTOCOL, block),
-                        };
-                        parts.push(part);
-                    }
+                            _ => wire::opaque_value(PROTOCOL, block),
+                        })
+                        .collect::<Result<_>>()?;
                     ("parts", parts)
                 }
-                _ => return Err(Error::Invalid("Messages content 形状错误".into())),
             };
-            Ok(wire::message(role, parts, PROTOCOL, form, raw))
+            Ok(wire::message(role, parts, PROTOCOL, form, m.extra.clone()))
         })
         .collect()
 }

@@ -456,12 +456,36 @@ impl Request {
         let request_line = line(&mut reader)?;
         let parts: Vec<_> = request_line.split_whitespace().collect();
         let headers = headers(&mut reader)?;
-        let length = values(&headers, "content-length")
-            .first()
-            .map(|value| value.parse::<usize>().unwrap())
-            .unwrap_or(0);
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body)?;
+        let mut body = Vec::new();
+        if values(&headers, "transfer-encoding")
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("chunked"))
+        {
+            loop {
+                let size = usize::from_str_radix(line(&mut reader)?.split(';').next().unwrap(), 16)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if size == 0 {
+                    while !line(&mut reader)?.is_empty() {}
+                    break;
+                }
+                let start = body.len();
+                body.resize(start + size, 0);
+                reader.read_exact(&mut body[start..])?;
+                if !line(&mut reader)?.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid chunk ending",
+                    ));
+                }
+            }
+        } else {
+            let length = values(&headers, "content-length")
+                .first()
+                .map(|value| value.parse::<usize>().unwrap())
+                .unwrap_or(0);
+            body.resize(length, 0);
+            reader.read_exact(&mut body)?;
+        }
         Ok(Self {
             method: parts[0].into(),
             target: parts[1].into(),

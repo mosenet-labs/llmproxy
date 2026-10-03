@@ -1,88 +1,106 @@
-//! IR 消息序列编码为 messages。
-
-use crate::{
-    ir::request::{Message as IrMessage, PartKind, Role},
-    protocol::messages::request::message::Message,
-};
-use serde_json::{Value, json};
-
+//! IR 消息直接构造 Messages 内容块。
 use super::super::{Error, Result, wire};
 use super::PROTOCOL;
-
-/// 将相邻 Chat 工具结果接到前一条用户消息，保留原有片段顺序。
+use crate::{
+    ir::request::{Message as IrMessage, PartKind, Role},
+    protocol::{
+        OptionalNullable as O,
+        messages::request::message::{
+            Content, ContentBlock, KnownContentBlock as Block, Message, Role as RawRole,
+            ToolResultContent,
+        },
+    },
+};
+/// 合并独立工具结果与前一条用户消息，保留原始片段顺序。
 pub fn encode_messages(messages: &[IrMessage]) -> Result<Vec<Message>> {
-    let mut output: Vec<Value> = Vec::new();
+    let mut output: Vec<Message> = Vec::new();
     for message in messages {
         wire::reject_unmapped_source(message, PROTOCOL)?;
         let role = match message.role {
-            Role::User | Role::Tool => "user",
-            Role::Assistant => "assistant",
-            Role::System => "system",
+            Role::User | Role::Tool => RawRole::User,
+            Role::Assistant => RawRole::Assistant,
+            Role::System => RawRole::System,
             role => return Err(wire::unsupported_role(role)),
         };
         let mut blocks = Vec::new();
         for part in &message.parts {
-            let normalized = match &part.kind {
-                PartKind::Text(text) => json!({"type":"text","text":text}),
-                PartKind::ToolCall(call) if role == "assistant" => {
-                    let id = call
+            let mut extra = wire::extra(&part.metadata, PROTOCOL);
+            let block = match &part.kind {
+                PartKind::Text(text) => Block::Text {
+                    text: text.clone(),
+                    cache_control: wire::take(&mut extra, "cache_control")?,
+                    citations: wire::take(&mut extra, "citations")?,
+                    extra,
+                },
+                PartKind::ToolCall(call) if role == RawRole::Assistant => Block::ToolUse {
+                    id: call
                         .id
-                        .as_ref()
-                        .ok_or_else(|| Error::Unsupported("Messages 工具调用缺少 ID".into()))?;
-                    if !call.arguments.is_object() {
-                        return Err(Error::Unsupported(
-                            "Messages 工具参数必须是 JSON 对象".into(),
-                        ));
+                        .clone()
+                        .ok_or_else(|| Error::Unsupported("Messages 工具调用缺少 ID".into()))?,
+                    name: call.name.clone(),
+                    input: call.arguments.as_object().cloned().ok_or_else(|| {
+                        Error::Unsupported("Messages 工具参数必须是 JSON 对象".into())
+                    })?,
+                    cache_control: wire::take(&mut extra, "cache_control")?,
+                    caller: wire::take(&mut extra, "caller")?,
+                    toolset_name: wire::take(&mut extra, "toolset_name")?,
+                    extra,
+                },
+                PartKind::ToolResult(result) if role == RawRole::User => {
+                    let original_content = wire::take(&mut extra, "content")?;
+                    let content = if result.content.is_null() {
+                        original_content
+                    } else if result.content.is_object() {
+                        O::Value(ToolResultContent::Text(serde_json::to_string(
+                            &result.content,
+                        )?))
+                    } else {
+                        O::Value(serde_json::from_value(result.content.clone())?)
+                    };
+                    Block::ToolResult {
+                        tool_use_id: result
+                            .id
+                            .clone()
+                            .ok_or_else(|| Error::Unsupported("Messages 工具结果缺少 ID".into()))?,
+                        content,
+                        cache_control: wire::take(&mut extra, "cache_control")?,
+                        is_error: wire::take(&mut extra, "is_error")?,
+                        toolset_name: wire::take(&mut extra, "toolset_name")?,
+                        extra,
                     }
-                    json!({"type":"tool_use","id":id,"name":call.name,"input":call.arguments})
                 }
-                PartKind::ToolResult(result) if role == "user" => {
-                    let id = result
-                        .id
-                        .as_ref()
-                        .ok_or_else(|| Error::Unsupported("Messages 工具结果缺少 ID".into()))?;
-                    let mut block = json!({"type":"tool_result","tool_use_id":id});
-                    if !result.content.is_null() {
-                        block["content"] = if result.content.is_object() {
-                            json!(serde_json::to_string(&result.content)?)
-                        } else {
-                            result.content.clone()
-                        };
-                    }
-                    block
+                PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
+                    blocks.push(serde_json::from_value(opaque.data.clone())?);
+                    continue;
                 }
-                PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => opaque.data.clone(),
-                _ => {
-                    return Err(Error::Unsupported(format!(
-                        "Messages {role} 消息不支持此内容块"
-                    )));
-                }
+                _ => return Err(Error::Unsupported("Messages 消息不支持此内容块".into())),
             };
-            blocks.push(wire::encode_block(part, PROTOCOL, normalized)?);
+            blocks.push(ContentBlock::Known(block));
         }
-        let original_form = wire::form(&message.metadata, PROTOCOL);
-        let mut content = if blocks.len() == 1
-            && blocks[0].get("type").and_then(Value::as_str) == Some("text")
-            && original_form == Some("text")
-        {
-            blocks.remove(0).get("text").cloned().unwrap()
-        } else {
-            Value::Array(blocks)
-        };
+        let form = wire::form(&message.metadata, PROTOCOL);
         if message.role == Role::Tool
-            && original_form.is_none()
-            && let Value::Array(blocks) = &mut content
-            && wire::append_to_previous_user(&mut output, "content", blocks)
+            && form.is_none()
+            && let Some(Message {
+                role: RawRole::User,
+                content: Content::Parts(previous),
+                ..
+            }) = output.last_mut()
         {
+            previous.append(&mut blocks);
             continue;
         }
-        let mut raw = wire::extra(&message.metadata, PROTOCOL);
-        raw.insert("role".into(), json!(role));
-        raw.insert("content".into(), content);
-        output.push(Value::Object(raw));
+        let content = if form == Some("text")
+            && let [ContentBlock::Known(Block::Text { text, .. })] = blocks.as_slice()
+        {
+            Content::Text(text.clone())
+        } else {
+            Content::Parts(blocks)
+        };
+        output.push(Message {
+            role,
+            content,
+            extra: wire::extra(&message.metadata, PROTOCOL),
+        });
     }
-    output
-        .into_iter()
-        .map(|v| serde_json::from_value(v).map_err(Into::into))
-        .collect()
+    Ok(output)
 }

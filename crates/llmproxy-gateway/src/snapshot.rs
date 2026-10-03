@@ -19,6 +19,7 @@ const MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 // Resolved credentials deliberately have no Debug or Serialize implementation.
 #[derive(Clone)]
 pub struct ResolvedProvider {
+    pub protocol: Protocol,
     pub upstream_path: String,
     pub host: String,
     pub port: u16,
@@ -108,6 +109,7 @@ impl ProviderSnapshot {
                 ResolvedModel {
                     upstream_model_id: route.upstream_model_id,
                     provider: Some(Arc::new(ResolvedProvider {
+                        protocol: provider.protocol,
                         upstream_path: provider.upstream_path,
                         host: provider.host,
                         port: provider.port,
@@ -271,6 +273,7 @@ mod tests {
 
     fn provider(host: &str, secret: &str) -> ResolvedProvider {
         ResolvedProvider {
+            protocol: Protocol::OpenAiChat,
             upstream_path: "/v1/chat/completions".to_owned(),
             host: host.to_owned(),
             port: 443,

@@ -187,7 +187,7 @@ impl ProviderStore {
                 .ok_or(StoreError::Internal)?;
             if !input
                 .protocols
-                .contains(&routes::protocol_from_str(&route.protocol)?)
+                .contains(&routes::protocol_from_str(&route.provider_protocol)?)
             {
                 return Err(StoreError::Conflict(
                     "模型仍被此协议的路由使用，请先从路由中移除".into(),
@@ -255,6 +255,7 @@ impl ProviderStore {
         let mut route_names = HashSet::new();
         for route in ModelRouteRow::all().exec(&mut tx).await? {
             let protocol = routes::protocol_from_str(&route.protocol)?;
+            let provider_protocol = routes::protocol_from_str(&route.provider_protocol)?;
             route_names.insert((route.name.clone(), protocol));
             let targets = ModelRouteTargetRow::all()
                 .filter(ModelRouteTargetRow::fields().route_id().eq(route.id))
@@ -271,15 +272,15 @@ impl ProviderStore {
                 route.enabled
                     && target.enabled
                     && provider.enabled
-                    && mapping.protocols().contains(&protocol)
+                    && mapping.protocols().contains(&provider_protocol)
             });
             let resolved = if let Some((_, _, provider)) = selected {
                 Some(ActiveProvider {
                     id: provider.id,
-                    protocol,
+                    protocol: provider_protocol,
                     upstream_path: provider
                         .paths()
-                        .get(protocol)
+                        .get(provider_protocol)
                         .ok_or(StoreError::Internal)?
                         .to_owned(),
                     host: provider.host.clone(),

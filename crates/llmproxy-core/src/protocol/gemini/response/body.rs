@@ -8,7 +8,7 @@ use super::{message::Message, usage::UsageMetadata};
 use crate::protocol::OptionalNullable;
 
 /// Gemini 的一次生成响应或一个流式响应块。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Response {
     /// 候选输出；输入被阻断时可以缺失。
@@ -35,7 +35,7 @@ pub struct Response {
 }
 
 /// 一个模型候选输出。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
     /// 已生成的内容。

@@ -24,10 +24,11 @@ impl ProviderStore {
         self.bindings(&mut tx, true).await?;
         check_unique_route_name(&mut tx, &input.name, input.protocol, None).await?;
         check_model_alias_available(&mut tx, &input.name).await?;
-        check_route_targets(&mut tx, input.protocol, &input.targets).await?;
+        check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;
         let row = ModelRouteRow::create()
             .name(input.name)
             .protocol(input.protocol.as_str().to_owned())
+            .provider_protocol(input.provider_protocol.as_str().to_owned())
             .enabled(input.enabled)
             .updated_at(now()?)
             .exec(&mut tx)
@@ -54,7 +55,7 @@ impl ProviderStore {
         if input.name != row.name {
             check_model_alias_available(&mut tx, &input.name).await?;
         }
-        check_route_targets(&mut tx, input.protocol, &input.targets).await?;
+        check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;
         for target in ModelRouteTargetRow::all()
             .filter(ModelRouteTargetRow::fields().route_id().eq(id))
             .exec(&mut tx)
@@ -65,6 +66,7 @@ impl ProviderStore {
         row.update()
             .name(input.name)
             .protocol(input.protocol.as_str().to_owned())
+            .provider_protocol(input.provider_protocol.as_str().to_owned())
             .enabled(input.enabled)
             .updated_at(now()?)
             .exec(&mut tx)
@@ -121,6 +123,7 @@ async fn route_view(tx: &mut Transaction<'_>, row: &ModelRouteRow) -> StoreResul
         id: row.id,
         name: row.name.clone(),
         protocol: protocol_from_str(&row.protocol)?,
+        provider_protocol: protocol_from_str(&row.provider_protocol)?,
         enabled: row.enabled,
         targets: views,
         version: row.version,

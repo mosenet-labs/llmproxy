@@ -1,47 +1,57 @@
-//! 四种协议的完整 JSON 正文与 IR 转换。
+//! 四种协议的请求／响应结构体与 IR 双向转换；JSON 处理由接入边界负责。
 
 mod cross;
+mod projection;
 mod request;
 mod response;
+mod roundtrip;
 
 pub use cross::{Conversion, ConversionWarning, RequestTarget, ResponseTarget};
 
 #[cfg(test)]
 mod cross_tests;
 #[cfg(test)]
+mod json_test_support;
+#[cfg(test)]
+mod normalized_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod typed_tests;
 
-use serde_json::Value;
+use crate::protocol::{Request as ProtocolRequest, Response as ProtocolResponse};
 
 use crate::{
     ir::{request::Request, response::Response},
-    protocol::{Protocol, chat, gemini, messages, responses},
+    protocol::Protocol,
 };
 
 use super::{Error, Result};
 
 /// 请求及非流式响应的协议编解码契约；同协议可保留尚未规范化的字段。
 pub trait ProtocolCodec {
-    /// 将 JSON 请求解析为来源协议类型，再投影为 IR。
-    fn decode_request(&self, body: &Value) -> Result<Request>;
-    /// 将 IR 写回来源协议类型，并序列化为 JSON 请求。
-    fn encode_request(&self, request: &Request) -> Result<Value>;
-    /// 将非流式 JSON 响应解析为来源协议类型，再投影为 IR。
-    fn decode_response(&self, body: &Value) -> Result<Response>;
-    /// 将 IR 写回来源协议类型，并序列化为非流式 JSON 响应。
-    fn encode_response(&self, response: &Response) -> Result<Value>;
+    /// 将来源协议请求类型投影为 IR。
+    fn decode_request(&self, body: &ProtocolRequest) -> Result<Request>;
+    /// 编码为当前协议：同协议保留来源字段，否则从 IR 构造正文。
+    /// 跨协议调用若需处理有损警告，应使用 `encode_request_for`。
+    fn encode_request(&self, request: &Request) -> Result<ProtocolRequest>;
+    /// 将来源协议非流式响应类型投影为 IR。
+    fn decode_response(&self, body: &ProtocolResponse) -> Result<Response>;
+    /// 编码为当前协议的非流式响应；无来源副本时使用 IR 中的响应外壳。
+    /// 跨协议调用若需处理有损警告，应使用 `encode_response_for`。
+    fn encode_response(&self, response: &Response) -> Result<ProtocolResponse>;
     /// 将 IR 编为指定目标协议的非流式请求，返回无法保留的语义警告。
     fn encode_request_for(
         &self,
         request: &Request,
         target: &RequestTarget<'_>,
-    ) -> Result<Conversion>;
+    ) -> Result<Conversion<ProtocolRequest>>;
     /// 将 IR 编为指定目标协议的非流式响应；响应外壳由调用方提供。
     fn encode_response_for(
         &self,
         response: &Response,
         target: &ResponseTarget<'_>,
-    ) -> Result<Conversion>;
+    ) -> Result<Conversion<ProtocolResponse>>;
 }
 
 impl ProtocolCodec for Protocol {
@@ -49,8 +59,8 @@ impl ProtocolCodec for Protocol {
         &self,
         request: &Request,
         target: &RequestTarget<'_>,
-    ) -> Result<Conversion> {
-        if *self == request.source_protocol() {
+    ) -> Result<Conversion<ProtocolRequest>> {
+        if *self == request.source_protocol() && request.source.is_some() {
             return Ok(Conversion::exact(self.encode_request(request)?));
         }
         cross::encode_request(*self, request, target)
@@ -60,50 +70,56 @@ impl ProtocolCodec for Protocol {
         &self,
         response: &Response,
         target: &ResponseTarget<'_>,
-    ) -> Result<Conversion> {
-        if *self == response.source_protocol() {
+    ) -> Result<Conversion<ProtocolResponse>> {
+        if *self == response.source_protocol() && response.source.is_some() {
             return Ok(Conversion::exact(self.encode_response(response)?));
         }
         cross::encode_response(*self, response, target)
     }
-    fn decode_request(&self, body: &Value) -> Result<Request> {
-        use crate::ir::request::source::Source;
-        let source = match self {
-            Self::OpenAiChat => Source::Chat(Box::new(serde_json::from_value::<
-                chat::request::Request,
-            >(body.clone())?)),
-            Self::OpenAiResponses => Source::Responses(Box::new(serde_json::from_value::<
-                responses::request::Request,
-            >(body.clone())?)),
-            Self::AnthropicMessages => Source::Messages(Box::new(serde_json::from_value::<
-                messages::request::Request,
-            >(body.clone())?)),
-            Self::Gemini => Source::Gemini(Box::new(serde_json::from_value::<
-                gemini::request::Request,
-            >(body.clone())?)),
-        };
+    fn decode_request(&self, body: &ProtocolRequest) -> Result<Request> {
+        if body.protocol() != *self {
+            return Err(Error::Invalid("协议类型与编解码器不匹配".into()));
+        }
+        let source = body.clone();
         let messages = request::decode_messages(&source)?;
-        Ok(Request {
+        let mut request = Request {
             items: request::decode_items(&source, messages.len())?,
             instructions: request::decode_instructions(&source),
             messages,
             cache: request::decode_cache(&source),
-            source,
-        })
+            ..Request::new(source.protocol())
+        };
+        projection::decode_request(&mut request, &source);
+        request.source = Some(source);
+        Ok(request)
     }
 
-    fn encode_request(&self, request: &Request) -> Result<Value> {
-        ensure_source(*self, request.source_protocol())?;
-        if request.instructions != request::decode_instructions(&request.source)
-            || request.items != request::decode_items(&request.source, request.messages.len())?
+    fn encode_request(&self, request: &Request) -> Result<ProtocolRequest> {
+        let Some(original) = request
+            .source
+            .as_ref()
+            .filter(|_| *self == request.source_protocol())
+        else {
+            return Ok(cross::encode_request(
+                *self,
+                request,
+                &RequestTarget {
+                    model: request.model.as_deref().unwrap_or(""),
+                    max_output_tokens: None,
+                },
+            )?
+            .body);
+        };
+        if request.instructions != request::decode_instructions(original)
+            || request.items != request::decode_items(original, request.messages.len())?
         {
             return Err(Error::Unsupported(
                 "同协议回写暂不支持修改顶层指令或独立输入项".into(),
             ));
         }
-        let mut source = request.source.clone();
+        let mut source = original.clone();
         request::encode_messages(&mut source, &request.messages)?;
-        if request.cache != request::decode_cache(&request.source) {
+        if request.cache != request::decode_cache(original) {
             request::encode_cache(&mut source, &request.cache);
             if request::decode_cache(&source) != request.cache {
                 return Err(Error::Unsupported(
@@ -111,64 +127,69 @@ impl ProtocolCodec for Protocol {
                 ));
             }
         }
-        Ok(source.into_body()?)
+        roundtrip::request(*self, request, original, &mut source)?;
+        Ok(source)
     }
 
-    fn decode_response(&self, body: &Value) -> Result<Response> {
-        use crate::ir::response::source::Source;
-        let source = match self {
-            Self::OpenAiChat => Source::Chat(Box::new(serde_json::from_value::<
-                chat::response::Completion,
-            >(body.clone())?)),
-            Self::OpenAiResponses => Source::Responses(Box::new(serde_json::from_value::<
-                responses::response::Response,
-            >(body.clone())?)),
-            Self::AnthropicMessages => Source::Messages(Box::new(serde_json::from_value::<
-                messages::response::Message,
-            >(body.clone())?)),
-            Self::Gemini => Source::Gemini(Box::new(serde_json::from_value::<
-                gemini::response::Response,
-            >(body.clone())?)),
-        };
+    fn decode_response(&self, body: &ProtocolResponse) -> Result<Response> {
+        if body.protocol() != *self {
+            return Err(Error::Invalid("协议类型与编解码器不匹配".into()));
+        }
+        let source = body.clone();
         let messages = response::decode_messages(&source)?;
-        Ok(Response {
+        let mut response = Response {
             items: response::decode_items(&source, messages.len())?,
             messages,
             usage: response::decode_usage(&source),
-            source,
-        })
+            ..Response::new(source.protocol())
+        };
+        projection::decode_response(&mut response, &source);
+        response.source = Some(source);
+        Ok(response)
     }
 
-    fn encode_response(&self, response: &Response) -> Result<Value> {
-        ensure_source(*self, response.source_protocol())?;
-        if response.items != response::decode_items(&response.source, response.messages.len())? {
+    fn encode_response(&self, response: &Response) -> Result<ProtocolResponse> {
+        let Some(original) = response
+            .source
+            .as_ref()
+            .filter(|_| *self == response.source_protocol())
+        else {
+            let created = match response.created_at {
+                Some(created) => created,
+                None if matches!(self, Protocol::Gemini | Protocol::AnthropicMessages) => 0,
+                None => return Err(Error::Unsupported("目标响应缺少创建时间".into())),
+            };
+            return Ok(cross::encode_response(
+                *self,
+                response,
+                &ResponseTarget {
+                    model: response.model.as_deref().unwrap_or(""),
+                    id: response.id.as_deref().unwrap_or(""),
+                    created,
+                },
+            )?
+            .body);
+        };
+        if response.items != response::decode_items(original, response.messages.len())? {
             return Err(Error::Unsupported(
                 "同协议回写暂不支持修改独立输出项".into(),
             ));
         }
-        let mut source = response.source.clone();
+        let mut source = original.clone();
         response::encode_messages(&mut source, &response.messages)?;
-        let original_usage = response::decode_usage(&response.source);
+        let original_usage = response::decode_usage(original);
         if response.usage != original_usage {
             response::encode_usage(&mut source, response.usage.as_ref())?;
             if !response::changed_usage_fields_match(
                 &original_usage,
                 &response.usage,
                 &response::decode_usage(&source),
-            )? {
+            ) {
                 return Err(Error::Unsupported("目标协议无法表达修改后的用量".into()));
             }
         }
-        Ok(source.into_body()?)
-    }
-}
-
-/// 整体 IR 仅允许写回来源协议。
-fn ensure_source(target: Protocol, source: Protocol) -> Result<()> {
-    if target == source {
-        Ok(())
-    } else {
-        Err(Error::Unsupported("整体报文暂不支持跨协议编码".into()))
+        roundtrip::response(*self, response, original, &mut source)?;
+        Ok(source)
     }
 }
 

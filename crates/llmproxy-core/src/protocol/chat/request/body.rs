@@ -13,7 +13,7 @@ use super::parameters::{
 use crate::protocol::optional_nullable::OptionalNullable;
 
 /// Chat Completions 请求；流式和非流式请求使用同一结构。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// 到目前为止的对话消息。
     pub messages: Vec<Message>,

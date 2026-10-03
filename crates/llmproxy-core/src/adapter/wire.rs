@@ -56,12 +56,6 @@ pub(super) fn object(value: Value) -> Result<Map<String, Value>> {
     }
 }
 
-pub(super) fn take_string(map: &mut Map<String, Value>, key: &str) -> Result<String> {
-    map.remove(key)
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .ok_or_else(|| Error::Invalid(format!("字段 {key} 必须是字符串")))
-}
-
 pub(super) fn text_part(
     text: String,
     protocol: Protocol,
@@ -93,54 +87,6 @@ pub(super) fn opaque(protocol: Protocol, block: Map<String, Value>) -> Part {
         }),
         metadata: Map::new(),
     }
-}
-
-/// 三种 `type` 标记协议共用的文本块解码。
-pub(super) fn typed_text(
-    mut block: Map<String, Value>,
-    protocol: Protocol,
-    form: &str,
-) -> Result<Part> {
-    block.remove("type");
-    let text = take_string(&mut block, "text")?;
-    Ok(text_part(text, protocol, form, block))
-}
-
-/// Chat 和 Responses 共用的拒绝块解码。
-pub(super) fn typed_refusal(mut block: Map<String, Value>, protocol: Protocol) -> Result<Part> {
-    block.remove("type");
-    let refusal = take_string(&mut block, "refusal")?;
-    Ok(part(PartKind::Refusal(refusal), protocol, "refusal", block))
-}
-
-/// IR 字段覆盖来源协议的剩余字段。
-pub(super) fn encode_block(part: &Part, protocol: Protocol, normalized: Value) -> Result<Value> {
-    Ok(Value::Object(merge(
-        extra(&part.metadata, protocol),
-        object(normalized)?,
-    )))
-}
-
-/// 将独立工具结果并入前一条用户消息，供块数组协议共用。
-pub(super) fn append_to_previous_user(
-    output: &mut [Value],
-    content_key: &str,
-    blocks: &mut Vec<Value>,
-) -> bool {
-    if output
-        .last()
-        .and_then(|v| v.get("role"))
-        .and_then(Value::as_str)
-        != Some("user")
-    {
-        return false;
-    }
-    let Some(Value::Array(previous)) = output.last_mut().and_then(|v| v.get_mut(content_key))
-    else {
-        return false;
-    };
-    previous.append(blocks);
-    true
 }
 
 pub(super) fn message(
@@ -190,10 +136,62 @@ pub(super) fn reject_unmapped_source(message: &Message, target: Protocol) -> Res
     Ok(())
 }
 
-pub(super) fn merge(
-    mut base: Map<String, Value>,
-    normalized: Map<String, Value>,
-) -> Map<String, Value> {
-    base.extend(normalized);
-    base
+/// 将尚未规范化的可选叶子字段放入 IR 元数据，保持缺失和 null。
+pub(super) fn put<T: serde::Serialize>(
+    extra: &mut Map<String, Value>,
+    key: &str,
+    value: &crate::protocol::OptionalNullable<T>,
+) -> Result<()> {
+    if !value.is_missing() {
+        extra.insert(key.into(), serde_json::to_value(value)?);
+    }
+    Ok(())
+}
+/// 保留协议中普通 Option 字段的有值形态。
+pub(super) fn put_option<T: serde::Serialize>(
+    extra: &mut Map<String, Value>,
+    key: &str,
+    value: &Option<T>,
+) -> Result<()> {
+    if let Some(value) = value {
+        extra.insert(key.into(), serde_json::to_value(value)?);
+    }
+    Ok(())
+}
+/// 从 IR 元数据恢复一个可选叶子字段；不反序列化完整消息。
+pub(super) fn take<T: serde::de::DeserializeOwned>(
+    extra: &mut Map<String, Value>,
+    key: &str,
+) -> Result<crate::protocol::OptionalNullable<T>> {
+    match extra.remove(key) {
+        None => Ok(crate::protocol::OptionalNullable::Missing),
+        Some(value) => Ok(serde_json::from_value(value)?),
+    }
+}
+/// 从元数据恢复普通 Option 字段。
+pub(super) fn take_option<T: serde::de::DeserializeOwned>(
+    extra: &mut Map<String, Value>,
+    key: &str,
+) -> Result<Option<T>> {
+    extra
+        .remove(key)
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(Into::into)
+}
+/// 必须由来源元数据提供的响应叶子字段。
+pub(super) fn required<T: serde::de::DeserializeOwned>(
+    extra: &mut Map<String, Value>,
+    key: &str,
+) -> Result<T> {
+    serde_json::from_value(
+        extra
+            .remove(key)
+            .ok_or_else(|| Error::Unsupported(format!("缺少来源字段 {key}")))?,
+    )
+    .map_err(Into::into)
+}
+/// 尚未规范化的内容块保留为不透明叶子，不能用作整包协议正文。
+pub(super) fn opaque_value<T: serde::Serialize>(protocol: Protocol, value: &T) -> Result<Part> {
+    Ok(opaque(protocol, object(serde_json::to_value(value)?)?))
 }

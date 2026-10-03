@@ -453,6 +453,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
         .create_route(ModelRouteInput {
             name: "mixed/public".into(),
             protocol: Protocol::OpenAiResponses,
+            provider_protocol: Protocol::OpenAiResponses,
             enabled: true,
             targets: vec![ModelRouteTargetInput {
                 model_id: mapping.id,

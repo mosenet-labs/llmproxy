@@ -241,6 +241,7 @@ pub struct ModelRouteTargetInput {
 pub struct ModelRouteInput {
     pub name: String,
     pub protocol: Protocol,
+    pub provider_protocol: Protocol,
     pub enabled: bool,
     pub targets: Vec<ModelRouteTargetInput>,
 }
@@ -256,6 +257,7 @@ pub struct ModelRouteView {
     pub id: i64,
     pub name: String,
     pub protocol: Protocol,
+    pub provider_protocol: Protocol,
     pub enabled: bool,
     pub targets: Vec<ModelRouteTargetView>,
     pub version: u64,

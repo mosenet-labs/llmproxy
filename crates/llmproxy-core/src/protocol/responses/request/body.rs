@@ -8,7 +8,7 @@ use super::message::Message;
 use crate::protocol::{moderation::ModerationSettings, optional_nullable::OptionalNullable};
 
 /// Responses 请求的完整外壳；开放的工具和输入项保留其原始字段。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// 领域访问配置。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
@@ -93,7 +93,7 @@ pub struct Request {
     pub tool_choice: OptionalNullable<Value>,
     /// 函数、内置工具或 MCP 工具的声明。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
-    pub tools: OptionalNullable<Vec<Map<String, Value>>>,
+    pub tools: OptionalNullable<Vec<crate::protocol::responses::function::Tool>>,
     /// 每个输出词元最多返回的候选对数概率数。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub top_logprobs: OptionalNullable<u64>,
@@ -122,13 +122,41 @@ pub enum Input {
 }
 
 /// 输入项中的消息已强类型化；其他工具输入项保留原对象。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum InputItem {
+    /// 独立客户端函数调用。
+    FunctionCall(crate::protocol::responses::function::Call),
+    /// 客户端返回的函数结果。
+    FunctionCallOutput(crate::protocol::responses::function::CallOutput),
     /// 消息输入项。
     Message(Message),
     /// 函数调用、函数结果等其他输入项。
     Other(Map<String, Value>),
+}
+/// 按显式类型选择工具项，已知类型无效时不能降为未知扩展。
+impl<'de> serde::Deserialize<'de> for InputItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let kind = value.get("type").and_then(Value::as_str);
+        match kind {
+            Some("function_call") => serde_json::from_value(value)
+                .map(Self::FunctionCall)
+                .map_err(serde::de::Error::custom),
+            Some("function_call_output") => serde_json::from_value(value)
+                .map(Self::FunctionCallOutput)
+                .map_err(serde::de::Error::custom),
+            _ => {
+                if let Ok(message) = serde_json::from_value(value.clone()) {
+                    return Ok(Self::Message(message));
+                }
+                match value {
+                    Value::Object(value) => Ok(Self::Other(value)),
+                    _ => Err(serde::de::Error::custom("协议项必须是对象")),
+                }
+            }
+        }
+    }
 }
 
 /// 上下文管理的一条规则。

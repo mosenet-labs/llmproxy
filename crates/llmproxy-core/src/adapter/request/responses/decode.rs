@@ -1,69 +1,112 @@
-//! responses 原始消息序列解码。
-
+//! Responses 消息类型的直接投影。
+use super::super::{Result, wire};
+use super::PROTOCOL;
 use crate::{
-    ir::request::{Message as IrMessage, Role},
-    protocol::responses::request::message::Message,
+    ir::request::{Message as IrMessage, Part, PartKind, Role},
+    protocol::responses::request::message::*,
 };
 use serde_json::{Map, Value};
-
-use super::super::{Error, Result, wire};
-use super::PROTOCOL;
-
-/// 解码现有 DTO 可表达的 Easy、Input 和 Output 消息。
+/// 保留 Easy、Input、Output 变体及内容形状。
 pub fn decode_responses(messages: &[Message]) -> Result<Vec<IrMessage>> {
     messages
         .iter()
         .map(|message| {
-            let form = match message {
-                Message::Easy(_) => "easy",
-                Message::Input(_) => "input",
-                Message::Output(_) => "output",
-            };
-            let mut raw = wire::object(serde_json::to_value(message)?)?;
-            let role = match wire::take_string(&mut raw, "role")?.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                "developer" => Role::Developer,
-                other => return Err(Error::Invalid(format!("未知 Responses 角色 {other}"))),
-            };
-            let content = raw
-                .remove("content")
-                .ok_or_else(|| Error::Invalid("缺少 content".into()))?;
-            let (shape, parts) = match content {
-                Value::String(text) => (
-                    "text",
-                    vec![wire::text_part(text, PROTOCOL, "scalar", Map::new())],
-                ),
-                Value::Array(blocks) => {
-                    let mut parts = Vec::new();
-                    for block in blocks {
-                        let block = wire::object(block)?;
-                        let part = match block.get("type").and_then(Value::as_str) {
-                            Some("input_text" | "output_text") => {
-                                let kind = block
-                                    .get("type")
-                                    .and_then(Value::as_str)
-                                    .unwrap()
-                                    .to_owned();
-                                wire::typed_text(block, PROTOCOL, &kind)?
-                            }
-                            Some("refusal") => wire::typed_refusal(block, PROTOCOL)?,
-                            _ => wire::opaque(PROTOCOL, block),
-                        };
-                        parts.push(part);
-                    }
-                    ("parts", parts)
+            let (role, parts, form, extra) = match message {
+                Message::Easy(m) => {
+                    let mut extra = m.extra.clone();
+                    wire::put(&mut extra, "phase", &m.phase)?;
+                    wire::put_option(&mut extra, "type", &m.r#type)?;
+                    let role = match m.role {
+                        crate::protocol::responses::request::message::Role::User => Role::User,
+                        crate::protocol::responses::request::message::Role::Assistant => {
+                            Role::Assistant
+                        }
+                        crate::protocol::responses::request::message::Role::System => Role::System,
+                        crate::protocol::responses::request::message::Role::Developer => {
+                            Role::Developer
+                        }
+                    };
+                    let (form, parts) = match &m.content {
+                        Content::Text(text) => (
+                            "easy_text",
+                            vec![wire::text_part(
+                                text.clone(),
+                                PROTOCOL,
+                                "scalar",
+                                Map::new(),
+                            )],
+                        ),
+                        Content::Parts(parts) => ("easy_parts", input_parts(parts)?),
+                    };
+                    (role, parts, form, extra)
                 }
-                _ => return Err(Error::Invalid("Responses content 形状错误".into())),
+                Message::Input(m) => {
+                    let mut extra = m.extra.clone();
+                    wire::put_option(&mut extra, "status", &m.status)?;
+                    wire::put_option(&mut extra, "type", &m.r#type)?;
+                    let role = match m.role {
+                        InputRole::User => Role::User,
+                        InputRole::System => Role::System,
+                        InputRole::Developer => Role::Developer,
+                    };
+                    (role, input_parts(&m.content)?, "input_parts", extra)
+                }
+                Message::Output(m) => {
+                    let mut extra = m.extra.clone();
+                    extra.insert("id".into(), Value::String(m.id.clone()));
+                    extra.insert("status".into(), serde_json::to_value(m.status)?);
+                    extra.insert("type".into(), serde_json::to_value(m.r#type)?);
+                    wire::put(&mut extra, "phase", &m.phase)?;
+                    let parts = m
+                        .content
+                        .iter()
+                        .map(|part| match part {
+                            OutputPart::OutputText {
+                                text,
+                                annotations,
+                                logprobs,
+                                extra,
+                            } => {
+                                let mut extra = extra.clone();
+                                extra.insert(
+                                    "annotations".into(),
+                                    Value::Array(annotations.clone()),
+                                );
+                                wire::put_option(&mut extra, "logprobs", logprobs)?;
+                                Ok(wire::text_part(
+                                    text.clone(),
+                                    PROTOCOL,
+                                    "output_text",
+                                    extra,
+                                ))
+                            }
+                            OutputPart::Refusal { refusal, extra } => Ok(wire::part(
+                                PartKind::Refusal(refusal.clone()),
+                                PROTOCOL,
+                                "refusal",
+                                extra.clone(),
+                            )),
+                        })
+                        .collect::<Result<_>>()?;
+                    (Role::Assistant, parts, "output_parts", extra)
+                }
             };
-            Ok(wire::message(
-                role,
-                parts,
+            Ok(wire::message(role, parts, PROTOCOL, form, extra))
+        })
+        .collect()
+}
+/// 输入文本直接提取；未规范化媒体作为不透明叶子保留。
+fn input_parts(parts: &[InputPart]) -> Result<Vec<Part>> {
+    parts
+        .iter()
+        .map(|part| match part {
+            InputPart::InputText { text, extra } => Ok(wire::text_part(
+                text.clone(),
                 PROTOCOL,
-                &format!("{form}_{shape}"),
-                raw,
-            ))
+                "input_text",
+                extra.clone(),
+            )),
+            _ => wire::opaque_value(PROTOCOL, part),
         })
         .collect()
 }

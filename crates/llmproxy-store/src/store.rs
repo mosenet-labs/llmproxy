@@ -693,6 +693,7 @@ mod tests {
                 .create_route(ModelRouteInput {
                     name: "Primary/model".into(),
                     protocol: Protocol::OpenAiChat,
+                    provider_protocol: Protocol::OpenAiChat,
                     enabled: true,
                     targets: vec![crate::ModelRouteTargetInput {
                         model_id: saved.id,
@@ -706,6 +707,7 @@ mod tests {
             .create_route(ModelRouteInput {
                 name: "public-model".into(),
                 protocol: Protocol::OpenAiChat,
+                provider_protocol: Protocol::OpenAiChat,
                 enabled: true,
                 targets: vec![crate::ModelRouteTargetInput {
                     model_id: saved.id,
@@ -718,6 +720,7 @@ mod tests {
             .create_route(ModelRouteInput {
                 name: "public-model".into(),
                 protocol: Protocol::OpenAiResponses,
+                provider_protocol: Protocol::OpenAiResponses,
                 enabled: true,
                 targets: vec![crate::ModelRouteTargetInput {
                     model_id: saved.id,
@@ -727,11 +730,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.load_model_routes().await.unwrap().len(), 4);
+        let cross_route = store
+            .create_route(ModelRouteInput {
+                name: "cross-model".into(),
+                protocol: Protocol::AnthropicMessages,
+                provider_protocol: Protocol::OpenAiChat,
+                enabled: true,
+                targets: vec![crate::ModelRouteTargetInput {
+                    model_id: saved.id,
+                    enabled: true,
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(cross_route.provider_protocol, Protocol::OpenAiChat);
+        let selected = store
+            .load_model_routes()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|route| route.alias == "cross-model")
+            .unwrap();
+        assert_eq!(selected.protocol, Protocol::AnthropicMessages);
+        assert_eq!(selected.provider.unwrap().protocol, Protocol::OpenAiChat);
+        store
+            .delete_route(cross_route.id, cross_route.version)
+            .await
+            .unwrap();
         assert!(matches!(
             store
                 .create_route(ModelRouteInput {
                     name: "public-model".into(),
                     protocol: Protocol::OpenAiChat,
+                    provider_protocol: Protocol::OpenAiChat,
                     enabled: true,
                     targets: vec![crate::ModelRouteTargetInput {
                         model_id: saved.id,
@@ -746,6 +777,7 @@ mod tests {
                 .create_route(ModelRouteInput {
                     name: "wrong-protocol".into(),
                     protocol: Protocol::AnthropicMessages,
+                    provider_protocol: Protocol::AnthropicMessages,
                     enabled: true,
                     targets: vec![crate::ModelRouteTargetInput {
                         model_id: saved.id,
@@ -825,6 +857,7 @@ mod tests {
                 ModelRouteInput {
                     name: "public-model".into(),
                     protocol: Protocol::OpenAiChat,
+                    provider_protocol: Protocol::OpenAiChat,
                     enabled: true,
                     targets: vec![
                         crate::ModelRouteTargetInput {
@@ -875,6 +908,7 @@ mod tests {
                     ModelRouteInput {
                         name: "public-model".into(),
                         protocol: Protocol::OpenAiChat,
+                        provider_protocol: Protocol::OpenAiChat,
                         enabled: true,
                         targets: vec![crate::ModelRouteTargetInput {
                             model_id: saved.id,

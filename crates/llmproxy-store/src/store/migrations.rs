@@ -71,6 +71,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0014_gemini.sql",
         include_str!("../../migrations/postgresql/0014_gemini.sql"),
     ),
+    MigrationFile::new(
+        202610020001,
+        "0015_route_provider_protocol.sql",
+        include_str!("../../migrations/postgresql/0015_route_provider_protocol.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -293,5 +298,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202609290019,
         "0044_gemini_model_routes.sql",
         include_str!("../../migrations/sqlite/0044_gemini_model_routes.sql"),
+    ),
+    MigrationFile::new(
+        202610020001,
+        "0045_route_provider_protocol.sql",
+        include_str!("../../migrations/sqlite/0045_route_provider_protocol.sql"),
     ),
 ]);

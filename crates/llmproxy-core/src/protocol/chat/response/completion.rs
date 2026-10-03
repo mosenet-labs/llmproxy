@@ -9,7 +9,7 @@ use super::{logprobs::Logprobs, moderation::Moderation, usage::Usage};
 use crate::protocol::optional_nullable::OptionalNullable;
 
 /// 一次非流式 Chat Completion 的完整响应外壳。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Completion {
     /// 本次完成的唯一 ID。
     pub id: String,

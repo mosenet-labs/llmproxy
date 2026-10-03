@@ -1,99 +1,60 @@
-//! Chat 非流式输出消息解码。
-
-use serde_json::{Map, Value};
-
-use crate::{
-    ir::response::{Message as IrMessage, PartKind, Role, ToolCall},
-    protocol::chat::response::message::Message,
-};
-
-use super::super::{Error, Result, wire};
+//! Chat 响应消息直接类型投影。
+use super::super::{Result, wire};
 use super::PROTOCOL;
-
-/// 保留正文、拒绝、工具调用及原协议的 `null` 状态。
+use crate::{
+    ir::response::{Message as IrMessage, PartKind, Role},
+    protocol::{OptionalNullable as O, chat::response::message::Message},
+};
+use serde_json::{Map, Value};
+/// 正文、拒绝和工具调用读取类型字段；仅剩余叶子保存在元数据。
 pub fn decode_chat(messages: &[Message]) -> Result<Vec<IrMessage>> {
     messages
         .iter()
-        .map(|message| {
-            let mut raw = wire::object(serde_json::to_value(message)?)?;
-            if wire::take_string(&mut raw, "role")? != "assistant" {
-                return Err(Error::Invalid("Chat 响应角色必须是 assistant".into()));
-            }
-            let content = raw.remove("content");
-            let form = match &content {
-                Some(Value::String(_)) => "text",
-                Some(Value::Null) => {
-                    raw.insert("content".into(), Value::Null);
+        .map(|m| {
+            let mut extra = m.extra.clone();
+            wire::put(&mut extra, "annotations", &m.annotations)?;
+            wire::put(&mut extra, "audio", &m.audio)?;
+            wire::put(&mut extra, "function_call", &m.function_call)?;
+            let mut parts = Vec::new();
+            let form = match &m.content {
+                O::Value(text) => {
+                    parts.push(wire::text_part(
+                        text.clone(),
+                        PROTOCOL,
+                        "content",
+                        Map::new(),
+                    ));
+                    "text"
+                }
+                O::Null => {
+                    extra.insert("content".into(), Value::Null);
                     "null"
                 }
-                None => "missing",
-                _ => return Err(Error::Invalid("Chat 响应 content 必须是文本或 null".into())),
+                O::Missing => "missing",
             };
-            let mut parts = Vec::new();
-            if let Some(Value::String(text)) = content {
-                parts.push(wire::text_part(text, PROTOCOL, "content", Map::new()));
-            }
-            match raw.remove("refusal") {
-                Some(Value::String(text)) => parts.push(wire::part(
-                    PartKind::Refusal(text),
+            match &m.refusal {
+                O::Value(text) => parts.push(wire::part(
+                    PartKind::Refusal(text.clone()),
                     PROTOCOL,
                     "refusal",
                     Map::new(),
                 )),
-                Some(Value::Null) => {
-                    raw.insert("refusal".into(), Value::Null);
-                }
-                Some(_) => return Err(Error::Invalid("Chat refusal 必须是文本或 null".into())),
-                None => {}
+                _ => wire::put(&mut extra, "refusal", &m.refusal)?,
             }
-            match raw.remove("tool_calls") {
-                Some(Value::Array(calls)) => {
-                    if calls.is_empty() {
-                        raw.insert("tool_calls".into(), Value::Array(Vec::new()));
-                    }
+            match &m.tool_calls {
+                O::Value(calls) if !calls.is_empty() => {
                     for call in calls {
-                        let mut call = wire::object(call)?;
-                        if call.get("type").and_then(Value::as_str) != Some("function") {
-                            parts.push(wire::opaque(PROTOCOL, call));
-                            continue;
-                        }
-                        call.remove("type");
-                        let id = wire::take_string(&mut call, "id")?;
-                        let mut function = wire::object(
-                            call.remove("function")
-                                .ok_or_else(|| Error::Invalid("缺少 function".into()))?,
-                        )?;
-                        let name = wire::take_string(&mut function, "name")?;
-                        let arguments = wire::take_string(&mut function, "arguments")?;
-                        if !function.is_empty() {
-                            call.insert("function".into(), Value::Object(function));
-                        }
-                        let arguments =
-                            serde_json::from_str(&arguments).unwrap_or(Value::String(arguments));
-                        parts.push(wire::part(
-                            PartKind::ToolCall(ToolCall {
-                                id: Some(id),
-                                name,
-                                arguments,
-                            }),
-                            PROTOCOL,
-                            "function",
-                            call,
-                        ));
+                        parts.push(crate::adapter::request::chat::decode_call(call)?);
                     }
                 }
-                Some(Value::Null) => {
-                    raw.insert("tool_calls".into(), Value::Null);
-                }
-                Some(_) => return Err(Error::Invalid("Chat tool_calls 必须是数组或 null".into())),
-                None => {}
+                _ => wire::put(&mut extra, "tool_calls", &m.tool_calls)?,
             }
             Ok(wire::response_message(
                 Role::Assistant,
                 parts,
                 PROTOCOL,
                 form,
-                raw,
+                extra,
             ))
         })
         .collect()

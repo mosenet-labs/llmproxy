@@ -13,8 +13,22 @@ pub enum OptionalNullable<T> {
 }
 
 impl<T> OptionalNullable<T> {
+    /// 判断字段是否缺失。
     pub fn is_missing(&self) -> bool {
         matches!(self, Self::Missing)
+    }
+    /// 只借用实际值；缺失及 null 都不产生值。
+    pub fn as_option(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl<T> From<Option<T>> for OptionalNullable<T> {
+    fn from(value: Option<T>) -> Self {
+        value.map(Self::Value).unwrap_or(Self::Missing)
     }
 }
 

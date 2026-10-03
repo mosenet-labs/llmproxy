@@ -1,6 +1,6 @@
+use super::json_test_support::JsonCodec;
 use serde_json::{Value, json};
 
-use super::ProtocolCodec;
 use crate::{ir::message::PartKind, protocol::Protocol};
 
 #[test]
@@ -108,10 +108,11 @@ fn all_responses_round_trip_and_update_messages_and_usage() {
 }
 
 #[test]
-fn other_protocol_and_invalid_response_are_rejected() {
+fn normalized_request_can_encode_another_protocol_but_invalid_response_is_rejected() {
     let source = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
     let request = Protocol::OpenAiChat.decode_request(&source).unwrap();
-    assert!(Protocol::Gemini.encode_request(&request).is_err());
+    let encoded = Protocol::Gemini.encode_request(&request).unwrap();
+    assert_eq!(encoded["contents"][0]["parts"][0]["text"], "hi");
     assert!(
         Protocol::OpenAiChat
             .decode_response(&json!({"error":{"message":"bad"}}))

@@ -1,73 +1,117 @@
-//! IR 消息序列编码为 responses。
-
-use crate::{
-    ir::request::{Message as IrMessage, PartKind, Role},
-    protocol::responses::request::message::Message,
-};
-use serde_json::{Map, Value, json};
-
+//! 从 IR 直接构造 Responses 消息变体。
 use super::super::{Error, Result, wire};
 use super::PROTOCOL;
-
-/// 仅写回消息项；工具调用应由未来的 RequestItem 适配器处理。
+use crate::{
+    ir::request::{Message as IrMessage, PartKind, Role},
+    protocol::responses::request::message::{self as raw, Message},
+};
+/// 输入与输出内容块分别构造，不先拼 JSON 再解释变体。
 pub fn encode_responses(messages: &[IrMessage]) -> Result<Vec<Message>> {
     messages
         .iter()
         .map(|message| {
             wire::reject_unmapped_source(message, PROTOCOL)?;
+            let mut extra = wire::extra(&message.metadata, PROTOCOL);
+            let form = wire::form(&message.metadata, PROTOCOL).unwrap_or("");
             let role = match message.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::System => "system",
-                Role::Developer => "developer",
+                Role::User => raw::Role::User,
+                Role::Assistant => raw::Role::Assistant,
+                Role::System => raw::Role::System,
+                Role::Developer => raw::Role::Developer,
                 role => return Err(wire::unsupported_role(role)),
             };
-            let mut raw = wire::extra(&message.metadata, PROTOCOL);
-            let form = wire::form(&message.metadata, PROTOCOL).unwrap_or("");
-            let output = form.starts_with("output_");
-            let mut blocks = Vec::new();
-            for part in &message.parts {
-                let block = match &part.kind {
-                    PartKind::Text(text) => {
-                        let kind = if output { "output_text" } else { "input_text" };
-                        let mut block = Map::new();
-                        block.insert("type".into(), json!(kind));
-                        block.insert("text".into(), json!(text));
-                        let mut block = wire::encode_block(part, PROTOCOL, Value::Object(block))?;
-                        if output {
-                            block
-                                .as_object_mut()
-                                .unwrap()
-                                .entry("annotations")
-                                .or_insert(json!([]));
-                        }
-                        block
-                    }
-                    PartKind::Refusal(text) if output => wire::encode_block(
-                        part,
-                        PROTOCOL,
-                        json!({"type":"refusal","refusal":text}),
-                    )?,
-                    PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => opaque.data.clone(),
-                    _ => {
-                        return Err(Error::Unsupported(
-                            "Responses 消息不支持工具项或此内容块".into(),
-                        ));
-                    }
-                };
-                blocks.push(block);
+            if form.starts_with("output_") {
+                if message.role != Role::Assistant {
+                    return Err(wire::unsupported_role(message.role));
+                }
+                let content = message
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        let mut extra = wire::extra(&part.metadata, PROTOCOL);
+                        Ok(match &part.kind {
+                            PartKind::Text(text) => raw::OutputPart::OutputText {
+                                text: text.clone(),
+                                annotations: wire::take_option(&mut extra, "annotations")?
+                                    .unwrap_or_default(),
+                                logprobs: wire::take_option(&mut extra, "logprobs")?,
+                                extra,
+                            },
+                            PartKind::Refusal(text) => raw::OutputPart::Refusal {
+                                refusal: text.clone(),
+                                extra,
+                            },
+                            PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
+                                serde_json::from_value(opaque.data.clone())?
+                            }
+                            _ => {
+                                return Err(Error::Unsupported(
+                                    "Responses 输出消息不支持此内容块".into(),
+                                ));
+                            }
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                return Ok(Message::Output(raw::OutputMessage {
+                    id: wire::required(&mut extra, "id")?,
+                    status: wire::required(&mut extra, "status")?,
+                    r#type: wire::required(&mut extra, "type")?,
+                    role: raw::AssistantRole::Assistant,
+                    content,
+                    phase: wire::take(&mut extra, "phase")?,
+                    extra,
+                }));
             }
-            let content = if blocks.len() == 1
-                && form.ends_with("_text")
-                && matches!(message.parts[0].kind, PartKind::Text(_))
-            {
-                blocks[0]["text"].clone()
+            let parts = message
+                .parts
+                .iter()
+                .map(|part| {
+                    Ok(match &part.kind {
+                        PartKind::Text(text) => raw::InputPart::InputText {
+                            text: text.clone(),
+                            extra: wire::extra(&part.metadata, PROTOCOL),
+                        },
+                        PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
+                            serde_json::from_value(opaque.data.clone())?
+                        }
+                        _ => {
+                            return Err(Error::Unsupported(
+                                "Responses 输入消息不支持此内容块".into(),
+                            ));
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if form.starts_with("input_") {
+                let role = match role {
+                    raw::Role::User => raw::InputRole::User,
+                    raw::Role::System => raw::InputRole::System,
+                    raw::Role::Developer => raw::InputRole::Developer,
+                    _ => return Err(wire::unsupported_role(message.role)),
+                };
+                Ok(Message::Input(raw::InputMessage {
+                    role,
+                    content: parts,
+                    status: wire::take_option(&mut extra, "status")?,
+                    r#type: wire::take_option(&mut extra, "type")?,
+                    extra,
+                }))
             } else {
-                Value::Array(blocks)
-            };
-            raw.insert("role".into(), json!(role));
-            raw.insert("content".into(), content);
-            Ok(serde_json::from_value(Value::Object(raw))?)
+                let content = if form.ends_with("_text")
+                    && let [raw::InputPart::InputText { text, .. }] = parts.as_slice()
+                {
+                    raw::Content::Text(text.clone())
+                } else {
+                    raw::Content::Parts(parts)
+                };
+                Ok(Message::Easy(raw::EasyInputMessage {
+                    role,
+                    content,
+                    phase: wire::take(&mut extra, "phase")?,
+                    r#type: wire::take_option(&mut extra, "type")?,
+                    extra,
+                }))
+            }
         })
         .collect()
 }

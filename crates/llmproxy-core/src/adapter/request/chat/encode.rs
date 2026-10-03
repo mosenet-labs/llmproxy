@@ -1,6 +1,13 @@
 //! IR 消息序列编码为 Chat。
 
-use serde_json::{Map, Value, json};
+use crate::ir::request::Part;
+use crate::protocol::{
+    OptionalNullable as O,
+    chat::request::message::{
+        AssistantPart, Content, ContentMessage, FunctionCall, TextPart, ToolCall, UserPart,
+    },
+};
+use serde_json::{Map, Value};
 
 use crate::{
     ir::request::{Message as IrMessage, PartKind, Role},
@@ -50,147 +57,219 @@ pub fn encode_chat(messages: &[IrMessage]) -> Result<Vec<Message>> {
             });
         }
     }
-    expanded
-        .iter()
-        .map(|message| {
-            let mut raw = wire::extra(&message.metadata, PROTOCOL);
-            let role = match message.role {
-                Role::System => "system",
-                Role::Developer => "developer",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => {
-                    if wire::form(&message.metadata, PROTOCOL) == Some("function") {
-                        "function"
-                    } else {
-                        "tool"
-                    }
-                }
-                role => return Err(wire::unsupported_role(role)),
+    expanded.iter().map(encode_message).collect()
+}
+
+/// 直接构造 Chat 的角色变体，未规范化叶子字段从元数据恢复。
+fn encode_message(message: &IrMessage) -> Result<Message> {
+    let mut extra = wire::extra(&message.metadata, PROTOCOL);
+    let form = wire::form(&message.metadata, PROTOCOL);
+    if message.role == Role::Tool {
+        let [part] = message.parts.as_slice() else {
+            return Err(Error::Unsupported("Chat 工具消息只能包含一个结果".into()));
+        };
+        let PartKind::ToolResult(result) = &part.kind else {
+            return Err(Error::Unsupported("Chat 工具消息需要工具结果".into()));
+        };
+        let content =
+            if result.content.is_object() && wire::form(&part.metadata, PROTOCOL).is_none() {
+                Value::String(serde_json::to_string(&result.content)?)
+            } else {
+                result.content.clone()
             };
-            raw.insert("role".into(), json!(role));
-            if message.role == Role::Tool {
-                let [part] = message.parts.as_slice() else {
-                    return Err(Error::Unsupported("Chat 工具消息只能包含一个结果".into()));
-                };
-                let PartKind::ToolResult(result) = &part.kind else {
-                    return Err(Error::Unsupported("Chat 工具消息需要工具结果".into()));
-                };
-                if role == "function" {
-                    raw.insert(
-                        "name".into(),
-                        json!(
-                            result
-                                .name
-                                .as_ref()
-                                .ok_or_else(|| Error::Unsupported("旧版函数结果缺少名称".into()))?
-                        ),
-                    );
-                } else {
-                    raw.insert(
-                        "tool_call_id".into(),
-                        json!(result.id.as_ref().ok_or_else(|| Error::Unsupported(
-                            "Chat 工具结果缺少调用 ID".into()
-                        ))?),
-                    );
-                }
-                let content = if result.content.is_object()
-                    && wire::form(&part.metadata, PROTOCOL).is_none()
-                {
-                    json!(serde_json::to_string(&result.content)?)
-                } else {
-                    result.content.clone()
-                };
-                raw.insert("content".into(), content);
-                return Ok(serde_json::from_value(Value::Object(raw))?);
+        return if form == Some("function") {
+            Ok(Message::Function {
+                name: result
+                    .name
+                    .clone()
+                    .ok_or_else(|| Error::Unsupported("旧版函数结果缺少名称".into()))?,
+                content: serde_json::from_value(content)?,
+                extra,
+            })
+        } else {
+            Ok(Message::Tool {
+                tool_call_id: result
+                    .id
+                    .clone()
+                    .ok_or_else(|| Error::Unsupported("Chat 工具结果缺少调用 ID".into()))?,
+                content: serde_json::from_value(content)?,
+                extra,
+            })
+        };
+    }
+    let mut parts = Vec::new();
+    let mut calls = Vec::new();
+    let mut seen_call = false;
+    for part in &message.parts {
+        match &part.kind {
+            PartKind::ToolCall(_) if message.role == Role::Assistant => {
+                seen_call = true;
+                calls.push(encode_call(part)?);
             }
-            let mut blocks = Vec::new();
-            let mut calls = Vec::new();
-            let mut seen_call = false;
-            for part in &message.parts {
-                match &part.kind {
-                    PartKind::Text(text) => {
-                        if seen_call {
-                            return Err(Error::Unsupported(
-                                "Chat 无法保持工具调用后文本的顺序".into(),
-                            ));
-                        }
-                        blocks.push(wire::encode_block(
-                            part,
-                            PROTOCOL,
-                            json!({"type":"text","text":text}),
-                        )?);
-                    }
-                    PartKind::Refusal(text) if role == "assistant" => {
-                        blocks.push(wire::encode_block(
-                            part,
-                            PROTOCOL,
-                            json!({"type":"refusal","refusal":text}),
-                        )?);
-                    }
-                    PartKind::ToolCall(call) if role == "assistant" => {
-                        seen_call = true;
-                        let id = call
-                            .id
-                            .as_ref()
-                            .ok_or_else(|| Error::Unsupported("Chat 函数调用缺少 ID".into()))?;
-                        let args = match &call.arguments {
-                            Value::String(s) => s.clone(),
-                            value => serde_json::to_string(value)?,
-                        };
-                        let mut original = wire::extra(&part.metadata, PROTOCOL);
-                        let nested = original
-                            .remove("function")
-                            .and_then(|v| v.as_object().cloned())
-                            .unwrap_or_default();
-                        let function = wire::merge(
-                            nested,
-                            wire::object(json!({"name":call.name,"arguments":args}))?,
-                        );
-                        let normalized =
-                            wire::object(json!({"id":id,"type":"function","function":function}))?;
-                        calls.push(Value::Object(wire::merge(original, normalized)));
-                    }
-                    PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
-                        if opaque.data.get("type").and_then(Value::as_str) == Some("custom")
-                            && role == "assistant"
-                        {
-                            seen_call = true;
-                            calls.push(opaque.data.clone());
-                        } else {
-                            blocks.push(opaque.data.clone());
-                        }
-                    }
-                    _ => {
-                        return Err(Error::Unsupported(format!(
-                            "Chat {role} 消息不支持此内容块"
-                        )));
-                    }
-                }
-            }
-            if !blocks.is_empty() {
-                if blocks.len() == 1
-                    && blocks[0].get("type").and_then(Value::as_str) == Some("text")
-                    && wire::form(&message.metadata, PROTOCOL) == Some("text")
-                {
-                    raw.insert("content".into(), blocks[0]["text"].clone());
-                } else {
-                    raw.insert("content".into(), Value::Array(blocks));
-                }
-            } else if !raw.contains_key("content")
-                && (role != "assistant" || wire::form(&message.metadata, PROTOCOL) == Some("parts"))
+            PartKind::Opaque(opaque)
+                if opaque.protocol == PROTOCOL
+                    && opaque.data.get("type").and_then(Value::as_str) == Some("custom")
+                    && message.role == Role::Assistant =>
             {
-                let content = if wire::form(&message.metadata, PROTOCOL) == Some("parts") {
-                    json!([])
-                } else {
-                    json!("")
-                };
-                raw.insert("content".into(), content);
+                seen_call = true;
+                calls.push(serde_json::from_value(opaque.data.clone())?);
             }
-            if !calls.is_empty() {
-                raw.insert("tool_calls".into(), Value::Array(calls));
+            _ => {
+                if seen_call && matches!(part.kind, PartKind::Text(_)) {
+                    return Err(Error::Unsupported(
+                        "Chat 无法保持工具调用后文本的顺序".into(),
+                    ));
+                }
+                parts.push(part);
             }
-            Ok(serde_json::from_value(Value::Object(raw))?)
-        })
-        .collect()
+        }
+    }
+    let name = wire::take_option(&mut extra, "name")?;
+    Ok(match message.role {
+        Role::System => Message::System(ContentMessage {
+            content: content(&parts, form)?,
+            name,
+            extra,
+        }),
+        Role::Developer => Message::Developer(ContentMessage {
+            content: content(&parts, form)?,
+            name,
+            extra,
+        }),
+        Role::User => Message::User(ContentMessage {
+            content: content(&parts, form)?,
+            name,
+            extra,
+        }),
+        Role::Assistant => {
+            let original_content = wire::take(&mut extra, "content")?;
+            let original_calls = wire::take_option(&mut extra, "tool_calls")?;
+            let content = if !parts.is_empty() || form == Some("parts") {
+                O::Value(content(&parts, form)?)
+            } else {
+                original_content
+            };
+            let tool_calls = if calls.is_empty() {
+                original_calls
+            } else {
+                Some(calls)
+            };
+            Message::Assistant {
+                audio: wire::take(&mut extra, "audio")?,
+                content,
+                function_call: wire::take(&mut extra, "function_call")?,
+                name,
+                refusal: wire::take(&mut extra, "refusal")?,
+                tool_calls,
+                extra,
+            }
+        }
+        role => return Err(wire::unsupported_role(role)),
+    })
+}
+/// 从 IR 调用直接构造函数调用类型。
+pub(in crate::adapter) fn encode_call(part: &Part) -> Result<ToolCall> {
+    let PartKind::ToolCall(call) = &part.kind else {
+        return Err(Error::Unsupported("需要函数调用".into()));
+    };
+    let id = call
+        .id
+        .clone()
+        .ok_or_else(|| Error::Unsupported("Chat 函数调用缺少 ID".into()))?;
+    let arguments = match &call.arguments {
+        Value::String(s) => s.clone(),
+        value => serde_json::to_string(value)?,
+    };
+    let mut extra = wire::extra(&part.metadata, PROTOCOL);
+    let function_extra = extra
+        .remove("function")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    Ok(ToolCall::Function {
+        id,
+        function: FunctionCall {
+            name: call.name.clone(),
+            arguments,
+            extra: function_extra,
+        },
+        extra,
+    })
+}
+/// 标量文本保留标量形态，块数组逐个构造对应类型。
+fn content<P: EncodePart>(parts: &[&Part], form: Option<&str>) -> Result<Content<P>> {
+    if form == Some("text")
+        && let [
+            Part {
+                kind: PartKind::Text(text),
+                ..
+            },
+        ] = parts
+    {
+        return Ok(Content::Text(text.clone()));
+    }
+    if parts.is_empty() && form != Some("parts") {
+        return Ok(Content::Text(String::new()));
+    }
+    Ok(Content::Parts(
+        parts
+            .iter()
+            .map(|part| P::encode(part))
+            .collect::<Result<_>>()?,
+    ))
+}
+/// Chat 三种内容块的公共编码契约。
+trait EncodePart: serde::de::DeserializeOwned {
+    fn encode(part: &Part) -> Result<Self>;
+}
+impl EncodePart for TextPart {
+    fn encode(part: &Part) -> Result<Self> {
+        let mut extra = wire::extra(&part.metadata, PROTOCOL);
+        match &part.kind {
+            PartKind::Text(text) => Ok(Self::Text {
+                text: text.clone(),
+                prompt_cache_breakpoint: wire::take(&mut extra, "prompt_cache_breakpoint")?,
+                extra,
+            }),
+            PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
+                Ok(serde_json::from_value(opaque.data.clone())?)
+            }
+            _ => Err(Error::Unsupported("Chat 内容块无法转换".into())),
+        }
+    }
+}
+impl EncodePart for UserPart {
+    fn encode(part: &Part) -> Result<Self> {
+        let mut extra = wire::extra(&part.metadata, PROTOCOL);
+        match &part.kind {
+            PartKind::Text(text) => Ok(Self::Text {
+                text: text.clone(),
+                prompt_cache_breakpoint: wire::take(&mut extra, "prompt_cache_breakpoint")?,
+                extra,
+            }),
+            PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
+                Ok(serde_json::from_value(opaque.data.clone())?)
+            }
+            _ => Err(Error::Unsupported("Chat 内容块无法转换".into())),
+        }
+    }
+}
+impl EncodePart for AssistantPart {
+    fn encode(part: &Part) -> Result<Self> {
+        let mut extra = wire::extra(&part.metadata, PROTOCOL);
+        match &part.kind {
+            PartKind::Text(text) => Ok(Self::Text {
+                text: text.clone(),
+                prompt_cache_breakpoint: wire::take(&mut extra, "prompt_cache_breakpoint")?,
+                extra,
+            }),
+            PartKind::Refusal(text) => Ok(Self::Refusal {
+                refusal: text.clone(),
+                extra,
+            }),
+            PartKind::Opaque(opaque) if opaque.protocol == PROTOCOL => {
+                Ok(serde_json::from_value(opaque.data.clone())?)
+            }
+            _ => Err(Error::Unsupported("Chat 内容块无法转换".into())),
+        }
+    }
 }

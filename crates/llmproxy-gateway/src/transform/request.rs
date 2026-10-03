@@ -92,6 +92,11 @@ impl RequestBody {
         self.body.set_codec(protocol, MessagePhase::Request);
     }
 
+    /// 目标协议与客户端不同时，按完整请求正文做 IR 转换。
+    pub fn set_cross_protocol(&mut self, source: Protocol, target: Protocol, model: &str) {
+        self.body.set_cross_request(source, target, model);
+    }
+
     /// 将路由阶段预读的前缀回放到正文过滤器，再处理当前分块。
     pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
         if let Some(rewritten) = self.replay_prefix.take() {
@@ -104,7 +109,6 @@ impl RequestBody {
             }
             *body = Some(rewritten);
         }
-        self.body.push(body, end);
-        Ok(())
+        self.body.push(body, end)
     }
 }
