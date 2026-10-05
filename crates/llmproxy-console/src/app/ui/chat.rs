@@ -404,12 +404,14 @@ pub async fn chat_history(
         loop {
             let (messages, thinking, busy) = room.snapshot();
             let usage = room.usage_snapshot();
+            let parts = room.parts_snapshot();
             let entries: Vec<_> = messages
                 .into_iter()
                 .map(|message| {
                     let thought = thinking.get(&message.id).cloned().unwrap_or_default();
                     let usage = usage.get(&message.id).cloned().unwrap_or_default();
-                    (message, thought, usage)
+                    let parts = parts.get(&message.id).cloned().unwrap_or_default();
+                    (message, thought, usage, parts)
                 })
                 .collect();
             let token = emit! {
@@ -421,8 +423,8 @@ pub async fn chat_history(
                 } else {
                     chat_message_list(label: "聊天消息", attrs: attributes! { class="pb-2" },
                         #[key(message.id.clone())]
-                        for (message, thought, usage) in entries {
-                            chat_message_entry(message: message, thought: thought, usage: usage)
+                        for (message, thought, usage, parts) in entries {
+                            chat_message_entry(message: message, thought: thought, usage: usage, parts: parts)
                         }
                     )
                 }
@@ -441,6 +443,7 @@ async fn chat_message_entry(
     message: ChatMessage,
     thought: String,
     usage: String,
+    parts: Vec<crate::chat_stream::DisplayPart>,
 ) -> Result<impl View> {
     let thought_id = format!("chat-thought-{}", message.id);
     let thought_open = signal(cx, || false);
@@ -454,7 +457,31 @@ async fn chat_message_entry(
             if message.role == ChatBubbleRole::User || message.status != ChatMessageStatus::Complete {
                 <p class="m-0 whitespace-pre-wrap break-words">(if message.content.is_empty() { if thought.is_empty() { "正在等待回复…" } else { "正在思考…" } } else { message.content.as_str() })</p>
             } else {
-                chat_markdown(source: message.content.as_str())
+                if parts.is_empty() {
+                    chat_markdown(source: message.content.as_str())
+                } else {
+                    for part in &parts {
+                        if part.title.is_empty() {
+                            chat_markdown(source: part.text.as_str())
+                        } else {
+                            <section class="my-3 rounded-lg border border-border bg-[#f9fafc] p-3" aria-label=(part.title.as_str())>
+                                <h4 class="mt-0 mb-2 text-[12px] font-semibold text-heading">(part.title.as_str())</h4>
+                                if !part.text.is_empty() {<pre class="m-0 max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5">(part.text.as_str())</pre>}
+                                if let Some(media) = &part.media {
+                                    if media.preview {
+                                        match media.kind {
+                                            llmproxy_core::ir::media::MediaKind::Image => {<img src=(media.uri.as_str()) alt=(part.title.as_str()) class="max-h-96 max-w-full rounded-md" loading="lazy">}
+                                            llmproxy_core::ir::media::MediaKind::Audio => {<audio src=(media.uri.as_str()) controls="" preload="none" aria-label=(part.title.as_str()) class="max-w-full"></audio>}
+                                            llmproxy_core::ir::media::MediaKind::Video => {<video src=(media.uri.as_str()) controls="" preload="none" aria-label=(part.title.as_str()) class="max-h-96 max-w-full rounded-md"></video>}
+                                            llmproxy_core::ir::media::MediaKind::File => {}
+                                        }
+                                    }
+                                    <a href=(media.uri.as_str()) download=(part.title.as_str()) target="_blank" rel="noopener noreferrer" class="mt-2 inline-block text-[12px] text-primary">"下载附件"</a>
+                                }
+                            </section>
+                        }
+                    }
+                }
             }
             if !usage.is_empty() {
                 <p class="mt-3 mb-0 text-[11px] text-secondary" aria-label="本轮词元用量">(usage.as_str())</p>

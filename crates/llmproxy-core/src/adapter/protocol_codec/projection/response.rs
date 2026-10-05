@@ -46,6 +46,12 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.extra(&body.extra, "response");
             if let Some(usage) = body.usage.as_option() {
                 notes.extra(&usage.extra, "usage");
+                if let Some(details) = usage.prompt_tokens_details.as_option() {
+                    notes.extra(&details.extra, "usage.prompt_tokens_details");
+                }
+                if let Some(details) = usage.completion_tokens_details.as_option() {
+                    notes.extra(&details.extra, "usage.completion_tokens_details");
+                }
             }
         }
         Source::Responses(body) => {
@@ -139,6 +145,12 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.extra(&body.extra, "response");
             if let Some(usage) = body.usage.as_option() {
                 notes.extra(&usage.extra, "usage");
+                if let Some(details) = usage.input_tokens_details.as_option() {
+                    notes.extra(&details.extra, "usage.input_tokens_details");
+                }
+                if let Some(details) = usage.output_tokens_details.as_option() {
+                    notes.extra(&details.extra, "usage.output_tokens_details");
+                }
             }
         }
         Source::Messages(body) => {
@@ -161,6 +173,12 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&usage.server_tool_use, "usage.server_tool_use");
             notes.field(&usage.service_tier, "usage.service_tier");
             notes.extra(&usage.extra, "usage");
+            if let Some(details) = usage.cache_creation.as_option() {
+                notes.extra(&details.extra, "usage.cache_creation");
+            }
+            if let Some(details) = usage.output_tokens_details.as_option() {
+                notes.extra(&details.extra, "usage.output_tokens_details");
+            }
         }
         Source::Gemini(body) => {
             response.model = body.model_version.as_option().cloned();

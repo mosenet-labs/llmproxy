@@ -11,9 +11,9 @@ pub(super) fn request_body(
     history: &[ChatMessage],
     stream: bool,
 ) -> Request {
-    let history = history
-        .iter()
-        .filter(|message| message.status == ChatMessageStatus::Complete);
+    let history = history.iter().filter(|message| {
+        message.status == ChatMessageStatus::Complete && !message.content.is_empty()
+    });
     match protocol {
         Protocol::OpenAiChat => Request::Chat(Box::new(chat::Request {
             model: alias.to_owned(),

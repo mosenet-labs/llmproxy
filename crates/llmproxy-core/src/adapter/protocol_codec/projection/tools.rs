@@ -18,7 +18,7 @@ pub(super) fn decode(source: &Request, notes: &mut Notes) -> Vec<Function> {
                 let path = format!("tools[{i}]");
                 if let ChatTool::Function { function, extra } = tool {
                     notes.extra(extra, &path);
-                    notes.extra(&function.extra, &path);
+                    notes.extra(&function.extra, &format!("{path}.function"));
                     add(
                         &mut result,
                         notes,

@@ -32,6 +32,29 @@ fn database_url(config: &HashMap<String, String>) -> &str {
     config.get(key).expect("联调数据库已配置")
 }
 
+/// 只报告固定的错误类别，不输出可能包含凭据、提示词或请求内容的 Provider 正文。
+async fn provider_failure(response: reqwest::Response) -> String {
+    let status = response.status().as_u16();
+    let bytes = response.bytes().await.unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+    let reason = if text.contains("quota")
+        && (text.contains("limit: 0") || text.contains("\"quotavalue\":\"0\""))
+    {
+        "模型配额为零"
+    } else if text.contains("region") || text.contains("location is not supported") {
+        "地区限制"
+    } else if text.contains("insufficient credits") || text.contains("credit limit") {
+        "余额或消费限额"
+    } else if text.contains("resource_exhausted") || text.contains("rate limit") {
+        "配额或限流"
+    } else if text.contains("permission_denied") || text.contains("permission_error") {
+        "权限拒绝"
+    } else {
+        "未分类的 Provider 拒绝"
+    };
+    format!("HTTP {status}（{reason}）")
+}
+
 /// 使用模拟 Provider 向已配置 OpenObserve 写入测试遥测，再读取实际存储结果。
 /// 不调用真实模型，不修改 PostgreSQL；认证信息不进入测试输出。
 /// 参考：https://openobserve.ai/docs/reference/api/search/search/
@@ -319,14 +342,36 @@ async fn live_database(config: &HashMap<String, String>) -> nonstream::Database 
     });
     let database = Database::with_master_key(master_key).await;
     for target in ALL {
+        let selected_id = config
+            .get(&format!(
+                "LLMPROXY_LIVE_MODEL_ID_{}",
+                target.as_str().to_ascii_uppercase()
+            ))
+            .map(|value| value.parse::<i64>().expect("测试模型 ID 必须是整数"));
         let model = models
             .iter()
-            .find(|model| model.provider_enabled && model.protocols.contains(&target))
+            .find(|model| {
+                model.provider_enabled
+                    && model.protocols.contains(&target)
+                    && selected_id.is_none_or(|id| model.id == id)
+            })
             .unwrap_or_else(|| panic!("缺少可用的 {} 模型配置", target.as_str()));
         let loaded = store
             .load_model_route(model.id, target)
             .await
             .expect("读取目标模型");
+        // 仅覆盖临时验收路由的模型名；必须同时指定配置 ID，避免误用其他 Provider。
+        let upstream_model = config
+            .get(&format!(
+                "LLMPROXY_LIVE_UPSTREAM_MODEL_{}",
+                target.as_str().to_ascii_uppercase()
+            ))
+            .map(|name| {
+                assert!(selected_id.is_some(), "覆盖模型名时必须指定配置模型 ID");
+                assert!(!name.trim().is_empty(), "验收模型名不能为空");
+                name.as_str()
+            })
+            .unwrap_or(&loaded.upstream_model_id);
         let active = loaded.provider.expect("Provider 必须已启用");
         let provider = providers
             .iter()
@@ -351,14 +396,14 @@ async fn live_database(config: &HashMap<String, String>) -> nonstream::Database 
                     write_timeout_ms: active.write_timeout_ms,
                 },
                 target,
-                &loaded.upstream_model_id,
+                upstream_model,
             )
             .await;
         println!(
             "selected {}: {} / {}",
             target.as_str(),
             model.provider_name,
-            model.upstream_model_id
+            upstream_model
         );
     }
     database
@@ -513,6 +558,271 @@ async fn configured_gemini_nonstream_capabilities() {
         failures.is_empty(),
         "真实专项未通过：{}",
         failures.join("; ")
+    );
+}
+
+/// 验证当前 Gemini 模型实际执行代码或使用推理配置，HTTP 200 不作为唯一成功条件。
+/// 参考：https://ai.google.dev/api/generate-content#Tool
+/// 参考：https://ai.google.dev/api/generate-content#ThinkingConfig
+#[tokio::test]
+#[ignore = "真实服务端工具与推理联调，显式运行会产生 token 费用"]
+async fn configured_gemini_native_capabilities() {
+    use llmproxy_core::ir::{message::PartKind, response::Item};
+    use llmproxy_core::protocol::Protocol;
+    use nonstream::{ALL, alias, fixtures, path};
+    let config = configuration();
+    if let Some(pair) = config.get("LLMPROXY_LIVE_PAIR") {
+        assert!(
+            ALL.iter()
+                .any(|source| pair == &format!("{}:gemini", source.as_str())),
+            "专项的目标必须是 Gemini"
+        );
+    }
+    let selected = config.get("LLMPROXY_LIVE_CAPABILITY").map(String::as_str);
+    assert!(
+        selected.is_none_or(|value| matches!(value, "code" | "reasoning" | "budget")),
+        "未知专项筛选条件"
+    );
+    let database = live_database(&config).await;
+    let gateway =
+        support::Gateway::database(&database.url, config.get("LLMPROXY_MASTER_KEY").unwrap());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .unwrap();
+    let mut failures = Vec::new();
+    let mut attempted = 0;
+    for source in ALL {
+        if config
+            .get("LLMPROXY_LIVE_PAIR")
+            .is_some_and(|pair| pair != &format!("{}:gemini", source.as_str()))
+        {
+            continue;
+        }
+        for capability in ["code", "reasoning", "budget"] {
+            if selected.is_some_and(|selected| selected != capability)
+                || (capability == "code" && source == Protocol::OpenAiChat)
+                // 默认等级模型可能不接受数字预算；该专项需显式选择支持预算的模型。
+                || (capability == "budget" && selected.is_none())
+                || (capability == "budget"
+                    && !matches!(source, Protocol::AnthropicMessages | Protocol::Gemini))
+            {
+                continue;
+            }
+            attempted += 1;
+            let alias = alias(source, Protocol::Gemini);
+            let body = match capability {
+                "code" => fixtures::code_request(source, &alias),
+                "budget" => fixtures::reasoning_budget_request(source, &alias),
+                _ => fixtures::reasoning_request(source, &alias),
+            };
+            let result = async {
+                let response = client.post(format!("http://{}{}", gateway.address, path(source, &alias)))
+                    .header("content-type", "application/json").body(serde_json::to_vec(&body).unwrap()).send().await.map_err(|_| "连接或读取超时")?;
+                if !response.status().is_success() {return Err(provider_failure(response).await);}
+                let bytes = response.bytes().await.map_err(|_| "读取响应失败")?;
+                let ir = fixtures::decode_response(source, &bytes)?;
+                let text = ir.messages.iter().flat_map(|m| &m.parts).filter_map(|part| match &part.kind {
+                    PartKind::Text(text) => Some(text.as_str()),
+                    PartKind::ServerOutput(output) => output.text.as_deref(), _ => None,
+                }).chain(ir.items.iter().filter_map(|item| match item {
+                    Item::ServerOutput(output) => output.text.as_deref(), _ => None,
+                })).collect::<String>();
+                if !text.contains("1073") {return Err("未返回计算结果（已隐藏正文）".into());}
+                if ir.messages.iter().flat_map(|m| &m.parts).any(|p| matches!(p.kind, PartKind::ToolCall(_))) || ir.items.iter().any(|item| matches!(item, Item::ToolCall {..})) {
+                    return Err("服务端执行被误表达为客户端工具调用".into());
+                }
+                if capability == "code" {
+                    let has_execution = if source == Protocol::Gemini {
+                        ir.messages.iter().flat_map(|m| &m.parts).any(|p| matches!(&p.kind, PartKind::ServerOutput(output) if output.kind == llmproxy_core::ir::server_output::Kind::ExecutionResult))
+                    } else {
+                        // 目标客户端只收到可见文本；独立标记确保不是模型直接口算的最终正文。
+                        text.contains("OUTCOME_OK") && text.contains("代码")
+                    };
+                    if !has_execution {return Err("未观察到真实代码执行记录".into());}
+                }
+                let usage = ir.usage.ok_or("缺少用量")?;
+                if usage.input_tokens.is_none_or(|n| n == 0) || usage.output_tokens.is_none_or(|n| n == 0) {return Err("缺少实际输入输出用量".into());}
+                if matches!(capability, "reasoning" | "budget") && usage.output_details.reasoning_tokens.is_none_or(|n| n == 0) {return Err("未报告实际推理用量".into());}
+                println!("PASS {capability} {} -> gemini input={:?} output={:?} reasoning={:?}", source.as_str(), usage.input_tokens, usage.output_tokens, usage.output_details.reasoning_tokens);
+                Ok::<_, String>(())
+            }.await;
+            if let Err(error) = result {
+                failures.push(format!("{capability} {}: {error}", source.as_str()));
+            }
+        }
+    }
+    drop(gateway);
+    assert!(attempted > 0, "筛选组合没有可验收能力");
+    assert!(
+        failures.is_empty(),
+        "真实专项未通过：{}",
+        failures.join("; ")
+    );
+}
+
+/// 显式断点的短/长 TTL 分别创建缓存，再重复完全相同的前缀验证命中。
+/// 不等待 TTL 到期；核对 Provider 返回的 TTL 写入桶，不将模拟计数当作真实命中。
+/// 参考：https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+#[tokio::test]
+#[ignore = "需要支持缓存写入的原厂 Messages 模型；显式运行产生约四次长输入费用"]
+async fn configured_messages_cache_creation_and_hit() {
+    use llmproxy_core::protocol::Protocol;
+    use nonstream::{alias, fixtures, path};
+    let mut config = configuration();
+    let key = "LLMPROXY_LIVE_MODEL_ID_ANTHROPIC_MESSAGES";
+    if !config.contains_key(key) {
+        let store = ProviderStore::connect(
+            database_url(&config),
+            config.get("LLMPROXY_MASTER_KEY").expect("主密钥"),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("配置库连接失败"));
+        let models = store.list_models().await.expect("读取已配置模型");
+        let model = models.iter().find(|model| model.provider_enabled && model.protocols.contains(&Protocol::AnthropicMessages) && model.upstream_model_id.to_ascii_lowercase().contains("claude"))
+            .expect("缺少支持真实缓存创建的 Messages 模型；请配置 Claude 模型或设置 LLMPROXY_LIVE_MODEL_ID_ANTHROPIC_MESSAGES");
+        config.insert(key.into(), model.id.to_string());
+    }
+    let database = live_database(&config).await;
+    let gateway =
+        support::Gateway::database(&database.url, config.get("LLMPROXY_MASTER_KEY").unwrap());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .unwrap();
+    let alias = alias(Protocol::AnthropicMessages, Protocol::AnthropicMessages);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut failures = Vec::new();
+    for ttl in ["5m", "1h"] {
+        // 超过当前 Claude 的最低缓存前缀长度；内容为无用户数据的合成记录。
+        let prefix = format!(
+            "Synthetic cache acceptance {nonce} {ttl}. Ignore the records and answer the final user question.\n"
+        ) + &(0..1100)
+            .map(|index| {
+                format!("Record {index}: amber birch cedar delta ember forest granite harbor.\n")
+            })
+            .collect::<String>();
+        let mut body = fixtures::request(
+            Protocol::AnthropicMessages,
+            &alias,
+            "Reply with exactly OK.",
+        );
+        body["max_tokens"] = serde_json::json!(32);
+        body["system"] = serde_json::json!([{"type":"text","text":prefix,"cache_control":{"type":"ephemeral","ttl":ttl}}]);
+        for attempt in 0..2 {
+            let result = async {
+                let response = client.post(format!("http://{}{}", gateway.address, path(Protocol::AnthropicMessages, &alias)))
+                    .header("content-type", "application/json").body(serde_json::to_vec(&body).unwrap()).send().await.map_err(|_| "请求超时")?;
+                if !response.status().is_success() {return Err(provider_failure(response).await);}
+                let bytes = response.bytes().await.map_err(|_| "读取响应失败")?;
+                let ir = fixtures::decode_response(Protocol::AnthropicMessages, &bytes)?;
+                if !ir.messages.iter().flat_map(|m| &m.parts).any(|part| matches!(&part.kind, llmproxy_core::ir::message::PartKind::Text(text) if text.trim() == "OK")) {return Err("回答不符合预期（已隐藏正文）".into());}
+                let usage = ir.usage.ok_or("缺少用量")?;
+                let bucket = if ttl == "5m" {usage.cache.write_short_input_tokens} else {usage.cache.write_long_input_tokens};
+                if attempt == 0 && (usage.cache.write_input_tokens.is_none_or(|n| n == 0) || bucket.is_none_or(|n| n == 0)) {return Err("未发生真实缓存创建或未报告对应 TTL 写入桶".into());}
+                if attempt == 1 && usage.cache.read_input_tokens.is_none_or(|n| n == 0) {return Err("重复前缀未产生真实缓存命中".into());}
+                println!("PASS cache ttl={ttl} attempt={attempt} read={:?} write={:?} short={:?} long={:?}", usage.cache.read_input_tokens, usage.cache.write_input_tokens, usage.cache.write_short_input_tokens, usage.cache.write_long_input_tokens);
+                Ok::<_, String>(())
+            }.await;
+            if let Err(error) = result {
+                failures.push(format!("{ttl} attempt {attempt}: {error}"));
+                break;
+            }
+        }
+    }
+    drop(gateway);
+    assert!(
+        failures.is_empty(),
+        "缓存真实验收未通过：{}",
+        failures.join("; ")
+    );
+}
+
+/// 原生图片输出必须含可解码的真实图片字节，并保留模型报告的用量。
+/// 图片生成模型必须显式选择；不使用普通文本模型的 HTTP 200 代替图片验收。
+/// 参考：https://ai.google.dev/api/generate-content#GenerationConfig
+/// 参考：https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image
+#[tokio::test]
+#[ignore = "需要 Gemini 图片模型；显式运行产生一次图片生成费用"]
+async fn configured_gemini_image_output() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use llmproxy_core::{
+        ir::{media::MediaSource, message::PartKind},
+        protocol::Protocol,
+    };
+    use nonstream::{alias, fixtures, path};
+    let config = configuration();
+    assert!(
+        config.contains_key("LLMPROXY_LIVE_MODEL_ID_GEMINI")
+            || config.contains_key("LLMPROXY_LIVE_UPSTREAM_MODEL_GEMINI"),
+        "图片专项必须显式选择模型"
+    );
+    let database = live_database(&config).await;
+    let gateway =
+        support::Gateway::database(&database.url, config.get("LLMPROXY_MASTER_KEY").unwrap());
+    let alias = alias(Protocol::Gemini, Protocol::Gemini);
+    let mut body = fixtures::request(
+        Protocol::Gemini,
+        &alias,
+        "Generate one simple image of a solid blue square on a plain white background.",
+    );
+    body["generationConfig"] = serde_json::json!({"responseModalities":["TEXT","IMAGE"]});
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://{}{}",
+            gateway.address,
+            path(Protocol::Gemini, &alias)
+        ))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&body).unwrap())
+        .send()
+        .await
+        .unwrap_or_else(|_| panic!("图片请求连接或读取失败"));
+    if !response.status().is_success() {
+        let error = provider_failure(response).await;
+        drop(gateway);
+        panic!("图片请求 {error}");
+    }
+    let ir = fixtures::decode_response(Protocol::Gemini, &response.bytes().await.unwrap())
+        .expect("图片响应解码");
+    let image = ir
+        .messages
+        .iter()
+        .flat_map(|m| &m.parts)
+        .find_map(|part| match &part.kind {
+            PartKind::Media(media) if media.kind == llmproxy_core::ir::media::MediaKind::Image => {
+                Some(media)
+            }
+            _ => None,
+        })
+        .expect("未收到原生图片载体");
+    let MediaSource::Base64 { data, mime_type } = &image.source else {
+        panic!("图片未返回内联字节")
+    };
+    let bytes = STANDARD.decode(data).expect("图片 Base64 编码");
+    assert!(
+        match mime_type.as_deref() {
+            Some("image/png") => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            Some("image/jpeg") => bytes.starts_with(b"\xff\xd8\xff"),
+            Some("image/webp") => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+            _ => false,
+        },
+        "图片 MIME 与文件头不符"
+    );
+    let usage = ir.usage.expect("缺少图片生成用量");
+    assert!(usage.input_tokens.is_some_and(|n| n > 0));
+    assert!(usage.output_tokens.is_some_and(|n| n > 0));
+    println!(
+        "PASS image output bytes={} input={:?} output={:?}",
+        bytes.len(),
+        usage.input_tokens,
+        usage.output_tokens
     );
 }
 

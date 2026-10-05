@@ -176,6 +176,76 @@ async fn valid_media_and_schema_cross_the_http_boundary() {
 }
 
 #[tokio::test]
+async fn numeric_reasoning_budget_is_preserved_or_warned_without_inventing_effort() {
+    let database = Database::new().await;
+    let mut upstreams = Vec::new();
+    let mut receivers = Vec::new();
+    for target in ALL {
+        let (sender, received) = std::sync::mpsc::channel();
+        let upstream = Mock::raw(move |mut stream| {
+            let Ok(request) = support::Request::read(&mut stream) else {
+                return;
+            };
+            sender.send(request).unwrap();
+            respond(
+                &mut stream,
+                200,
+                "Content-Type: application/json\r\n",
+                &serde_json::to_vec(&fixtures::response(target, false)).unwrap(),
+            );
+        });
+        database
+            .add_provider(provider(target, upstream.address), target, "upstream-model")
+            .await;
+        upstreams.push(upstream);
+        receivers.push(received);
+    }
+    let gateway = Gateway::database(&database.url, MASTER_KEY);
+    for (target, received) in ALL.into_iter().zip(receivers) {
+        for source in [Protocol::AnthropicMessages, Protocol::Gemini] {
+            let alias = alias(source, target);
+            let response = gateway.request(
+                "POST",
+                &path(source, &alias),
+                "Content-Type: application/json\r\n",
+                &serde_json::to_vec(&fixtures::reasoning_budget_request(source, &alias)).unwrap(),
+            );
+            assert_eq!(response.status, 200, "{source:?} -> {target:?}");
+            response.body();
+            let native: Value =
+                serde_json::from_slice(&received.recv_timeout(DEADLINE).unwrap().body).unwrap();
+            match target {
+                Protocol::OpenAiChat => assert!(native["reasoning_effort"].is_null()),
+                Protocol::OpenAiResponses => assert!(native["reasoning"]["effort"].is_null()),
+                Protocol::AnthropicMessages => {
+                    assert_eq!(native["thinking"]["type"], "enabled");
+                    assert_eq!(native["thinking"]["budget_tokens"], 1024);
+                    assert_eq!(native["max_tokens"], 2048);
+                }
+                Protocol::Gemini => {
+                    assert_eq!(
+                        native["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+                        1024
+                    );
+                    assert!(
+                        native["generationConfig"]["thinkingConfig"]["thinkingLevel"].is_null()
+                    );
+                    assert_eq!(native["generationConfig"]["maxOutputTokens"], 2048);
+                }
+            }
+        }
+    }
+    // 沿用已确认的有损兼容规则：无法等价换算时告警，不补造努力等级。
+    let warnings = gateway
+        .logs()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["level"] == "WARN" && event["fields"]["path"] == "reasoning.budget")
+        .count();
+    assert_eq!(warnings, 4);
+}
+
+#[tokio::test]
 async fn cache_write_counts_and_ttl_are_preserved_in_telemetry_before_target_projection() {
     let database = Database::new().await;
     let (upstream, received) = Mock::http(|_, stream| {
@@ -239,5 +309,138 @@ async fn cache_write_counts_and_ttl_are_preserved_in_telemetry_before_target_pro
         assert_eq!(event["fields"]["cache_write_input_tokens"], 3);
         assert_eq!(event["fields"]["cache_write_short_input_tokens"], 1);
         assert_eq!(event["fields"]["cache_write_long_input_tokens"], 2);
+    }
+}
+
+#[tokio::test]
+async fn native_execution_outputs_remain_visible_and_do_not_request_client_tools() {
+    use llmproxy_core::ir::{message::PartKind, response::Item};
+    let database = Database::new().await;
+    let mut upstreams = Vec::new();
+    for target in ALL.into_iter().filter(|p| *p != Protocol::OpenAiChat) {
+        let (upstream, _) = Mock::http(move |_, stream| {
+            respond(
+                stream,
+                200,
+                "Content-Type: application/json\r\n",
+                &serde_json::to_vec(&fixtures::code_response(target)).unwrap(),
+            );
+        });
+        database
+            .add_provider(provider(target, upstream.address), target, "upstream-model")
+            .await;
+        upstreams.push(upstream);
+    }
+    let gateway = Gateway::database(&database.url, MASTER_KEY);
+    for target in ALL.into_iter().filter(|p| *p != Protocol::OpenAiChat) {
+        for source in ALL {
+            let alias = alias(source, target);
+            let response = gateway.request(
+                "POST",
+                &path(source, &alias),
+                "Content-Type: application/json\r\n",
+                &serde_json::to_vec(&fixtures::request(source, &alias, "calculate")).unwrap(),
+            );
+            assert_eq!(response.status, 200, "{source:?} -> {target:?}");
+            let bytes = response.body();
+            let ir = fixtures::decode_response(source, &bytes).unwrap();
+            let visible = ir
+                .messages
+                .iter()
+                .flat_map(|m| &m.parts)
+                .filter_map(|p| match &p.kind {
+                    PartKind::Text(text) => Some(text.as_str()),
+                    PartKind::ServerOutput(output) => output.text.as_deref(),
+                    _ => None,
+                })
+                .chain(ir.items.iter().filter_map(|item| match item {
+                    Item::ServerOutput(output) => output.text.as_deref(),
+                    _ => None,
+                }))
+                .collect::<String>();
+            assert!(visible.contains("1073"), "{source:?} -> {target:?}");
+            assert!(
+                !ir.messages
+                    .iter()
+                    .flat_map(|m| &m.parts)
+                    .any(|p| matches!(p.kind, PartKind::ToolCall(_)))
+            );
+            assert!(
+                !ir.items
+                    .iter()
+                    .any(|item| matches!(item, Item::ToolCall { .. }))
+            );
+            if source != target {
+                assert!(!String::from_utf8_lossy(&bytes).contains("private"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn output_media_never_succeeds_after_losing_its_native_body() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let database = Database::new().await;
+    let mut upstreams = Vec::new();
+    for target in [Protocol::Gemini, Protocol::OpenAiChat] {
+        let (upstream, _) = Mock::http(move |_, stream| {
+            let mut body = fixtures::response(target, false);
+            if target == Protocol::Gemini {
+                body["candidates"][0]["content"]["parts"] = json!([{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(include_bytes!("nonstream/assets/blue.png"))}}]);
+            } else {
+                body["choices"][0]["message"]["content"] = Value::Null;
+                body["choices"][0]["message"]["audio"] = json!({"id":"audio-private","data":"YQ==","expires_at":100,"transcript":"hello"});
+            }
+            respond(
+                stream,
+                200,
+                "Content-Type: application/json\r\nETag: private-provider\r\n",
+                &serde_json::to_vec(&body).unwrap(),
+            );
+        });
+        database
+            .add_provider(provider(target, upstream.address), target, "upstream-model")
+            .await;
+        upstreams.push(upstream);
+    }
+    let gateway = Gateway::database(&database.url, MASTER_KEY);
+    for target in [Protocol::Gemini, Protocol::OpenAiChat] {
+        for source in ALL {
+            let alias = alias(source, target);
+            let response = gateway.request(
+                "POST",
+                &path(source, &alias),
+                "Content-Type: application/json\r\n",
+                &serde_json::to_vec(&fixtures::request(source, &alias, "generate media")).unwrap(),
+            );
+            assert_eq!(
+                response.status,
+                if source == target { 200 } else { 502 },
+                "{source:?} -> {target:?}"
+            );
+            if source != target {
+                assert!(!support::values(&response.headers, "etag").contains(&"private-provider"));
+            }
+            let bytes = response.body();
+            if source == target {
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                if target == Protocol::Gemini {
+                    assert_eq!(
+                        STANDARD
+                            .decode(
+                                body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                                    .as_str()
+                                    .unwrap()
+                            )
+                            .unwrap(),
+                        include_bytes!("nonstream/assets/blue.png")
+                    );
+                } else {
+                    assert_eq!(body["choices"][0]["message"]["audio"]["data"], "YQ==");
+                }
+            } else {
+                assert!(!String::from_utf8_lossy(&bytes).contains("audio-private"));
+            }
+        }
     }
 }

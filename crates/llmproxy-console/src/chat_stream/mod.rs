@@ -1,6 +1,8 @@
 //! 控制台聊天的 HTTP 边界：非流式读取整包，已有同协议流式路径逐事件读取。
 mod completed;
+mod display;
 mod request;
+pub(crate) use display::DisplayPart;
 use llmproxy_core::protocol::Protocol;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use request::{request_body, with_request_body};
@@ -25,6 +27,8 @@ pub(crate) struct ChatReply {
     pub summary: String,
     /// 经 IR 统一口径的本轮统计，缺失计数不补零。
     pub usage: Option<llmproxy_core::ir::usage::Usage>,
+    /// 工具、媒体和服务端执行内容；展示标签不进入下一轮文本历史。
+    pub parts: Vec<DisplayPart>,
 }
 
 impl ChatReply {
@@ -165,6 +169,7 @@ fn event(protocol: Protocol, packet: &str) -> Result<(ChatReply, bool), String> 
             thinking: thinking.unwrap_or_default().to_owned(),
             summary: summary.unwrap_or_default().to_owned(),
             usage: None,
+            parts: Vec::new(),
         },
         done,
     ))

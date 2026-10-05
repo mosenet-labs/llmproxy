@@ -23,6 +23,7 @@ pub(super) fn decode(source: &Request, generation: &mut Generation, notes: &mut 
                         extra,
                     }) => {
                         notes.extra(extra, "tool_choice");
+                        notes.extra(&function.extra, "tool_choice.function");
                         Some(ToolChoice::Named(function.name.clone()))
                     }
                     c::ToolChoice::Specific(c::SpecificToolChoice::AllowedTools {
@@ -31,6 +32,19 @@ pub(super) fn decode(source: &Request, generation: &mut Generation, notes: &mut 
                     }) => {
                         notes.extra(extra, "tool_choice");
                         notes.extra(&allowed_tools.extra, "tool_choice.allowed_tools");
+                        for (index, tool) in allowed_tools.tools.iter().enumerate() {
+                            let path = format!("tool_choice.allowed_tools.tools[{index}]");
+                            notes.object_extra(tool, &["type", "function"], &path);
+                            if let Some(function) =
+                                tool.get("function").and_then(serde_json::Value::as_object)
+                            {
+                                notes.object_extra(
+                                    function,
+                                    &["name"],
+                                    &format!("{path}.function"),
+                                );
+                            }
+                        }
                         allowed(
                             &allowed_tools.mode,
                             allowed_tools.tools.iter().map(|tool| {
@@ -91,6 +105,9 @@ pub(super) fn decode(source: &Request, generation: &mut Generation, notes: &mut 
                     mode(value, notes)
                 } else if choice.get("type").and_then(serde_json::Value::as_str) == Some("function")
                 {
+                    if let Some(object) = choice.as_object() {
+                        notes.object_extra(object, &["type", "name"], "tool_choice");
+                    }
                     choice
                         .get("name")
                         .and_then(serde_json::Value::as_str)
@@ -102,20 +119,34 @@ pub(super) fn decode(source: &Request, generation: &mut Generation, notes: &mut 
                 } else if choice.get("type").and_then(serde_json::Value::as_str)
                     == Some("allowed_tools")
                 {
+                    if let Some(object) = choice.as_object() {
+                        notes.object_extra(object, &["type", "mode", "tools"], "tool_choice");
+                    }
                     match (
                         choice.get("mode").and_then(serde_json::Value::as_str),
                         choice.get("tools").and_then(serde_json::Value::as_array),
                     ) {
-                        (Some(mode), Some(tools)) => allowed(
-                            mode,
-                            tools.iter().map(|tool| {
-                                (
-                                    tool.get("type").and_then(serde_json::Value::as_str),
-                                    tool.get("name").and_then(serde_json::Value::as_str),
-                                )
-                            }),
-                            notes,
-                        ),
+                        (Some(mode), Some(tools)) => {
+                            for (index, tool) in tools.iter().enumerate() {
+                                if let Some(object) = tool.as_object() {
+                                    notes.object_extra(
+                                        object,
+                                        &["type", "name"],
+                                        &format!("tool_choice.tools[{index}]"),
+                                    );
+                                }
+                            }
+                            allowed(
+                                mode,
+                                tools.iter().map(|tool| {
+                                    (
+                                        tool.get("type").and_then(serde_json::Value::as_str),
+                                        tool.get("name").and_then(serde_json::Value::as_str),
+                                    )
+                                }),
+                                notes,
+                            )
+                        }
                         _ => {
                             notes.reject("tool_choice", "允许列表缺少模式或工具");
                             None

@@ -2,14 +2,10 @@
 use super::ChatReply;
 use llmproxy_core::{
     adapter::protocol_codec::ProtocolCodec,
-    protocol::{
-        OptionalNullable as O, Protocol, Response,
-        messages::response::message::{ContentBlock, KnownContentBlock},
-        responses::response::body::OutputItem,
-    },
+    protocol::{Protocol, Response},
 };
 
-/// 用具体协议读取显示内容，通过整体 IR 取得相同口径的 cache / usage。
+/// HTTP 边界解析协议类型，再通过整体 IR 取得正文、展示块和统一 cache / usage。
 pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, String> {
     let parsed: serde_json::Result<Response> = (|| {
         Ok(match protocol {
@@ -36,136 +32,38 @@ pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, Stri
         Status::Completed | Status::Incomplete => {}
     }
     let mut reply = ChatReply::default();
-    match &body {
-        Response::Chat(body) => {
-            if let Some(choice) = body.choices.iter().min_by_key(|c| c.index) {
-                reply.content = choice
-                    .message
-                    .content
-                    .as_option()
-                    .cloned()
-                    .unwrap_or_default();
-                if let Some(refusal) = choice.message.refusal.as_option() {
-                    reply.content.push_str(refusal);
-                }
-                reply.thinking = choice
-                    .message
-                    .extra
-                    .get("reasoning_content")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .into();
-                if reply.content.is_empty() {
-                    reply.content = finish_text(&choice.finish_reason).into();
-                }
-            }
+    super::display::read(&ir, &mut reply);
+    if let Response::Chat(body) = &body
+        && let Some(audio) = body
+            .choices
+            .iter()
+            .min_by_key(|choice| choice.index)
+            .and_then(|choice| choice.message.audio.as_option())
+    {
+        super::display::chat_audio(audio, &mut reply);
+    }
+    if reply.content.is_empty()
+        && reply.parts.is_empty()
+        && let Some(candidate) = ir.candidates.iter().min_by_key(|candidate| candidate.index)
+    {
+        use llmproxy_core::ir::response::FinishReason;
+        reply.content = match candidate.finish_reason {
+            FinishReason::Length => "已达到输出上限，本次没有可显示的回答",
+            FinishReason::Filtered | FinishReason::Refusal => "本次回复被拒绝或过滤",
+            _ => "",
         }
-        Response::Responses(body) => {
-            if body.error.as_option().is_some() {
-                return Err("Provider 返回了生成错误".into());
-            }
-            for item in &body.output {
-                match item {
-                    OutputItem::Message(message) => {
-                        for part in &message.content {
-                            use llmproxy_core::protocol::responses::request::OutputPart;
-                            match part {
-                                OutputPart::OutputText { text, .. } => reply.content.push_str(text),
-                                OutputPart::Refusal { refusal, .. } => {
-                                    reply.content.push_str(refusal)
-                                }
-                            }
-                        }
-                    }
-                    OutputItem::Other(item)
-                        if item.get("type").and_then(serde_json::Value::as_str)
-                            == Some("reasoning") =>
-                    {
-                        for part in item
-                            .get("summary")
-                            .and_then(serde_json::Value::as_array)
-                            .into_iter()
-                            .flatten()
-                        {
-                            if let Some(text) = part.get("text").and_then(serde_json::Value::as_str)
-                            {
-                                reply.summary.push_str(text);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if reply.content.is_empty()
-                && let Some(details) = body.incomplete_details.as_option()
-            {
-                reply.content = finish_text(&details.reason).into();
-            }
-        }
-        Response::Messages(body) => {
-            for part in &body.content {
-                match part {
-                    ContentBlock::Known(KnownContentBlock::Text { text, .. }) => {
-                        reply.content.push_str(text)
-                    }
-                    ContentBlock::Known(KnownContentBlock::Thinking { thinking, .. }) => {
-                        reply.thinking.push_str(thinking)
-                    }
-                    _ => {}
-                }
-            }
-            if reply.content.is_empty()
-                && let Some(reason) = body.stop_reason.as_option()
-            {
-                reply.content = finish_text(reason).into();
-            }
-        }
-        Response::Gemini(body) => {
-            if let Some(candidate) = body.candidates.as_option().and_then(|v| {
-                v.iter()
-                    .min_by_key(|c| c.index.as_option().copied().unwrap_or(0))
-            }) {
-                if let Some(content) = candidate.content.as_option() {
-                    for part in &content.parts {
-                        if let Some(text) = part.text.as_option() {
-                            if part.thought == O::Value(true) {
-                                reply.thinking.push_str(text);
-                            } else {
-                                reply.content.push_str(text);
-                            }
-                        }
-                    }
-                }
-                if reply.content.is_empty()
-                    && let Some(reason) = candidate.finish_reason.as_option()
-                {
-                    reply.content = finish_text(reason).into();
-                }
-            }
-            if reply.content.is_empty() && body.prompt_feedback.as_option().is_some() {
-                reply.content = "输入被 Provider 阻止，未生成回复".into();
-            }
-        }
+        .into();
     }
     reply.usage = ir.usage;
-    if reply.content.is_empty() && reply.thinking.is_empty() && reply.summary.is_empty() {
+    if reply.content.is_empty()
+        && reply.thinking.is_empty()
+        && reply.summary.is_empty()
+        && reply.parts.is_empty()
+    {
         return Err("上游未返回可显示的文本内容".into());
     }
     Ok(reply)
 }
-/// 无正文的截断和拒绝仍应有可理解的页面提示。
-fn finish_text(reason: &str) -> &'static str {
-    match reason {
-        "length" | "max_tokens" | "max_output_tokens" | "MAX_TOKENS" => {
-            "已达到输出上限，本次没有可显示的回答"
-        }
-        "content_filter" | "refusal" | "SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" => {
-            "本次回复被拒绝或过滤"
-        }
-        _ => "",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +87,88 @@ mod tests {
             .unwrap_err();
             assert!(!error.contains("private-provider-detail"));
         }
+    }
+
+    #[test]
+    fn tool_only_replies_are_visible_in_all_four_protocols() {
+        use serde_json::json;
+        for (protocol, body) in [
+            (
+                Protocol::OpenAiChat,
+                json!({"id":"c","created":1,"model":"m","object":"chat.completion","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"type":"function","id":"call","function":{"name":"lookup","arguments":"{\"q\":\"test\"}"}}]}}]}),
+            ),
+            (
+                Protocol::OpenAiResponses,
+                json!({"id":"r","created_at":1,"model":"m","object":"response","status":"completed","output":[{"type":"function_call","call_id":"call","name":"lookup","arguments":"{\"q\":\"test\"}","status":"completed"}]}),
+            ),
+            (
+                Protocol::AnthropicMessages,
+                json!({"id":"m","type":"message","role":"assistant","model":"m","content":[{"type":"tool_use","id":"call","name":"lookup","input":{"q":"test"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}),
+            ),
+            (
+                Protocol::Gemini,
+                json!({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call","name":"lookup","args":{"q":"test"}},"thoughtSignature":"private-signature"}]},"finishReason":"STOP"}]}),
+            ),
+        ] {
+            let reply = decode(protocol, &serde_json::to_vec(&body).unwrap()).unwrap();
+            assert!(reply.content.is_empty());
+            assert_eq!(reply.parts.len(), 1);
+            assert_eq!(reply.parts[0].title, "工具调用 · lookup");
+            assert!(reply.parts[0].text.contains("test"));
+            assert!(!format!("{:?}", reply.parts).contains("private-signature"));
+        }
+    }
+
+    #[test]
+    fn lowest_candidate_keeps_text_media_and_tool_display_order() {
+        let body = serde_json::json!({"candidates":[
+            {"index":4,"content":{"role":"model","parts":[{"text":"discarded"}]}},
+            {"index":1,"content":{"role":"model","parts":[{"text":"before"},{"inlineData":{"mimeType":"image/png","data":"YQ=="}},{"functionCall":{"name":"lookup","args":{}}},{"text":"after"}]}}
+        ]});
+        let reply = decode(Protocol::Gemini, &serde_json::to_vec(&body).unwrap()).unwrap();
+        assert_eq!(reply.content, "beforeafter");
+        assert_eq!(reply.parts.len(), 4);
+        assert_eq!(reply.parts[0].text, "before");
+        assert!(reply.parts[1].media.as_ref().unwrap().preview);
+        assert_eq!(reply.parts[2].title, "工具调用 · lookup");
+        assert_eq!(reply.parts[3].text, "after");
+    }
+
+    #[test]
+    fn audio_and_server_outputs_do_not_expose_private_metadata() {
+        let body = serde_json::json!({"id":"c","created":1,"model":"m","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","audio":{"id":"private-audio","data":"YQ==","expires_at":100,"transcript":"hello"}}}]});
+        let reply = decode(Protocol::OpenAiChat, &serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(!reply.parts[0].media.as_ref().unwrap().preview);
+        assert_eq!(
+            reply.parts[0].media.as_ref().unwrap().uri,
+            "data:application/octet-stream;base64,YQ=="
+        );
+        assert_eq!(reply.parts[1].text, "hello");
+        assert!(!format!("{:?}", reply.parts).contains("private-audio"));
+        let body = serde_json::json!({"id":"r","created_at":1,"model":"m","object":"response","status":"completed","output":[{"type":"code_interpreter_call","id":"private-call","container_id":"private-container","status":"completed","code":"print(42)","outputs":[{"type":"logs","logs":"42"}]}]});
+        let reply = decode(
+            Protocol::OpenAiResponses,
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reply.parts[0].title, "服务端执行结果");
+        assert!(reply.parts[0].text.contains("42"));
+        assert!(!format!("{:?}", reply.parts).contains("private"));
+    }
+
+    #[test]
+    fn active_media_types_and_non_public_schemes_are_not_rendered() {
+        let body = serde_json::json!({"candidates":[{"content":{"role":"model","parts":[
+            {"inlineData":{"mimeType":"image/svg+xml","data":"YQ=="}},
+            {"fileData":{"mimeType":"image/png","fileUri":"javascript:alert(1)"}},
+            {"fileData":{"mimeType":"image/png","fileUri":"https://user:password@example.com/a.png"}}
+        ]}}]});
+        let reply = decode(Protocol::Gemini, &serde_json::to_vec(&body).unwrap()).unwrap();
+        let media = reply.parts[0].media.as_ref().unwrap();
+        assert!(!media.preview);
+        assert_eq!(media.uri, "data:application/octet-stream;base64,YQ==");
+        assert!(reply.parts[1].media.is_none());
+        assert!(reply.parts[2].media.is_none());
+        assert!(!format!("{:?}", reply.parts).contains("password"));
     }
 }

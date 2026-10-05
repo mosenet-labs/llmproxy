@@ -119,7 +119,7 @@ OpenObserve 测试保留 `.env` 中的 OTLP 写入认证；查询认证需通过
 
 真实专项检查回答内容及非零输入/输出用量，不把 HTTP 200 当作成功。第一批的静音音频没有满足预期，后续音视频遇到 429；改用实际语音样本，并分别复验音频和视频后通过。未复用失败结果或把限流计为转换成功。
 
-当前配置库启用的模型来自 DeepSeek、GLM、OpenRouter/free 和 Gemini，没有原厂 Claude 模型；原厂 Messages 缓存创建及显式 TTL 的真实联调需要补充对应测试模型。协议声明与模拟验收不受该配置缺口影响。
+当前配置库启用的模型来自 DeepSeek、GLM、OpenRouter/free 和 Gemini，没有原厂 Claude 模型。使用现有 OpenRouter Provider 的临时 `anthropic/claude-haiku-4.5` 路由测试，两种 TTL 均返回 403，原厂 Messages 缓存创建及显式 TTL 仍需可用模型或权限。协议声明与模拟验收不受该配置缺口影响。
 
 样本位于 `crates/llmproxy-gateway/tests/nonstream/assets/`：合成蓝色 PNG、含 HELLO 的 PDF、Hello 语音 WAV、一秒蓝色视频 MP4；不含用户数据。
 
@@ -138,16 +138,40 @@ rtk proxy env LLMPROXY_LIVE_DATABASE_ENV=LLMPROXY_DATABASE_URL LLMPROXY_LIVE_CAP
 
 ## 仍开放的验收项
 
-- [ ] 专属参数与嵌套子对象的逐字段边界夹具，覆盖告警路径和强制约束拒绝，避免只凭字段声明判断支持。
+- [x] 专属参数与嵌套子对象的字段边界夹具，覆盖外层显式 null、嵌套扩展、usage 叶子、准确告警路径及强制约束拒绝；诊断不包含字段值。
 - [x] 当前配置 Gemini 的 Schema、图片/PDF、语音、视频输入专项，以及四协议有效媒体和 Schema 的 HTTP 边界。
 - [x] 缓存写入、TTL 计数的四客户端投影与 OpenObserve 实际读回；不等同真实模型缓存创建。
-- [ ] 其他原厂专属工具、媒体输出、真实缓存写入与 TTL、推理预算的专项联调。
+- [x] Gemini 努力等级和数字推理预算的真实联调；HTTP 层对无法换算预算的目标告警，不补造等级。
+- [ ] 其他原厂专属工具、媒体输出、真实缓存写入与 TTL 的专项联调。
 - [x] 浏览器中的四协议文本非流式对话与逐轮 usage/cache；Chat→Gemini 停止、恢复与失败显示。
-- [ ] 工具和多模态的页面原生展示及浏览器验收。
+- [x] 工具和多模态的页面原生展示及浏览器验收：四客户端纯工具调用、Gemini 图片/音频/视频、服务端代码与结果、Chat 未知格式音频下载与转录；不新增客户端工具执行器。
 - [x] OpenObserve 中的请求关联、用量/缓存日志、对应 trace 与请求指标读回；模拟 Provider 不消费 token。
 - [ ] 跨协议流式：事件 IR、四协议解码/编码状态机、逐帧 SSE 转换、工具参数分片、终止与错误、usage/cache 合并、取消与背压验收。
 
 非流式门槛尚未全部关闭，不能将上述文本矩阵通过表述为完整非流式能力验收，也不能宣称跨协议流式已可用。
+
+## 收尾任务追加验证
+
+逐项进度与流式前置依赖见[四协议转换收尾任务](24-protocol-completion-tasks.md)。
+
+- 服务端执行输出的模拟 HTTP 矩阵为 Responses/Messages/Gemini Provider × 四客户端，12 组合通过，可见结果保留，专属 ID 不跨协议发送，也不变成客户端函数调用。
+- Gemini 图片输出和 Chat 音频输出的 8 组合验证：同协议保留实际载体，无等价输出载体的客户端得到 502；Provider 的 ETag 和私有音频 ID 不进入转换失败响应。
+- 真实 `gemini-3.5-flash-lite`：Responses/Messages/Gemini 三种客户端代码执行均得到执行记录和 1073；四客户端推理等级转换均得到 1073 和非零推理词元。Messages→Gemini 曾返回 400，修正 adaptive + effort 的冲突参数后复验成功。Gemini 等级与明确预算无法同时表达时拒绝，不静默移除预算。[Gemini 推理配置](https://ai.google.dev/api/generate-content#ThinkingConfig)
+- 原厂缓存创建测试入口已实现，分别检查 5m/1h 创建桶和重复前缀命中；现有 OpenRouter Provider 临时指定 Claude Haiku 4.5，两种 TTL 均返回 403，保持未验收。入口不验证等待 TTL 到期后的回收行为。[Claude 缓存规则](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+- `gemini-2.5-flash` 的数字预算真实验收通过：Messages/Gemini 客户端均使用 1024 预算、2048 输出上限，实际推理词元分别为 340、367。8 个模拟 HTTP 组合检查 Messages/Gemini 原生预算字段，以及 Chat/Responses 的丢弃告警，不把数字预算换算成努力等级。
+- 原生图片输出入口 `configured_gemini_image_output` 已实现，核对实际 Base64 图片载体、MIME/文件头与非零 usage。旧 `gemini-2.5-flash-image` 和当前 `gemini-3.1-flash-lite-image` 均返回 429，错误信息明确表示模型配额为零，未计为通过。
+
+```sh
+rtk proxy env LLMPROXY_LIVE_DATABASE_ENV=LLMPROXY_DATABASE_URL LLMPROXY_LIVE_CAPABILITY=code cargo test -p llmproxy-gateway --test configured_providers configured_gemini_native_capabilities -- --ignored --nocapture
+rtk proxy env LLMPROXY_LIVE_DATABASE_ENV=LLMPROXY_DATABASE_URL LLMPROXY_LIVE_CAPABILITY=reasoning cargo test -p llmproxy-gateway --test configured_providers configured_gemini_native_capabilities -- --ignored --nocapture
+rtk proxy env LLMPROXY_LIVE_DATABASE_ENV=LLMPROXY_DATABASE_URL cargo test -p llmproxy-gateway --test configured_providers configured_messages_cache_creation_and_hit -- --ignored --nocapture
+```
+
+真实专项可用 `LLMPROXY_LIVE_MODEL_ID_OPENAI_CHAT`、`LLMPROXY_LIVE_MODEL_ID_OPENAI_RESPONSES`、`LLMPROXY_LIVE_MODEL_ID_ANTHROPIC_MESSAGES`、`LLMPROXY_LIVE_MODEL_ID_GEMINI` 指定配置库中已启用且具有对应协议的模型 ID；没有命中时明确失败，不空跑。
+
+配合模型 ID 可设置 `LLMPROXY_LIVE_UPSTREAM_MODEL_<协议名大写>`，只覆盖临时 SQLite 的模型名，不修改 PostgreSQL。数字预算专项需显式设置 `LLMPROXY_LIVE_CAPABILITY=budget` 并选择支持预算的模型；图片输出入口同样需要显式选择图片模型。
+
+本次收尾的完整 workspace 验证为 248 项通过；追加数字预算用例所在的 5 项 HTTP 专项通过。workspace Clippy、追加 Gateway 测试 Clippy、格式和 diff 检查通过。外部验收入口默认忽略，缓存 403 与图片零配额 429 保持未通过。以下 236 项记录是前一轮验收，保留其历史结果。
 
 本轮验证：`cargo test --workspace --offline` 236 项通过、4 项外部验收测试默认忽略（24 个测试套件）；`cargo clippy --workspace --all-targets --offline -- -D warnings`、格式检查及 diff 检查通过。Gemini 三个跨协议方向的文本与工具双回合、Schema 和有效媒体输入真实专项通过；SQLite／独立 PostgreSQL schema 的持久化验收通过。OpenObserve 使用原写入配置与独立查询认证，日志／trace／指标及缓存写入细分读回通过；四客户端文本浏览器验收、跨协议取消后关闭上游和恢复对话通过。
 

@@ -262,6 +262,93 @@ pub fn response(protocol: Protocol, tool: bool) -> Value {
     }
 }
 
+/// 新建代码执行环境的请求，避免携带来源 Provider 的容器和文件 ID。
+/// 参考：https://ai.google.dev/api/generate-content#Tool
+pub fn code_request(protocol: Protocol, model: &str) -> Value {
+    let mut body = request(
+        protocol,
+        model,
+        "Use the code execution tool to run Python print(37 * 29). Report the result.",
+    );
+    match protocol {
+        Protocol::OpenAiResponses => {
+            body["max_output_tokens"] = json!(1024);
+            body["tools"] = json!([{"type":"code_interpreter","container":{"type":"auto"}}]);
+        }
+        Protocol::AnthropicMessages => {
+            body["max_tokens"] = json!(1024);
+            body["tools"] = json!([{"type":"code_execution_20250522","name":"code_execution"}]);
+        }
+        Protocol::Gemini => {
+            body["generationConfig"]["maxOutputTokens"] = json!(1024);
+            body["tools"] = json!([{"codeExecution":{}}]);
+        }
+        Protocol::OpenAiChat => panic!("Chat 没有原生代码执行声明"),
+    }
+    body
+}
+
+/// 使用各协议原生努力等级表达同一配置；实际是否生效由目标模型验收。
+/// 参考：https://ai.google.dev/api/generate-content#ThinkingConfig
+pub fn reasoning_request(protocol: Protocol, model: &str) -> Value {
+    let mut body = request(protocol, model, "What is 37 * 29? Reply with exactly 1073.");
+    match protocol {
+        Protocol::OpenAiChat => {
+            body["max_completion_tokens"] = json!(1024);
+            body["reasoning_effort"] = json!("low");
+        }
+        Protocol::OpenAiResponses => {
+            body["max_output_tokens"] = json!(1024);
+            body["reasoning"] = json!({"effort":"low","summary":"auto"});
+        }
+        Protocol::AnthropicMessages => {
+            body["max_tokens"] = json!(1024);
+            body["thinking"] = json!({"type":"adaptive"});
+            body["output_config"] = json!({"effort":"low"});
+        }
+        Protocol::Gemini => {
+            body["generationConfig"] = json!({"maxOutputTokens":1024,"thinkingConfig":{"thinkingLevel":"low","includeThoughts":true}});
+        }
+    }
+    body
+}
+
+/// 明确的数字预算只用于具有原生预算字段的协议，不能用努力等级冒充。
+/// 参考：https://ai.google.dev/gemini-api/docs/thinking#thinking-budgets
+/// 参考：https://platform.claude.com/docs/en/build-with-claude/extended-thinking
+pub fn reasoning_budget_request(protocol: Protocol, model: &str) -> Value {
+    let mut body = request(protocol, model, "What is 37 * 29? Reply with exactly 1073.");
+    match protocol {
+        Protocol::AnthropicMessages => {
+            body["max_tokens"] = json!(2048);
+            body["thinking"] = json!({"type":"enabled","budget_tokens":1024});
+        }
+        Protocol::Gemini => {
+            body["generationConfig"] = json!({"maxOutputTokens":2048,"thinkingConfig":{"thinkingBudget":1024,"includeThoughts":true}});
+        }
+        _ => panic!("该协议没有原生数字推理预算"),
+    }
+    body
+}
+
+/// 独立原生输出夹具，执行记录与客户端函数调用严格区分。
+pub fn code_response(protocol: Protocol) -> Value {
+    let mut body = response(protocol, false);
+    match protocol {
+        Protocol::OpenAiResponses => {
+            body["output"] = json!([{"type":"code_interpreter_call","id":"server-private","container_id":"private-container","status":"completed","code":"print(1073)","outputs":[{"type":"logs","logs":"1073"}]}])
+        }
+        Protocol::AnthropicMessages => {
+            body["content"] = json!([{"type":"server_tool_use","id":"server-private","name":"code_execution","input":{"code":"print(1073)"}},{"type":"code_execution_tool_result","tool_use_id":"server-private","content":{"type":"code_execution_result","stdout":"1073","stderr":"","return_code":0,"content":[]}}])
+        }
+        Protocol::Gemini => {
+            body["candidates"][0]["content"]["parts"] = json!([{"executableCode":{"language":"PYTHON","code":"print(1073)"}},{"codeExecutionResult":{"outcome":"OUTCOME_OK","output":"1073"}}])
+        }
+        Protocol::OpenAiChat => panic!("Chat 没有原生代码执行输出"),
+    }
+    body
+}
+
 /// 在 HTTP 边界直接解析协议 struct，再进入公共 IR。
 pub fn decode_request(protocol: Protocol, bytes: &[u8]) -> ir::request::Request {
     let raw = match protocol {

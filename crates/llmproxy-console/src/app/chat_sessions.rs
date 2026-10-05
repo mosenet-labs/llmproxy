@@ -9,7 +9,7 @@ use std::{
 use tokio::sync::{broadcast, watch};
 use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
 
-use crate::chat_stream::ChatReply;
+use crate::chat_stream::{ChatReply, DisplayPart};
 
 const SESSION_IDLE_LIMIT: Duration = Duration::from_secs(60 * 60);
 
@@ -23,6 +23,7 @@ struct ChatState {
     messages: Vec<ChatMessage>,
     thinking: HashMap<String, String>,
     usage: HashMap<String, String>,
+    parts: HashMap<String, Vec<DisplayPart>>,
     title: String,
     next_id: u64,
     busy: bool,
@@ -91,6 +92,11 @@ impl ChatSession {
     /// 逐轮统计与消息内容分开存储，避免下一次请求把用量文案当作对话历史。
     pub(crate) fn usage_snapshot(&self) -> HashMap<String, String> {
         self.state.lock().expect("chat state mutex").usage.clone()
+    }
+
+    /// 展示块与发给模型的文本历史分开保存。
+    pub(crate) fn parts_snapshot(&self) -> HashMap<String, Vec<DisplayPart>> {
+        self.state.lock().expect("chat state mutex").parts.clone()
     }
 
     pub(crate) fn begin(&self, prompt: &str) -> bool {
@@ -179,7 +185,10 @@ impl ChatSession {
                         state.thinking.insert(id.clone(), thinking);
                     }
                     if let Some(usage) = usage {
-                        state.usage.insert(id, usage);
+                        state.usage.insert(id.clone(), usage);
+                    }
+                    if !reply.parts.is_empty() {
+                        state.parts.insert(id, reply.parts);
                     }
                 }
                 Err(error) => {
@@ -378,5 +387,25 @@ mod usage_tests {
         }));
         assert_eq!(room.usage_snapshot()["2"], "缓存读取 0");
         assert_eq!(room.snapshot().0[1].content, "hello");
+    }
+
+    #[test]
+    fn display_blocks_do_not_replace_text_history_or_usage() {
+        let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
+        assert!(room.begin("hi"));
+        room.finish(Ok(ChatReply {
+            content: "answer".into(),
+            parts: vec![DisplayPart {
+                title: "工具调用 · lookup".into(),
+                text: "private-argument".into(),
+                media: None,
+            }],
+            ..Default::default()
+        }));
+        assert_eq!(room.parts_snapshot()["2"][0].title, "工具调用 · lookup");
+        assert_eq!(room.snapshot().0[1].content, "answer");
+        assert!(room.usage_snapshot().is_empty());
+        assert!(room.begin("next"));
+        assert!(!format!("{:?}", room.start_request().unwrap()).contains("private-argument"));
     }
 }

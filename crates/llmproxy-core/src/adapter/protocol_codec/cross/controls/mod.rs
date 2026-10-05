@@ -164,6 +164,24 @@ pub(in crate::adapter::protocol_codec::cross) fn write(
             Request::Gemini(body) => {
                 if reasoning != &Default::default() || body.generation_config.as_option().is_some()
                 {
+                    // Gemini 的等级与预算不能同时发送。adaptive + effort 使用动态等级，
+                    // 只有未给等级时才把 adaptive 映射为 -1；明确给出的预算不静默丢弃。
+                    // 参考：https://ai.google.dev/api/generate-content#ThinkingConfig
+                    let level = reasoning.effort.clone().filter(|e| e != "none");
+                    let budget = reasoning
+                        .budget
+                        .or_else(|| match reasoning.mode.as_deref() {
+                            Some("disabled") => Some(0),
+                            Some("adaptive") if level.is_none() => Some(-1),
+                            _ if reasoning.effort.as_deref() == Some("none") => Some(0),
+                            _ => None,
+                        });
+                    if level.is_some() && budget.is_some() {
+                        return Err(unsupported(
+                            "reasoning",
+                            "Gemini 无法同时表达推理等级和明确预算",
+                        ));
+                    }
                     let config = ensure_gemini(&mut body.generation_config);
                     config.thinking_config = if reasoning == &Default::default() {
                         O::Missing
@@ -173,16 +191,8 @@ pub(in crate::adapter::protocol_codec::cross) fn write(
                                 .include
                                 .or(reasoning.summary.as_ref().map(|_| true))
                                 .into(),
-                            thinking_budget: reasoning
-                                .budget
-                                .or(match reasoning.mode.as_deref() {
-                                    Some("disabled") => Some(0),
-                                    Some("adaptive") => Some(-1),
-                                    _ if reasoning.effort.as_deref() == Some("none") => Some(0),
-                                    _ => None,
-                                })
-                                .into(),
-                            thinking_level: reasoning.effort.clone().filter(|e| e != "none").into(),
+                            thinking_budget: budget.into(),
+                            thinking_level: level.into(),
                             extra: Default::default(),
                         })
                     };

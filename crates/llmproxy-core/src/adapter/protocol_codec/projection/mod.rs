@@ -34,6 +34,12 @@ impl Notes {
             self.dropped(format!("{path}.{key}"));
         }
     }
+    /// 开放对象仅按已映射键筛选，局部扩展仍逐字段报告。
+    fn object_extra(&mut self, object: &Map<String, Value>, known: &[&str], path: &str) {
+        for key in object.keys().filter(|key| !known.contains(&key.as_str())) {
+            self.dropped(format!("{path}.{key}"));
+        }
+    }
     /// 同协议仍可保留原文，规范化目标编码时明确报错。
     fn reject(&mut self, path: &str, reason: &str) {
         self.0.push(Diagnostic {
