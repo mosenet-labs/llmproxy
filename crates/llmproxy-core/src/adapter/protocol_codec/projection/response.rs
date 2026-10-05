@@ -1,7 +1,7 @@
 //! 响应外壳、状态、候选和诊断的直接类型投影。
 use super::Notes;
 use crate::{
-    ir::response::{Candidate, FinishReason, Response, Status},
+    ir::response::{Candidate, Failure, FinishReason, Response, Status},
     protocol::{Response as Source, responses::response::body::OutputItem},
 };
 
@@ -28,6 +28,14 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
                 notes.reject("object", "不是 Chat 完成响应");
             }
             for (i, c) in body.choices.iter().enumerate() {
+                // Chat 音频响应不报告请求指定的编码格式，不能猜 MIME 类型生成其他协议媒体。
+                // 参考：https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+                if c.message.audio.as_option().is_some() {
+                    notes.reject(
+                        &format!("choices[{i}].message.audio"),
+                        "音频输出缺少可移植格式上下文，不能跨协议转换",
+                    );
+                }
                 notes.extra(&c.extra, &format!("choices[{i}]"));
                 notes.field(&c.logprobs, &format!("choices[{i}].logprobs"));
             }
@@ -47,7 +55,8 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             response.status = match body.status.as_option().map(String::as_str) {
                 Some("completed") => Status::Completed,
                 Some("incomplete") => Status::Incomplete,
-                Some("failed" | "cancelled") => Status::Failed,
+                Some("failed") => Status::Failed,
+                Some("cancelled") => Status::Cancelled,
                 Some("in_progress" | "queued") => Status::InProgress,
                 _ => Status::Unknown,
             };
@@ -84,7 +93,17 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
                     notes.extra(&call.extra, &format!("output[{i}]"));
                 }
             }
-            notes.field(&body.error, "response.error");
+            response.failure = body.error.as_option().map(|error| Failure {
+                code: error.code.clone(),
+                message: error.message.clone(),
+            });
+            if let Some(error) = body.error.as_option() {
+                notes.field(&error.misalignment, "response.error.misalignment");
+                notes.extra(&error.extra, "response.error");
+            }
+            if response.failure.is_some() && response.status != Status::Failed {
+                notes.reject("response.error", "非失败状态同时包含生成错误");
+            }
             if let Some(details) = body.incomplete_details.as_option() {
                 notes.extra(&details.extra, "response.incomplete_details");
             }
@@ -154,7 +173,8 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
                 .as_option()
                 .into_iter()
                 .flatten()
-                .map(|c| {
+                .enumerate()
+                .map(|(position, c)| {
                     let items = if c.content.as_option().is_some() {
                         let i = index;
                         index += 1;
@@ -163,7 +183,7 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
                         vec![]
                     };
                     Candidate {
-                        index: c.index.as_option().copied().unwrap_or(0),
+                        index: c.index.as_option().copied().unwrap_or(position as u64),
                         items,
                         finish_reason: finish(c.finish_reason.as_option().map(String::as_str)),
                     }
@@ -221,11 +241,38 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&body.model_status, "response.modelStatus");
             notes.extra(&body.extra, "response");
             if let Some(usage) = body.usage_metadata.as_option() {
-                notes.field(&usage.cache_tokens_details, "usage.cacheTokensDetails");
-                notes.field(
-                    &usage.tool_use_prompt_tokens_details,
-                    "usage.toolUsePromptTokensDetails",
-                );
+                for (details, path) in [
+                    (&usage.prompt_tokens_details, "usage.promptTokensDetails"),
+                    (&usage.cache_tokens_details, "usage.cacheTokensDetails"),
+                    (
+                        &usage.candidates_tokens_details,
+                        "usage.candidatesTokensDetails",
+                    ),
+                    (
+                        &usage.tool_use_prompt_tokens_details,
+                        "usage.toolUsePromptTokensDetails",
+                    ),
+                ] {
+                    if let Some(details) = details.as_option() {
+                        let mut totals = std::collections::HashMap::<String, u64>::new();
+                        for (i, detail) in details.iter().enumerate() {
+                            let modality = detail.modality.to_ascii_uppercase();
+                            if !matches!(
+                                modality.as_str(),
+                                "TEXT" | "AUDIO" | "IMAGE" | "VIDEO" | "DOCUMENT"
+                            ) {
+                                notes.dropped(format!("{path}[{i}].modality"));
+                            }
+                            let total = totals.entry(modality).or_default();
+                            if let Some(sum) = total.checked_add(detail.token_count) {
+                                *total = sum;
+                            } else {
+                                notes.reject(path, "模态词元数溢出");
+                            }
+                            notes.extra(&detail.extra, &format!("{path}[{i}]"));
+                        }
+                    }
+                }
                 notes.field(&usage.service_tier, "usage.serviceTier");
                 notes.extra(&usage.extra, "usage");
             }

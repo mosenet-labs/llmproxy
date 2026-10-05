@@ -84,6 +84,19 @@ impl RequestBody {
 
     /// 保存原始请求体及已预读前缀，供非流式子请求按原边界回放一次。
     pub async fn buffered_input(&self, session: &mut Session) -> Result<Vec<Bytes>> {
+        // 已知长度超限时直接拒绝，避免等待客户端继续上传无用正文。
+        // chunked 请求仍逐块累计，不能只信任 Content-Length。
+        if session
+            .get_header("content-length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > super::MAX_BUFFERED_BODY)
+        {
+            return Err(Error::explain(
+                ErrorType::HTTPStatus(413),
+                "cross-protocol request exceeds limit",
+            ));
+        }
         let mut chunks = Vec::new();
         let mut length = 0usize;
         if self.replay_prefix.is_some() {
@@ -122,6 +135,11 @@ impl RequestBody {
     /// 目标协议与客户端不同时，按完整请求正文做 IR 转换。
     pub fn set_cross_protocol(&mut self, source: Protocol, target: Protocol, model: &str) {
         self.body.set_cross_request(source, target, model);
+    }
+
+    /// 请求完成协议转换后，通过同一作用域恢复 Gemini 的工具历史片段。
+    pub fn set_tool_state(&mut self, context: crate::tool_state::Context) {
+        self.body.set_tool_state(context);
     }
 
     /// 将路由阶段预读的前缀回放到正文过滤器，再处理当前分块。

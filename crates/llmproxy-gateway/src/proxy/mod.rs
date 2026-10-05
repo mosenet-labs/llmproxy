@@ -40,6 +40,7 @@ pub struct Gateway {
     providers: ProviderSnapshots,
     telemetry: GatewayTelemetry,
     console: llmproxy_console::Console,
+    tool_states: Arc<crate::tool_state::Cache>,
 }
 
 pub struct RequestContext {
@@ -62,6 +63,7 @@ impl Gateway {
             providers,
             telemetry: GatewayTelemetry::new(),
             console,
+            tool_states: Arc::new(crate::tool_state::Cache::default()),
         }
     }
 
@@ -73,6 +75,33 @@ impl Gateway {
         let model = self.providers.select(protocol, alias).ok_or(404u16)?;
         let provider = model.provider.as_ref().ok_or(503u16)?.clone();
         Ok((provider, model.upstream_model_id.clone()))
+    }
+
+    /// 仅 Gemini 跨协议工具回合需要短期状态；鉴权读取发生在上游头替换之前。
+    fn prepare_tool_state(
+        &self,
+        session: &Session,
+        ctx: &mut RequestContext,
+        provider: &ResolvedProvider,
+        model: &str,
+    ) {
+        let protocol = ctx.protocol.expect("client protocol selected");
+        if provider.protocol == Protocol::Gemini && protocol != Protocol::Gemini {
+            let context = crate::tool_state::Context::new(
+                self.tool_states.clone(),
+                provider,
+                model,
+                protocol,
+                ctx.client_model.as_deref().expect("client route selected"),
+                [
+                    session.get_header_bytes("authorization"),
+                    session.get_header_bytes("x-api-key"),
+                    session.get_header_bytes("x-goog-api-key"),
+                ],
+            );
+            ctx.request_body.set_tool_state(context.clone());
+            ctx.response_body.set_tool_state(context);
+        }
     }
 }
 
@@ -144,6 +173,7 @@ impl ProxyHttp for Gateway {
                     return Ok(true);
                 }
                 ctx.client_model = Some(alias);
+                self.prepare_tool_state(session, ctx, &provider, &upstream_model_id);
                 if provider.protocol != protocol {
                     ctx.request_body.set_cross_protocol(
                         protocol,
@@ -193,6 +223,7 @@ impl ProxyHttp for Gateway {
                         Error::explain(ErrorType::InternalError, "cannot encode upstream model")
                     })?;
                 ctx.client_model = Some(alias);
+                self.prepare_tool_state(session, ctx, &provider, &upstream_model_id);
                 if provider.protocol != protocol {
                     ctx.request_body.set_cross_protocol(
                         protocol,
@@ -415,7 +446,8 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        ctx.request_body.push(body, end_of_stream)
+        ctx.telemetry
+            .in_scope(|| ctx.request_body.push(body, end_of_stream))
     }
 
     async fn upstream_response_filter(
@@ -528,7 +560,8 @@ impl ProxyHttp for Gateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        ctx.response_body.push(body, end_of_stream)?;
+        ctx.telemetry
+            .in_scope(|| ctx.response_body.push(body, end_of_stream))?;
         Ok(None)
     }
 

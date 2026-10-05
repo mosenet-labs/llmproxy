@@ -351,4 +351,8 @@ pub(super) fn changed_usage_fields_match(
     ]
     .into_iter()
     .all(|(before, after, actual)| before == after || after == actual)
+        && (before.cache.read_details == after.cache.read_details
+            || after.cache.read_details == actual.cache.read_details)
+        && (before.input_details.tool_details == after.input_details.tool_details
+            || after.input_details.tool_details == actual.input_details.tool_details)
 }

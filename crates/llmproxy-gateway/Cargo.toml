@@ -27,6 +27,8 @@ llmproxy-telemetry = { path = "../llmproxy-telemetry" }
 dotenvy = "0.15.7"
 tracing-opentelemetry = "0.34.0"
 opentelemetry = { version = "0.33.0", features = ["metrics", "trace"] }
+getrandom = "0.4.3"
+sha2 = "0.11.0"
 
 [dev-dependencies]
 opentelemetry-appender-tracing = "0.33.0"

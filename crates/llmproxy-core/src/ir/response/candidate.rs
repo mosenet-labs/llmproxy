@@ -12,6 +12,8 @@ pub enum Status {
     Incomplete,
     /// 生成失败。
     Failed,
+    /// 已取消生成；不能映射为自然结束。
+    Cancelled,
     /// 排队或生成中。
     InProgress,
     /// 来源未提供可识别状态。

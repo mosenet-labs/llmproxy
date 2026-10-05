@@ -96,6 +96,21 @@ pub(super) fn normalize(
         drop_count!(output.audio_tokens, "usage.output_details.audio_tokens");
     }
     if target != Protocol::Gemini {
+        for (details, path) in [
+            (&mut cache.read_details, "usage.cache.read_details"),
+            (&mut input.tool_details, "usage.input_details.tool_details"),
+        ] {
+            if *details != Default::default() {
+                warn(
+                    warnings,
+                    source,
+                    target,
+                    path,
+                    "目标协议没有对应的模态细分字段，已保留总用量",
+                );
+                *details = Default::default();
+            }
+        }
         drop_count!(input.video_tokens, "usage.input_details.video_tokens");
         drop_count!(input.document_tokens, "usage.input_details.document_tokens");
         drop_count!(input.tool_tokens, "usage.input_details.tool_tokens");

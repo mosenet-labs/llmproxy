@@ -175,6 +175,15 @@ impl Gateway {
     }
 
     pub fn database(url: &str, master_key: &str) -> Self {
+        Self::database_with_environment(url, master_key, &[])
+    }
+
+    /// 外部遥测验收显式传入出口配置，普通测试仍不继承真实认证与 exporter。
+    pub fn database_with_environment(
+        url: &str,
+        master_key: &str,
+        environment: &[(&str, &str)],
+    ) -> Self {
         let _allocation = PORT_ALLOCATION
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -186,6 +195,7 @@ impl Gateway {
         ));
         fs::create_dir(&directory).unwrap();
         let mut command = Self::command(&directory);
+        command.envs(environment.iter().copied());
         command
             .env("LLMPROXY_DATABASE_URL", url)
             .env("LLMPROXY_MASTER_KEY", master_key)

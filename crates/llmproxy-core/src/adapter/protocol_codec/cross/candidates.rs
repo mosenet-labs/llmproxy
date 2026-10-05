@@ -13,6 +13,16 @@ pub(in crate::adapter::protocol_codec) fn encode_response(
     response: &Response,
     target: &ResponseTarget<'_>,
 ) -> Result<Conversion<Raw>> {
+    use crate::ir::response::Status;
+    if matches!(response.status, Status::Failed | Status::Cancelled) {
+        return super::response::encode_failure(protocol, response, target);
+    }
+    if response.failure.is_some() {
+        return Err(unsupported(
+            "response.failure",
+            "正常完成状态不能包含生成错误",
+        ));
+    }
     if response.candidates.is_empty() {
         return Err(unsupported("candidates", "响应没有候选或可识别的结束原因"));
     }

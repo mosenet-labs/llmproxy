@@ -15,6 +15,267 @@ const TARGET: ResponseTarget<'static> = ResponseTarget {
 };
 
 #[test]
+fn gemini_rebuilt_tool_history_retains_signature_on_its_original_call() {
+    use super::RequestTarget;
+    let raw = json!({"contents":[
+        {"role":"user","parts":[{"text":"lookup"}]},
+        {"role":"model","parts":[
+            {"functionCall":{"id":"call_1","name":"lookup","args":{"q":"a"}},"thoughtSignature":"opaque-signature"},
+            {"functionCall":{"id":"call_2","name":"lookup","args":{"q":"b"}}}
+        ]},
+        {"role":"user","parts":[
+            {"functionResponse":{"id":"call_1","name":"lookup","response":{"result":"OK"}}},
+            {"functionResponse":{"id":"call_2","name":"lookup","response":{"result":"OK"}}}
+        ]}
+    ]});
+    let ir = Protocol::Gemini
+        .decode_request(&raw)
+        .unwrap()
+        .without_source();
+    let encoded = Protocol::Gemini
+        .encode_request_for(
+            &ir,
+            &RequestTarget {
+                model: "target",
+                max_output_tokens: None,
+            },
+        )
+        .unwrap();
+    let parts = encoded.body["contents"][1]["parts"].as_array().unwrap();
+    assert_eq!(parts[0]["thoughtSignature"], "opaque-signature");
+    assert!(parts[1].get("thoughtSignature").is_none());
+    assert!(
+        !encoded
+            .warnings
+            .iter()
+            .any(|warning| warning.path.contains("thoughtSignature"))
+    );
+}
+
+#[test]
+fn failed_cancelled_and_running_responses_are_not_successful_completions() {
+    use crate::ir::response::Status;
+    for (status, expected) in [
+        ("failed", Status::Failed),
+        ("cancelled", Status::Cancelled),
+        ("queued", Status::InProgress),
+        ("in_progress", Status::InProgress),
+    ] {
+        let mut raw = response(Protocol::OpenAiResponses);
+        raw["status"] = json!(status);
+        raw["output"] = json!([]);
+        if status == "failed" {
+            raw["error"] = json!({"code":"vendor_error","message":"private-provider-detail","extra_info":true});
+        }
+        let ir = Protocol::OpenAiResponses.decode_response(&raw).unwrap();
+        assert_eq!(ir.status, expected);
+        assert_eq!(Protocol::OpenAiResponses.encode_response(&ir).unwrap(), raw);
+        if status == "failed" {
+            assert_eq!(ir.failure.as_ref().unwrap().code, "vendor_error");
+            let mut edited = ir.clone();
+            edited.failure.as_mut().unwrap().message = "edited".into();
+            let encoded = Protocol::OpenAiResponses.encode_response(&edited).unwrap();
+            assert_eq!(encoded["error"]["message"], "edited");
+            assert_eq!(encoded["error"]["extra_info"], true);
+        }
+        let ir = ir.without_source();
+        for target in ALL {
+            let encoded = target.encode_response_for(&ir, &TARGET);
+            if target == Protocol::OpenAiResponses
+                && matches!(expected, Status::Failed | Status::Cancelled)
+            {
+                let encoded = encoded.unwrap();
+                assert_eq!(encoded.body["status"], status);
+                assert!(!encoded.body.to_string().contains("private-provider-detail"));
+                assert!(!encoded.body.to_string().contains("vendor_error"));
+            } else {
+                assert!(encoded.is_err(), "{status} -> {target:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn background_requests_are_retained_same_protocol_and_rejected_cross_protocol() {
+    use super::{RequestTarget, cross_tests::request};
+    let mut raw = request(Protocol::OpenAiResponses);
+    raw["background"] = json!(true);
+    let ir = Protocol::OpenAiResponses.decode_request(&raw).unwrap();
+    assert_eq!(Protocol::OpenAiResponses.encode_request(&ir).unwrap(), raw);
+    for target in ALL
+        .into_iter()
+        .filter(|target| *target != Protocol::OpenAiResponses)
+    {
+        assert!(
+            target
+                .encode_request_for(
+                    &ir,
+                    &RequestTarget {
+                        model: "target",
+                        max_output_tokens: None
+                    }
+                )
+                .is_err()
+        );
+    }
+    raw["background"] = json!(false);
+    let ir = Protocol::OpenAiResponses.decode_request(&raw).unwrap();
+    assert!(
+        Protocol::OpenAiChat
+            .encode_request_for(
+                &ir,
+                &RequestTarget {
+                    model: "target",
+                    max_output_tokens: None
+                }
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn text_documents_keep_body_and_report_document_semantics_loss() {
+    use super::RequestTarget;
+    let raw = json!({"model":"source","max_tokens":128,"messages":[{"role":"user","content":[
+        {"type":"text","text":"summarize"},
+        {"type":"document","title":"notes.txt","source":{"type":"text","media_type":"text/plain","data":"document body"}}
+    ]}]});
+    let ir = Protocol::AnthropicMessages.decode_request(&raw).unwrap();
+    assert_eq!(
+        Protocol::AnthropicMessages.encode_request(&ir).unwrap(),
+        raw
+    );
+    for target in ALL
+        .into_iter()
+        .filter(|target| *target != Protocol::AnthropicMessages)
+    {
+        let encoded = target
+            .encode_request_for(
+                &ir,
+                &RequestTarget {
+                    model: "target",
+                    max_output_tokens: None,
+                },
+            )
+            .unwrap();
+        let actual = target.decode_request(&encoded.body).unwrap();
+        assert!(actual.messages.iter().flat_map(|message| &message.parts).any(|part| matches!(&part.kind, crate::ir::message::PartKind::Text(text) if text == "document body")));
+        assert!(
+            encoded
+                .warnings
+                .iter()
+                .any(|warning| warning.reason.contains("文本文档"))
+        );
+    }
+}
+
+#[test]
+fn audio_output_without_format_cannot_be_silently_discarded() {
+    let mut raw = response(Protocol::OpenAiChat);
+    raw["choices"][0]["message"]["audio"] =
+        json!({"id":"audio_1","data":"YQ==","expires_at":100,"transcript":"hello"});
+    let ir = Protocol::OpenAiChat.decode_response(&raw).unwrap();
+    assert_eq!(Protocol::OpenAiChat.encode_response(&ir).unwrap(), raw);
+    for target in ALL
+        .into_iter()
+        .filter(|target| *target != Protocol::OpenAiChat)
+    {
+        assert!(target.encode_response_for(&ir, &TARGET).is_err());
+    }
+}
+
+#[test]
+fn gemini_usage_details_are_preserved_or_explicitly_warned() {
+    let mut raw = response(Protocol::Gemini);
+    raw["usageMetadata"]["cachedContentTokenCount"] = json!(4);
+    raw["usageMetadata"]["cacheTokensDetails"] = json!([{"modality":"TEXT","tokenCount":4}]);
+    raw["usageMetadata"]["toolUsePromptTokenCount"] = json!(2);
+    raw["usageMetadata"]["toolUsePromptTokensDetails"] =
+        json!([{"modality":"IMAGE","tokenCount":2}]);
+    let ir = Protocol::Gemini
+        .decode_response(&raw)
+        .unwrap()
+        .without_source();
+    for target in ALL {
+        let encoded = target.encode_response_for(&ir, &TARGET).unwrap();
+        let actual = target
+            .decode_response(&encoded.body)
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(actual.input_tokens, Some(10));
+        assert_eq!(actual.total_tokens, Some(13));
+        assert_eq!(actual.cache.read_input_tokens, Some(4));
+        if target == Protocol::Gemini {
+            assert_eq!(actual.cache.read_details.text_tokens, Some(4));
+            assert_eq!(actual.input_details.tool_details.image_tokens, Some(2));
+        } else {
+            for path in [
+                "usage.cache.read_details",
+                "usage.input_details.tool_details",
+            ] {
+                assert!(encoded.warnings.iter().any(|warning| warning.path == path));
+            }
+        }
+    }
+    let mut edited = Protocol::Gemini.decode_response(&raw).unwrap();
+    edited
+        .usage
+        .as_mut()
+        .unwrap()
+        .cache
+        .read_details
+        .text_tokens = Some(3);
+    edited
+        .usage
+        .as_mut()
+        .unwrap()
+        .input_details
+        .tool_details
+        .image_tokens = None;
+    let encoded = Protocol::Gemini.encode_response(&edited).unwrap();
+    let actual = Protocol::Gemini
+        .decode_response(&encoded)
+        .unwrap()
+        .usage
+        .unwrap();
+    assert_eq!(actual.cache.read_details.text_tokens, Some(3));
+    assert_eq!(actual.input_details.tool_details.image_tokens, None);
+    let mut chat = Protocol::OpenAiChat
+        .decode_response(&response(Protocol::OpenAiChat))
+        .unwrap();
+    chat.usage.as_mut().unwrap().cache.read_details.text_tokens = Some(3);
+    assert!(Protocol::OpenAiChat.encode_response(&chat).is_err());
+    raw["usageMetadata"]["cacheTokensDetails"] = json!([
+        {"modality":"TEXT","tokenCount":u64::MAX}, {"modality":"TEXT","tokenCount":1}
+    ]);
+    let ir = Protocol::Gemini
+        .decode_response(&raw)
+        .unwrap()
+        .without_source();
+    assert!(
+        Protocol::OpenAiChat
+            .encode_response_for(&ir, &TARGET)
+            .is_err()
+    );
+}
+
+#[test]
+fn gemini_missing_candidate_indices_use_array_order() {
+    let mut raw = response(Protocol::Gemini);
+    let mut second = raw["candidates"][0].clone();
+    second["content"]["parts"][0]["text"] = json!("second");
+    raw["candidates"].as_array_mut().unwrap().push(second);
+    let ir = Protocol::Gemini.decode_response(&raw).unwrap();
+    let encoded = Protocol::OpenAiChat
+        .encode_response_for(&ir, &TARGET)
+        .unwrap();
+    assert_eq!(encoded.body["choices"][0]["index"], 0);
+    assert_eq!(encoded.body["choices"][1]["index"], 1);
+    assert_eq!(encoded.body["choices"][1]["message"]["content"], "second");
+}
+
+#[test]
 fn incomplete_and_empty_outputs_keep_finish_reason_in_all_targets() {
     for source in ALL {
         let mut raw = response(source);

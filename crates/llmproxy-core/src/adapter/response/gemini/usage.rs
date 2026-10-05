@@ -4,7 +4,7 @@ use crate::{
     adapter::nullable::{present, set},
     ir::{
         cache::CacheUsage,
-        usage::{InputTokenDetails, OutputTokenDetails, Usage as IrUsage},
+        usage::{InputTokenDetails, ModalityTokenDetails, OutputTokenDetails, Usage as IrUsage},
     },
     protocol::{
         OptionalNullable,
@@ -31,6 +31,7 @@ pub fn decode_gemini_usage(usage: &UsageMetadata) -> IrUsage {
         total_tokens: present(&usage.total_token_count),
         cache: CacheUsage {
             read_input_tokens: cached,
+            read_details: decode_modalities(&usage.cache_tokens_details),
             ..Default::default()
         },
         input_details: InputTokenDetails {
@@ -43,6 +44,7 @@ pub fn decode_gemini_usage(usage: &UsageMetadata) -> IrUsage {
             video_tokens: modality_count(input, "VIDEO"),
             document_tokens: modality_count(input, "DOCUMENT"),
             tool_tokens: present(&usage.tool_use_prompt_token_count),
+            tool_details: decode_modalities(&usage.tool_use_prompt_tokens_details),
         },
         output_details: OutputTokenDetails {
             text_tokens: modality_count(output, "TEXT"),
@@ -83,6 +85,11 @@ pub fn encode_gemini_usage(usage: &IrUsage, original: Option<&UsageMetadata>) ->
         &mut encoded.thoughts_token_count,
         usage.output_details.reasoning_tokens,
     );
+    encode_modalities(&mut encoded.cache_tokens_details, &usage.cache.read_details);
+    encode_modalities(
+        &mut encoded.tool_use_prompt_tokens_details,
+        &usage.input_details.tool_details,
+    );
     for (modality, count) in [
         ("TEXT", usage.input_details.text_tokens),
         ("AUDIO", usage.input_details.audio_tokens),
@@ -101,6 +108,35 @@ pub fn encode_gemini_usage(usage: &IrUsage, original: Option<&UsageMetadata>) ->
         set_modality(&mut encoded.candidates_tokens_details, modality, count);
     }
     encoded
+}
+
+/// 缓存和工具输入使用同一套模态计数，避免把细分计数再次计入总用量。
+/// 参考：https://ai.google.dev/api/generate-content#UsageMetadata
+fn decode_modalities(value: &OptionalNullable<Vec<ModalityTokenCount>>) -> ModalityTokenDetails {
+    let items = details(value);
+    ModalityTokenDetails {
+        text_tokens: modality_count(items, "TEXT"),
+        audio_tokens: modality_count(items, "AUDIO"),
+        image_tokens: modality_count(items, "IMAGE"),
+        video_tokens: modality_count(items, "VIDEO"),
+        document_tokens: modality_count(items, "DOCUMENT"),
+    }
+}
+
+/// 写回可移植的模态明细；未知模态仍由同协议来源副本保存。
+fn encode_modalities(
+    target: &mut OptionalNullable<Vec<ModalityTokenCount>>,
+    value: &ModalityTokenDetails,
+) {
+    for (modality, count) in [
+        ("TEXT", value.text_tokens),
+        ("AUDIO", value.audio_tokens),
+        ("IMAGE", value.image_tokens),
+        ("VIDEO", value.video_tokens),
+        ("DOCUMENT", value.document_tokens),
+    ] {
+        set_modality(target, modality, count);
+    }
 }
 
 /// 取得可用的模态明细。
@@ -123,13 +159,19 @@ fn modality_count(details: &[ModalityTokenCount], modality: &str) -> Option<u64>
     count
 }
 
-/// 更新已有模态；没有原始项时追加一个标准模态项。
+/// 未编辑时保留重复项原貌；编辑时合并为一项，清空时删除该模态。
 fn set_modality(
     target: &mut OptionalNullable<Vec<ModalityTokenCount>>,
     modality: &str,
     value: Option<u64>,
 ) {
+    if modality_count(details(target), modality) == value {
+        return;
+    }
     let Some(value) = value else {
+        if let OptionalNullable::Value(details) = target {
+            details.retain(|detail| !detail.modality.eq_ignore_ascii_case(modality));
+        }
         return;
     };
     if !matches!(target, OptionalNullable::Value(_)) {
@@ -141,6 +183,15 @@ fn set_modality(
             .find(|detail| detail.modality.eq_ignore_ascii_case(modality))
         {
             detail.token_count = value;
+            let mut found = false;
+            details.retain(|detail| {
+                if !detail.modality.eq_ignore_ascii_case(modality) {
+                    return true;
+                }
+                let keep = !found;
+                found = true;
+                keep
+            });
         } else {
             details.push(ModalityTokenCount {
                 modality: modality.into(),
@@ -193,5 +244,28 @@ mod tests {
             encoded.candidates_token_count,
             crate::protocol::OptionalNullable::Value(25)
         );
+    }
+
+    #[test]
+    fn cache_and_tool_modalities_can_be_rebuilt_edited_and_cleared() {
+        let raw: UsageMetadata = serde_json::from_value(json!({
+            "promptTokenCount":100,"cachedContentTokenCount":30,
+            "toolUsePromptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":105,
+            "cacheTokensDetails":[{"modality":"TEXT","tokenCount":10},{"modality":"text","tokenCount":20}],
+            "toolUsePromptTokensDetails":[{"modality":"TEXT","tokenCount":0},{"modality":"IMAGE","tokenCount":10}]
+        })).unwrap();
+        let mut ir = decode_gemini_usage(&raw);
+        assert_eq!(ir.cache.read_details.text_tokens, Some(30));
+        assert_eq!(ir.input_details.tool_details.text_tokens, Some(0));
+        assert_eq!(ir.input_details.tool_details.image_tokens, Some(10));
+        assert_eq!(ir.input_tokens, Some(100));
+        assert_eq!(ir.output_tokens, Some(5));
+        assert_eq!(encode_gemini_usage(&ir, Some(&raw)), raw);
+        assert_eq!(decode_gemini_usage(&encode_gemini_usage(&ir, None)), ir);
+        ir.cache.read_details.text_tokens = Some(25);
+        ir.input_details.tool_details.image_tokens = None;
+        let edited = encode_gemini_usage(&ir, Some(&raw));
+        assert_eq!(edited.cache_tokens_details.as_option().unwrap().len(), 1);
+        assert_eq!(decode_gemini_usage(&edited), ir);
     }
 }

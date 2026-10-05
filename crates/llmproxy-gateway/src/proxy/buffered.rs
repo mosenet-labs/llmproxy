@@ -84,8 +84,10 @@ pub(super) async fn forward(
     let mut rx = handle.rx;
     // 发送完正文后仍持有发送端；提前关闭会被子请求当作客户端断开。
     let tx = handle.tx;
-    // 不 spawn 游离任务：父请求取消时三个 future 一起销毁，子请求不会留在后台生成。
-    let (_, _, captured) = tokio::join!(
+    // 框架的 idle 读取监视客户端关闭；子请求执行期间父请求没有写出响应头。
+    // 任一关闭事件会销毁整个子请求 future，从而主动释放上游连接。
+    let outcome = tokio::select! {
+        completed = async { tokio::join!(
         request.run(),
         async {
             for chunk in input {
@@ -102,10 +104,15 @@ pub(super) async fn forward(
             }
             response.finish()
         }
-    );
+        ) } => Ok(completed),
+        closed = session.read_body_or_idle(true) => Err(closed.err().unwrap_or_else(|| {
+            Error::explain(ErrorType::ConnectionClosed, "client closed during buffered response")
+        }).into_down()),
+    };
     if let Some(restored) = shared.0.lock().expect("subrequest context mutex").take() {
         *ctx = restored;
     }
+    let (_, _, captured) = outcome?;
     // 通道关闭与失败通知可能同一次轮询就绪，等子请求结束后优先核对错误。
     if let Ok(error) = error_rx.try_recv() {
         if error.esource() == &pingora::ErrorSource::Downstream {

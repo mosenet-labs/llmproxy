@@ -35,6 +35,7 @@ pub fn decode_chat_usage(usage: &ChatUsage) -> IrUsage {
             write_input_tokens: write,
             write_short_input_tokens: None,
             write_long_input_tokens: None,
+            ..Default::default()
         },
         input_details: InputTokenDetails {
             uncached_tokens: read.zip(write).and_then(|(read, write)| {
@@ -46,6 +47,7 @@ pub fn decode_chat_usage(usage: &ChatUsage) -> IrUsage {
             video_tokens: None,
             document_tokens: None,
             tool_tokens: None,
+            ..Default::default()
         },
         output_details: OutputTokenDetails {
             text_tokens: output.and_then(|details| present(&details.text_tokens)),

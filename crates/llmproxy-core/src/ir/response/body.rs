@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Candidate, Item, Message, Status, source::Source};
+use super::{Candidate, Failure, Item, Message, Status, source::Source};
 use crate::{ir::usage::Usage, protocol::Protocol};
 
 /// 一次完整响应的消息和用量投影，以及可同协议回写的来源类型。
@@ -16,6 +16,9 @@ pub struct Response {
     pub created_at: Option<i64>,
     /// 整体生成状态。
     pub status: Status,
+    /// 生成失败详情；状态与错误分别保存，避免 HTTP 200 被误认为生成成功。
+    #[serde(default)]
+    pub failure: Option<Failure>,
     /// 候选边界及各自的结束原因。
     pub candidates: Vec<Candidate>,
     /// 尚未进入通用语义的字段及跨协议处理规则。
@@ -40,6 +43,7 @@ impl Response {
             id: None,
             created_at: None,
             status: Status::Unknown,
+            failure: None,
             candidates: Vec::new(),
             diagnostics: Vec::new(),
             messages: Vec::new(),

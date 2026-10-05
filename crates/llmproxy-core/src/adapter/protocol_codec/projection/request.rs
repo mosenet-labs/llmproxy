@@ -91,7 +91,14 @@ pub(in crate::adapter::protocol_codec) fn decode(request: &mut Request, source: 
                 }
             }
             notes.field(&body.access_programs, "request.access_programs");
-            notes.field(&body.background, "request.background");
+            // 后台生成依赖来源服务的轮询与取消接口，不能改成同步调用。
+            // 参考：https://developers.openai.com/api/docs/guides/background
+            if body.background.as_option() == Some(&true) {
+                notes.reject(
+                    "request.background",
+                    "后台生成需要来源 Provider 的状态接口，不能跨协议转换",
+                );
+            }
             notes.field(&body.context_management, "request.context_management");
             if body.conversation.as_option().is_some() {
                 notes.reject(

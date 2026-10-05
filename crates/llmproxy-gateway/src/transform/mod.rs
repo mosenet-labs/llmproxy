@@ -43,6 +43,7 @@ pub struct BodyTransform {
     codec: Option<(Protocol, MessagePhase)>,
     cross: Option<CrossConversion>,
     cross_error: Option<(Protocol, u16)>,
+    tool_state: Option<crate::tool_state::Context>,
     // JSON 等待正文结束；SSE 只保留尚未完整的事件。
     pending: Vec<u8>,
 }
@@ -55,6 +56,7 @@ impl BodyTransform {
             codec: None,
             cross: None,
             cross_error: None,
+            tool_state: None,
             pending: Vec::new(),
         }
     }
@@ -62,6 +64,11 @@ impl BodyTransform {
     /// 为 JSON 正文指定来源协议及请求或响应方向。
     pub fn set_codec(&mut self, protocol: Protocol, phase: MessagePhase) {
         self.codec = Some((protocol, phase));
+    }
+
+    /// 保存本次请求固定的工具回合作用域，不在正文回调中重新选路。
+    pub fn set_tool_state(&mut self, context: crate::tool_state::Context) {
+        self.tool_state = Some(context);
     }
 
     /// 启用请求跨协议转换；完整 JSON 会在正文结束时写成 Provider 协议。
@@ -153,7 +160,7 @@ impl BodyTransform {
         *body = Some(match self.kind {
             BodyKind::Json => {
                 if let Some(cross) = &self.cross {
-                    cross::convert(complete, cross)?
+                    cross::convert(complete, cross, self.tool_state.as_ref())?
                 } else {
                     process_json(complete, self.codec)
                 }
@@ -189,6 +196,9 @@ fn process_json(bytes: Bytes, codec: Option<(Protocol, MessagePhase)>) -> Bytes 
             MessagePhase::Response => {
                 let body = codec::decode_response(protocol, &bytes)?;
                 let ir = protocol.decode_response(&body)?;
+                if let Some(usage) = &ir.usage {
+                    crate::observability::response_usage(protocol, protocol, usage);
+                }
                 let encoded = protocol.encode_response(&ir)?;
                 if body == encoded {
                     Ok(None)

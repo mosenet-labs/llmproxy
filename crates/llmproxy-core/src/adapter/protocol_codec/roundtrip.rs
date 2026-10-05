@@ -97,6 +97,34 @@ pub(super) fn response(
             "同协议回写暂不支持修改状态或候选边界".into(),
         ));
     }
+    if edited.failure != before.failure {
+        if edited.failure.is_some() && edited.status != crate::ir::response::Status::Failed {
+            return Err(Error::Unsupported("非失败状态不能加入生成错误".into()));
+        }
+        match body {
+            RawResponse::Responses(body) => {
+                let original = body.error.as_option().cloned();
+                body.error = edited
+                    .failure
+                    .as_ref()
+                    .map(|failure| {
+                        let mut error = original.clone().unwrap_or(
+                            crate::protocol::responses::response::body::ResponseError {
+                                code: String::new(),
+                                message: String::new(),
+                                misalignment: Default::default(),
+                                extra: Default::default(),
+                            },
+                        );
+                        error.code.clone_from(&failure.code);
+                        error.message.clone_from(&failure.message);
+                        error
+                    })
+                    .into();
+            }
+            _ => return Err(Error::Unsupported("目标完成响应没有生成错误字段".into())),
+        }
+    }
     if edited.model != before.model {
         match body {
             RawResponse::Chat(b) => b.model = required(&edited.model, "model")?,

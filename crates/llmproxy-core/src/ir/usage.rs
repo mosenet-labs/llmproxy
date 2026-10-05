@@ -38,6 +38,24 @@ pub struct InputTokenDetails {
     pub document_tokens: Option<u64>,
     /// 工具调用引入的额外输入词元数。
     pub tool_tokens: Option<u64>,
+    /// 工具输入的模态细分；已包含在供应商报告的工具输入中，不再累加到输入总数。
+    #[serde(default)]
+    pub tool_details: ModalityTokenDetails,
+}
+
+/// 缓存读取与工具输入共用的模态明细；缺失与明确报告零分别保存。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModalityTokenDetails {
+    /// 文本词元数。
+    pub text_tokens: Option<u64>,
+    /// 音频词元数。
+    pub audio_tokens: Option<u64>,
+    /// 图片词元数。
+    pub image_tokens: Option<u64>,
+    /// 视频词元数。
+    pub video_tokens: Option<u64>,
+    /// 文档词元数。
+    pub document_tokens: Option<u64>,
 }
 
 /// 输出模态和生成方式的细分；其值可能相互重叠。

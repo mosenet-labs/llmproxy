@@ -105,6 +105,14 @@ impl RequestTelemetry {
         }
     }
 
+    /// 同步正文处理与转换告警归入本次请求的 span；闭包不能跨 await。
+    pub fn in_scope<T>(&self, action: impl FnOnce() -> T) -> T {
+        match &self.span {
+            Some(span) => span.in_scope(action),
+            None => action(),
+        }
+    }
+
     pub fn resolved(&mut self, elapsed: Duration, result: &pingora::Result<SocketAddr>) {
         self.dns_seconds = Some(elapsed.as_secs_f64());
         match result {

@@ -13,6 +13,8 @@ pub enum Error {
     Invalid(String),
     /// 目标协议无法安全表达此语义。
     Unsupported(String),
+    /// 生成已经失败或取消，目标协议不能用正常完成响应表达。
+    FailedResponse,
     /// 原始协议 DTO 的 JSON 转换失败。
     Json(serde_json::Error),
 }
@@ -21,6 +23,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid(message) | Self::Unsupported(message) => f.write_str(message),
+            Self::FailedResponse => f.write_str("Provider generation failed or was cancelled"),
             Self::Json(error) => error.fmt(f),
         }
     }

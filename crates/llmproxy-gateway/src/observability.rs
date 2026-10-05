@@ -1,7 +1,9 @@
 mod connection;
 mod request;
+mod usage;
 
 pub use request::{GatewayTelemetry, RequestTelemetry};
+pub use usage::response_usage;
 
 pub fn listening(listen: &str) {
     tracing::info!(

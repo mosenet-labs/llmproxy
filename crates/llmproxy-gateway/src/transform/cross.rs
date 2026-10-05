@@ -25,7 +25,11 @@ pub(super) enum CrossConversion {
 }
 
 /// 仅记录字段路径和原因；正文及工具结果不进入日志。
-pub(super) fn convert(bytes: Bytes, conversion: &CrossConversion) -> Result<Bytes> {
+pub(super) fn convert(
+    bytes: Bytes,
+    conversion: &CrossConversion,
+    tool_state: Option<&crate::tool_state::Context>,
+) -> Result<Bytes> {
     let response = matches!(conversion, CrossConversion::Response { .. });
     let result = (|| -> std::result::Result<Bytes, llmproxy_core::adapter::Error> {
         let (bytes, warnings) = match conversion {
@@ -36,13 +40,16 @@ pub(super) fn convert(bytes: Bytes, conversion: &CrossConversion) -> Result<Byte
             } => {
                 let body = codec::decode_request(*source, &bytes)?;
                 let request = source.decode_request(&body)?;
-                let converted = target.encode_request_for(
+                let mut converted = target.encode_request_for(
                     &request,
                     &RequestTarget {
                         model,
                         max_output_tokens: None,
                     },
                 )?;
+                if let Some(state) = tool_state {
+                    state.restore(&mut converted.body)?;
+                }
                 (codec::encode_request(&converted.body)?, converted.warnings)
             }
             CrossConversion::Response {
@@ -53,7 +60,17 @@ pub(super) fn convert(bytes: Bytes, conversion: &CrossConversion) -> Result<Byte
                 created,
             } => {
                 let body = codec::decode_response(*source, &bytes)?;
-                let response = source.decode_response(&body)?;
+                let mut response = source.decode_response(&body)?;
+                if let Some(usage) = &response.usage {
+                    crate::observability::response_usage(*source, *target, usage);
+                }
+                let pending = if let (Some(state), llmproxy_core::protocol::Response::Gemini(raw)) =
+                    (tool_state, &body)
+                {
+                    Some(state.capture(raw, &mut response, *target)?)
+                } else {
+                    None
+                };
                 let converted = target.encode_response_for(
                     &response,
                     &ResponseTarget {
@@ -62,16 +79,22 @@ pub(super) fn convert(bytes: Bytes, conversion: &CrossConversion) -> Result<Byte
                         created: *created,
                     },
                 )?;
-                (codec::encode_response(&converted.body)?, converted.warnings)
+                let bytes = codec::encode_response(&converted.body)?;
+                if let Some(pending) = pending {
+                    pending.commit()?;
+                }
+                (bytes, converted.warnings)
             }
         };
         for warning in warnings {
-            tracing::warn!(source=warning.source.as_str(),target=warning.target.as_str(),path=%warning.path,reason=%warning.reason,"protocol conversion dropped or weakened semantics");
+            tracing::warn!(component="gateway",event_kind="conversion",source=warning.source.as_str(),target=warning.target.as_str(),path=%warning.path,reason=%warning.reason,"protocol conversion dropped or weakened semantics");
         }
         Ok(Bytes::from(bytes))
     })();
     result.map_err(|_| {
         tracing::warn!(
+            component = "gateway",
+            event_kind = "conversion",
             phase = if response { "response" } else { "request" },
             "protocol conversion failed"
         );

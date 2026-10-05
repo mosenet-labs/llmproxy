@@ -22,6 +22,9 @@ pub struct CacheSettings {
 pub struct CacheUsage {
     /// 从提示缓存读取的词元数；`None` 表示上游未报告。
     pub read_input_tokens: Option<u64>,
+    /// 缓存读取的模态细分，不能与缓存读取总数重复相加。
+    #[serde(default)]
+    pub read_details: super::usage::ModalityTokenDetails,
     /// 写入提示缓存的词元数；`None` 表示上游未报告。
     pub write_input_tokens: Option<u64>,
     /// 写入短时缓存的词元数；可用于区分不同 TTL 的计费。

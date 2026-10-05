@@ -16,6 +16,73 @@ use crate::{
 };
 use serde_json::{Map, Value};
 
+/// Responses 可表达终止失败状态；其他完成外壳返回独立失败，由 Gateway 发出 502 错误。
+/// 参考：https://developers.openai.com/api/docs/guides/background
+pub(super) fn encode_failure(
+    protocol: Protocol,
+    response: &Response,
+    target: &ResponseTarget<'_>,
+) -> Result<Conversion<RawResponse>> {
+    if protocol != Protocol::OpenAiResponses {
+        return Err(crate::adapter::Error::FailedResponse);
+    }
+    nonempty(target.model, "target.model")?;
+    nonempty(target.id, "target.id")?;
+    let mut warnings = Vec::new();
+    super::apply_diagnostics(
+        &response.diagnostics,
+        response.source_protocol(),
+        protocol,
+        &mut warnings,
+    )?;
+    if !response.items.is_empty() || !response.messages.is_empty() {
+        warn(
+            &mut warnings,
+            response.source_protocol(),
+            protocol,
+            "output",
+            "失败响应的部分输出已丢弃，不能作为完成内容返回",
+        );
+    }
+    let cancelled = response.status == crate::ir::response::Status::Cancelled;
+    let error = if cancelled {
+        O::Null
+    } else {
+        O::Value(responses::response::body::ResponseError {
+            code: "server_error".into(),
+            message: "Provider generation failed".into(),
+            misalignment: O::Missing,
+            extra: Default::default(),
+        })
+    };
+    Ok(Conversion {
+        body: RawResponse::Responses(Box::new(responses::response::Response {
+            id: target.id.into(),
+            created_at: target.created,
+            model: target.model.into(),
+            object: "response".into(),
+            status: O::Value(if cancelled { "cancelled" } else { "failed" }.into()),
+            error,
+            usage: response
+                .usage
+                .as_ref()
+                .map(|usage| {
+                    let normalized = super::usage::normalize(
+                        usage,
+                        response.source_protocol(),
+                        protocol,
+                        &mut warnings,
+                    )?;
+                    usage_adapter::encode_responses_usage(&normalized, None)
+                })
+                .transpose()?
+                .into(),
+            ..Default::default()
+        })),
+        warnings,
+    })
+}
+
 pub(super) fn encode_single(
     protocol: Protocol,
     response: &Response,

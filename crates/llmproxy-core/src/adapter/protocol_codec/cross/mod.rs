@@ -137,7 +137,11 @@ fn warn_metadata(
             source,
             target,
             &format!("{path}.{key}"),
-            "附加字段尚无目标协议映射，已丢弃",
+            if key == "thoughtSignature" {
+                "签名不写入目标协议；工具回合需由接入方保留状态"
+            } else {
+                "附加字段尚无目标协议映射，已丢弃"
+            },
         );
     }
     Ok(())

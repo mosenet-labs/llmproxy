@@ -130,9 +130,30 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                 };
                 for (part_index, part) in message.parts.iter().enumerate() {
                     let part_path = format!("{path}.parts[{part_index}]");
+                    let mut metadata = part.metadata.clone();
+                    let signature = if request.source_protocol() == Protocol::Gemini
+                        && protocol == Protocol::Gemini
+                        && matches!(part.kind, PartKind::ToolCall(_))
+                    {
+                        let mut extra = crate::adapter::wire::extra(&metadata, Protocol::Gemini);
+                        let signature = crate::adapter::wire::take(&mut extra, "thoughtSignature")?;
+                        if let Some(form) =
+                            crate::adapter::wire::form(&part.metadata, Protocol::Gemini)
+                        {
+                            crate::adapter::wire::save(
+                                &mut metadata,
+                                Protocol::Gemini,
+                                form,
+                                extra,
+                            );
+                        }
+                        signature
+                    } else {
+                        crate::protocol::OptionalNullable::Missing
+                    };
                     if !matches!(part.kind, PartKind::ToolResult(_)) {
                         warn_metadata(
-                            &part.metadata,
+                            &metadata,
                             request.source_protocol(),
                             protocol,
                             &part_path,
@@ -196,7 +217,31 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                                 );
                             }
                         }
-                        PartKind::Media(media) => items.media(role, media)?,
+                        PartKind::Media(media) => {
+                            if let crate::ir::media::MediaSource::Text(text) = &media.source
+                                && media.kind == crate::ir::media::MediaKind::File
+                                && protocol != Protocol::AnthropicMessages
+                            {
+                                warn(
+                                    &mut warnings,
+                                    request.source_protocol(),
+                                    protocol,
+                                    &part_path,
+                                    "文本文档降为文本，保留正文；文档标题、边界与文档引用能力丢失",
+                                );
+                                emit_text(
+                                    protocol,
+                                    &mut items,
+                                    role,
+                                    text,
+                                    request.source_protocol(),
+                                    &part_path,
+                                    &mut warnings,
+                                )?;
+                            } else {
+                                items.media(role, media)?;
+                            }
+                        }
                         PartKind::Refusal(text) => {
                             warn(
                                 &mut warnings,
@@ -228,6 +273,7 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
                                 &part_path,
                                 &mut warnings,
                             )?;
+                            items.call_signature(signature);
                         }
                         PartKind::ToolResult(result) => emit_result(
                             protocol,

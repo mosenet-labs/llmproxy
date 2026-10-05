@@ -49,6 +49,7 @@ pub fn decode_messages_usage(usage: &RawUsage) -> IrUsage {
                 .and_then(|value| present(&value.ephemeral_5m_input_tokens)),
             write_long_input_tokens: creation
                 .and_then(|value| present(&value.ephemeral_1h_input_tokens)),
+            ..Default::default()
         },
         input_details: InputTokenDetails {
             uncached_tokens: Some(usage.input_tokens),

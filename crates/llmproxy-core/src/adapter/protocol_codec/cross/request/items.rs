@@ -277,6 +277,17 @@ impl Items {
         }
         Ok(())
     }
+    /// Gemini 同协议重建历史时，签名必须留在原函数调用片段上。
+    /// 参考：https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
+    pub(super) fn call_signature(&mut self, signature: O<String>) {
+        if let Self::Gemini(items) = self
+            && let Some(part) = items
+                .last_mut()
+                .and_then(|message| message.parts.last_mut())
+        {
+            part.thought_signature = signature;
+        }
+    }
     /// 把类型化输入项装入完整目标请求，生成参数和工具由各自模块写入。
     pub(super) fn finish(self, model: &str, system: Vec<String>) -> protocol::Request {
         let system = (!system.is_empty()).then(|| system.join("\n"));

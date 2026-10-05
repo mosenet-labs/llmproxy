@@ -3,6 +3,7 @@ mod console;
 mod observability;
 mod proxy;
 mod snapshot;
+mod tool_state;
 mod transform;
 
 use std::error::Error;

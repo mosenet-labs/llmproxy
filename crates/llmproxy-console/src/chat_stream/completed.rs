@@ -24,6 +24,17 @@ pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, Stri
         })
     })();
     let body = parsed.map_err(|_| "无法解析上游非流式响应".to_owned())?;
+    let ir = protocol
+        .decode_response(&body)
+        .map_err(|_| "无法解码上游非流式响应".to_owned())?;
+    use llmproxy_core::ir::response::Status;
+    match ir.status {
+        Status::Failed => return Err("Provider 生成失败".into()),
+        Status::Cancelled => return Err("Provider 已取消本次生成".into()),
+        Status::InProgress => return Err("Provider 尚未完成生成，当前对话不支持后台轮询".into()),
+        Status::Unknown => return Err("Provider 返回了未知生成状态".into()),
+        Status::Completed | Status::Incomplete => {}
+    }
     let mut reply = ChatReply::default();
     match &body {
         Response::Chat(body) => {
@@ -50,8 +61,8 @@ pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, Stri
             }
         }
         Response::Responses(body) => {
-            if let Some(error) = body.error.as_option() {
-                return Err(error.message.clone());
+            if body.error.as_option().is_some() {
+                return Err("Provider 返回了生成错误".into());
             }
             for item in &body.output {
                 match item {
@@ -136,10 +147,7 @@ pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, Stri
             }
         }
     }
-    reply.usage = protocol
-        .decode_response(&body)
-        .map_err(|_| "无法读取响应用量".to_owned())?
-        .usage;
+    reply.usage = ir.usage;
     if reply.content.is_empty() && reply.thinking.is_empty() && reply.summary.is_empty() {
         return Err("上游未返回可显示的文本内容".into());
     }
@@ -168,5 +176,18 @@ mod tests {
         let usage = reply.usage.unwrap();
         assert_eq!(usage.input_tokens, Some(70));
         assert_eq!(usage.cache.read_input_tokens, Some(50));
+    }
+
+    #[test]
+    fn incomplete_provider_states_do_not_enter_chat_history() {
+        for status in ["failed", "cancelled", "queued", "in_progress"] {
+            let body = serde_json::json!({"id":"r","created_at":1,"model":"m","object":"response","status":status,"output":[],"error":if status == "failed" {serde_json::json!({"code":"server_error","message":"private-provider-detail"})} else {serde_json::Value::Null}});
+            let error = decode(
+                Protocol::OpenAiResponses,
+                &serde_json::to_vec(&body).unwrap(),
+            )
+            .unwrap_err();
+            assert!(!error.contains("private-provider-detail"));
+        }
     }
 }
