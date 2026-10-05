@@ -1,4 +1,5 @@
 use super::incremental::Reply;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::protocol::Protocol;
 use serde_json::{Value, json};
 
@@ -89,4 +90,166 @@ fn partial_text_updates_immediately_and_truncation_does_not_complete() {
             .unwrap_err()
             .contains("生成失败")
     );
+}
+
+/// 独立编码的两段音频包含 padding，不能把原始 Base64 字符串直接拼接。
+fn audio_events(protocol: Protocol, bytes: &[u8]) -> (Vec<Value>, Vec<Value>) {
+    let (first, second) = bytes.split_at(bytes.len().min(1));
+    let first = STANDARD.encode(first);
+    let second = STANDARD.encode(second);
+    if protocol == Protocol::OpenAiChat {
+        let chunk = |delta: Value, finish: Value| json!({"id":"c","model":"m","created":1,"object":"chat.completion.chunk","choices":[{"index":0,"delta":delta,"finish_reason":finish}]});
+        (
+            vec![
+                chunk(
+                    json!({"role":"assistant","audio":{"id":"private-audio-id","data":first,"transcript":"你好，"}}),
+                    Value::Null,
+                ),
+                chunk(
+                    json!({"audio":{"data":second,"transcript":"音频测试。"}}),
+                    Value::Null,
+                ),
+            ],
+            vec![
+                chunk(json!({}), json!("stop")),
+                chunk(json!({"audio":{"expires_at":123}}), Value::Null),
+            ],
+        )
+    } else {
+        (
+            vec![
+                json!({"type":"response.created","sequence_number":0,"response":{"id":"r","model":"m","created_at":1,"object":"response","output":[]}}),
+                json!({"type":"response.audio.transcript.delta","sequence_number":1,"response_id":"r","delta":"你好，"}),
+                json!({"type":"response.audio.delta","sequence_number":2,"response_id":"r","delta":first}),
+                json!({"type":"response.audio.delta","sequence_number":3,"response_id":"r","delta":second}),
+                json!({"type":"response.audio.transcript.delta","sequence_number":4,"response_id":"r","delta":"音频测试。"}),
+            ],
+            vec![
+                json!({"type":"response.audio.transcript.done","sequence_number":5,"response_id":"r"}),
+                json!({"type":"response.audio.done","sequence_number":6,"response_id":"r"}),
+                json!({"type":"response.completed","sequence_number":7,"response":{"id":"r","model":"m","created_at":1,"object":"response","status":"completed","output":[]}}),
+            ],
+        )
+    }
+}
+
+#[test]
+fn native_audio_joins_decoded_chunks_and_streams_transcripts_without_history() {
+    for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses] {
+        for bytes in [
+            b"abc".as_slice(),
+            b"RIFF\x04\0\0\0WAVEdata".as_slice(),
+            b"".as_slice(),
+        ] {
+            let (start, end) = audio_events(protocol, bytes);
+            let mut reply = Reply::new(protocol);
+            let mut transcript = String::new();
+            for value in start {
+                // 验证 UTF-8 及 HTTP 分块不影响音频和转录的逐帧投影。
+                for bytes in packet(value).chunks(2) {
+                    reply
+                        .push(bytes, &mut |r| {
+                            assert!(r.content.is_empty());
+                            assert!(r.parts.iter().all(|part| part.media.is_none()));
+                            if let Some(part) = r.parts.iter().find(|part| part.title == "音频转录")
+                            {
+                                transcript = part.text.clone();
+                            }
+                        })
+                        .unwrap();
+                }
+            }
+            assert_eq!(transcript, "你好，音频测试。");
+            for value in end {
+                reply.push(&packet(value), &mut |_| {}).unwrap();
+            }
+            if protocol == Protocol::OpenAiChat {
+                reply.push(b"data: [DONE]\n\n", &mut |_| {}).unwrap();
+            }
+            let reply = reply.finish().unwrap();
+            assert!(reply.content.is_empty());
+            assert_eq!(
+                reply
+                    .parts
+                    .iter()
+                    .filter(|part| part.title == "音频转录")
+                    .count(),
+                1
+            );
+            let media = reply.parts.iter().find_map(|part| part.media.as_ref());
+            if bytes.is_empty() {
+                assert!(media.is_none());
+            } else {
+                let media = media.unwrap();
+                assert_eq!(
+                    STANDARD
+                        .decode(media.uri.split_once(',').unwrap().1)
+                        .unwrap(),
+                    bytes
+                );
+                assert_eq!(media.preview, bytes.starts_with(b"RIFF"));
+            }
+            assert!(!format!("{:?}", reply.parts).contains("private-audio-id"));
+        }
+    }
+}
+
+#[test]
+fn audio_and_transcript_require_their_own_terminal_events() {
+    for protocol in [Protocol::OpenAiChat, Protocol::OpenAiResponses] {
+        let (start, end) = audio_events(protocol, b"abc");
+        let mut reply = Reply::new(protocol);
+        for value in start.clone() {
+            reply.push(&packet(value), &mut |_| {}).unwrap();
+        }
+        assert!(reply.finish().is_err(), "{protocol:?}");
+        if protocol == Protocol::OpenAiResponses {
+            for missing in ["response.audio.done", "response.audio.transcript.done"] {
+                let mut reply = Reply::new(protocol);
+                for value in start
+                    .iter()
+                    .chain(end.iter())
+                    .filter(|value| value["type"] != missing)
+                {
+                    if reply.push(&packet(value.clone()), &mut |_| {}).is_err() {
+                        break;
+                    }
+                }
+                assert!(reply.finish().is_err(), "{missing}");
+            }
+        }
+    }
+}
+
+#[test]
+fn native_audio_rejects_invalid_encoding_and_accumulated_oversize() {
+    for data in [
+        "not-base64!".to_owned(),
+        STANDARD.encode(vec![0; 64 * 1024]),
+    ] {
+        let mut reply = Reply::new(Protocol::OpenAiResponses);
+        reply
+            .push(
+                &packet(audio_events(Protocol::OpenAiResponses, b"abc").0.remove(0)),
+                &mut |_| {},
+            )
+            .unwrap();
+        let mut error = None;
+        for sequence in 1..=4 {
+            let value =
+                json!({"type":"response.audio.delta","sequence_number":sequence,"delta":data});
+            if let Err(failure) = reply.push(&packet(value), &mut |_| {}) {
+                error = Some(failure);
+                break;
+            }
+        }
+        assert_eq!(
+            error.as_deref(),
+            Some(if data == "not-base64!" {
+                "上游音频数据无效"
+            } else {
+                "上游回复过长"
+            })
+        );
+    }
 }

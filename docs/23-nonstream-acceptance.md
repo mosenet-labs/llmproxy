@@ -148,7 +148,7 @@ rtk proxy env LLMPROXY_LIVE_DATABASE_ENV=LLMPROXY_DATABASE_URL LLMPROXY_LIVE_CAP
 - [x] OpenObserve 中的请求关联、用量/缓存日志、对应 trace 与请求指标读回；模拟 Provider 不消费 token。
 - [x] 跨协议流式基础链路：事件 IR、四协议状态机、逐帧 SSE、签名组持久化、安全错误、usage/cache、取消/背压及 16 方向真实/页面矩阵；专项外部门槛见[文档 24](24-protocol-completion-tasks.md)。
 
-非流式门槛尚未全部关闭，不能将上述文本矩阵通过表述为完整非流式能力验收，也不能宣称跨协议流式已可用。
+非流式原厂专属能力的门槛尚未全部关闭，不能将文本矩阵通过表述为全部能力验收。跨协议流式基础链路已可用，文档 24 的 S7-4 OpenObserve 流式实际读回已通过；S7-5 音频/转录展示、播放、清理及两协议附件实际保存通过，S7 已关闭。专项端到端验收追踪为 S8-4，原厂能力门槛追踪为 S8-5 与 N2/N3。
 
 ## 收尾任务追加验证
 

@@ -386,6 +386,30 @@ mod tests {
 mod usage_tests {
     use super::*;
     #[test]
+    fn streaming_audio_is_cleared_on_stop_or_failure_and_never_enters_history() {
+        for stopped in [false, true] {
+            let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
+            assert!(room.begin("audio"));
+            room.update(&ChatReply {
+                parts: vec![DisplayPart {
+                    title: "音频转录".into(),
+                    text: "尚未完成的转录".into(),
+                    media: None,
+                }],
+                ..Default::default()
+            });
+            assert!(!room.parts_snapshot().is_empty());
+            if stopped {
+                assert!(room.stop());
+            }
+            room.finish(Err("Provider 生成失败".into()));
+            assert!(room.parts_snapshot().is_empty());
+            assert!(room.begin("next"));
+            assert!(!format!("{:?}", room.start_request().unwrap()).contains("尚未完成的转录"));
+        }
+    }
+
+    #[test]
     fn streaming_tools_and_usage_update_before_completion_and_are_cleared_on_failure() {
         let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
         assert!(room.begin("hi"));

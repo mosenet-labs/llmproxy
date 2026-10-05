@@ -1,4 +1,5 @@
 //! 控制台聊天的 HTTP 边界：非流式读取整包，已有同协议流式路径逐事件读取。
+mod audio;
 mod completed;
 mod display;
 mod incremental;

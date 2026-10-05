@@ -456,13 +456,18 @@ async fn chat_message_entry(
             }
             if message.role == ChatBubbleRole::User || message.status != ChatMessageStatus::Complete {
                 <p class="m-0 whitespace-pre-wrap break-words">(if message.content.is_empty() { if thought.is_empty() { "正在等待回复…" } else { "正在思考…" } } else { message.content.as_str() })</p>
-            } else {
+            }
+            if message.role == ChatBubbleRole::Assistant {
                 if parts.is_empty() {
-                    chat_markdown(source: message.content.as_str())
+                    if message.status == ChatMessageStatus::Complete {
+                        chat_markdown(source: message.content.as_str())
+                    }
                 } else {
                     for part in &parts {
                         if part.title.is_empty() {
-                            chat_markdown(source: part.text.as_str())
+                            if message.status == ChatMessageStatus::Complete {
+                                chat_markdown(source: part.text.as_str())
+                            }
                         } else {
                             <section class="my-3 rounded-lg border border-border bg-[#f9fafc] p-3" aria-label=(part.title.as_str())>
                                 <h4 class="mt-0 mb-2 text-[12px] font-semibold text-heading">(part.title.as_str())</h4>

@@ -1,5 +1,5 @@
 //! 页面与 Gateway 共用 SSE 分帧及事件 IR，逐帧显示并校验正常结束。
-use super::{ChatReply, DisplayPart, MAX_REPLY_BYTES, display};
+use super::{ChatReply, DisplayPart, MAX_REPLY_BYTES, audio::Audio, display};
 use llmproxy_core::{
     adapter::protocol_codec::{ProtocolCodec, stream::Decoder},
     ir::{
@@ -20,6 +20,7 @@ pub(super) struct Reply {
     heads: BTreeMap<Key, Head>,
     texts: BTreeMap<Key, usize>,
     tools: BTreeMap<Key, (String, usize)>,
+    audio: Audio,
     reply: ChatReply,
 }
 impl Reply {
@@ -35,6 +36,7 @@ impl Reply {
             heads: BTreeMap::new(),
             texts: BTreeMap::new(),
             tools: BTreeMap::new(),
+            audio: Audio::default(),
             reply: ChatReply::default(),
         }
     }
@@ -149,6 +151,7 @@ impl Reply {
                 Event::ServerOutput { key, output } if key.candidate == 0 => {
                     display::server_part(&output, &mut self.reply)
                 }
+                Event::Native(event) => self.audio.push(&event, &mut self.reply)?,
                 Event::Failure(_) => return Err("Provider 生成失败".into()),
                 _ => {}
             }
@@ -165,7 +168,11 @@ impl Reply {
             .filter(|p| !p.title.is_empty())
             .map(|p| p.title.len() + p.text.len() + p.media.as_ref().map_or(0, |m| m.uri.len()))
             .sum();
-        if self.reply.content.len() + self.reply.thinking.len() + self.reply.summary.len() + extra
+        if self.reply.content.len()
+            + self.reply.thinking.len()
+            + self.reply.summary.len()
+            + extra
+            + self.audio.buffered_bytes()
             > MAX_REPLY_BYTES
         {
             Err("上游回复过长".into())
