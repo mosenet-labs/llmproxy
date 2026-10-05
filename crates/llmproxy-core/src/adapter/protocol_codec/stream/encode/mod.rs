@@ -2,8 +2,11 @@
 mod chat;
 mod gemini;
 mod messages;
+mod native;
 mod responses;
 
+#[cfg(test)]
+mod native_tests;
 #[cfg(test)]
 mod tests;
 
@@ -159,16 +162,56 @@ impl Encoder {
             return Err(unsupported("candidates", "单候选目标没有候选 0"));
         }
         match event {
-            Event::Native(_)
-            | Event::PartStart {
-                head: Head::Native(_),
-                ..
+            Event::Diagnostic {
+                protocol,
+                diagnostic,
+            } => {
+                if *protocol != self.source {
+                    return Err(Error::Invalid("流式诊断与来源协议不匹配".into()));
+                }
+                if diagnostic.reject {
+                    return Err(unsupported(&diagnostic.path, &diagnostic.reason));
+                }
+                context.warn(&diagnostic.path, &diagnostic.reason);
+                return Ok(context.finish());
             }
-            | Event::ServerOutput { .. } => {
-                return Err(unsupported(
-                    "stream.native",
-                    "原生流式内容尚无安全的索引与生命周期映射",
-                ));
+            Event::PartStart {
+                head: Head::Native(protocol),
+                ..
+            } => {
+                if *protocol != self.source {
+                    return Err(Error::Invalid("原生内容块与来源协议不匹配".into()));
+                }
+                return Ok(context.finish());
+            }
+            Event::PartEnd(key) if matches!(context.part(*key)?.head, Head::Native(_)) => {
+                return Ok(context.finish());
+            }
+            Event::Native(raw) => {
+                native::encode(&mut self.destination, raw, &mut context)?;
+                return Ok(context.finish());
+            }
+            Event::ServerOutput { key, output } => {
+                if let Some(text) = cross::server_output::text(
+                    output,
+                    self.source,
+                    self.protocol,
+                    "server_output",
+                    &mut context.warnings,
+                ) {
+                    // IR 中的服务端输出是已结束的原子块，目标拆成三条事件，不重复写入 IR 状态。
+                    for projected in [
+                        Event::PartStart {
+                            key: *key,
+                            head: Head::Text,
+                        },
+                        Event::TextDelta { key: *key, text },
+                        Event::PartEnd(*key),
+                    ] {
+                        dispatch(&mut self.destination, &projected, &mut context)?;
+                    }
+                }
+                return Ok(context.finish());
             }
             Event::Unknown { protocol, .. } => {
                 if *protocol == self.protocol {
@@ -183,13 +226,18 @@ impl Encoder {
             }
             _ => {}
         }
-        match &mut self.destination {
-            Destination::Chat(destination) => destination.encode(event, &mut context)?,
-            Destination::Responses(destination) => destination.encode(event, &mut context)?,
-            Destination::Messages(destination) => destination.encode(event, &mut context)?,
-            Destination::Gemini(destination) => gemini::encode(destination, event, &mut context)?,
-        }
+        dispatch(&mut self.destination, event, &mut context)?;
         Ok(context.finish())
+    }
+}
+
+/// 通用增量与原子服务端输出共用同一个目标事件构造入口。
+fn dispatch(destination: &mut Destination, event: &Event, context: &mut Context<'_>) -> Result<()> {
+    match destination {
+        Destination::Chat(destination) => destination.encode(event, context),
+        Destination::Responses(destination) => destination.encode(event, context),
+        Destination::Messages(destination) => destination.encode(event, context),
+        Destination::Gemini(destination) => gemini::encode(destination, event, context),
     }
 }
 

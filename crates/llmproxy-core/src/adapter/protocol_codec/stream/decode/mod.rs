@@ -21,10 +21,11 @@ pub struct Decoder {
     state: State,
     failed: bool,
     entries: usize,
+    diagnostic_bytes: usize,
 }
 
 enum Source {
-    Chat,
+    Chat(chat::Decoder),
     Responses(responses::Decoder),
     Messages(messages::Decoder),
     Gemini(gemini::Decoder),
@@ -34,7 +35,7 @@ impl Decoder {
     /// 创建来源协议对应的解码状态，容量由 HTTP 接入层传入。
     pub(crate) fn new(protocol: Protocol, limits: Limits) -> Self {
         let source = match protocol {
-            Protocol::OpenAiChat => Source::Chat,
+            Protocol::OpenAiChat => Source::Chat(Default::default()),
             Protocol::OpenAiResponses => Source::Responses(Default::default()),
             Protocol::AnthropicMessages => Source::Messages(Default::default()),
             Protocol::Gemini => Source::Gemini(Default::default()),
@@ -45,6 +46,7 @@ impl Decoder {
             state: State::new(limits),
             failed: false,
             entries: limits.entries,
+            diagnostic_bytes: limits.buffered_bytes,
         }
     }
 
@@ -80,8 +82,28 @@ impl Decoder {
             events: Vec::new(),
             entries: self.entries,
         };
+        let notes = super::diagnostics::collect(event);
+        if notes.len() > self.entries
+            || notes
+                .iter()
+                .try_fold(0usize, |bytes, note| {
+                    bytes
+                        .checked_add(note.path.len())?
+                        .checked_add(note.reason.len())
+                })
+                .is_none_or(|bytes| bytes > self.diagnostic_bytes)
+        {
+            return Err(Error::Invalid("单条流式事件诊断超过容量上限".into()));
+        }
+        // 字段策略先于本事件正文交付，终止事件的诊断也不会落在 End 之后。
+        for diagnostic in notes {
+            context.emit(Event::Diagnostic {
+                protocol: self.protocol,
+                diagnostic,
+            })?;
+        }
         match (&mut self.source, event) {
-            (Source::Chat, Raw::Chat(chunk)) => chat::decode(chunk, &mut context)?,
+            (Source::Chat(source), Raw::Chat(chunk)) => source.decode(chunk, &mut context)?,
             (Source::Responses(source), Raw::Responses(event)) => {
                 source.decode(event, &mut context)?
             }
@@ -89,9 +111,11 @@ impl Decoder {
                 source.decode(event, &mut context)?
             }
             (Source::Gemini(source), Raw::Gemini(chunk)) => source.decode(chunk, &mut context)?,
-            (Source::Chat | Source::Gemini(_), Raw::End(_)) => {
+            (Source::Chat(source), Raw::End(_)) => {
+                source.end()?;
                 context.emit(Event::End(Status::Completed))?
             }
+            (Source::Gemini(_), Raw::End(_)) => context.emit(Event::End(Status::Completed))?,
             (_, Raw::End(_)) => return Err(Error::Invalid("上游在协议结束事件之前断开".into())),
             _ => return Err(Error::Invalid("流式事件与来源状态不匹配".into())),
         }

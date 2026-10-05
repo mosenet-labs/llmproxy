@@ -93,6 +93,10 @@ macro_rules! typed_events {
             pub fn kind(&self) -> &'static str {
                 match self {$(Self::$variant(_) => $kind,)*}
             }
+            /// 各事件共用扩展字段诊断入口，不序列化整个载体。
+            pub(crate) fn extra(&self) -> &serde_json::Map<String, serde_json::Value> {
+                match self {$(Self::$variant(payload) => &payload.extra,)*}
+            }
         }
     };
 }

@@ -65,6 +65,11 @@ pub enum Head {
 /// 一条具有明确顺序语义的 IR 事件。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
+    /// 解码边界发现的未映射字段，仅记录路径及静态处理原因。
+    Diagnostic {
+        protocol: Protocol,
+        diagnostic: crate::ir::diagnostic::Diagnostic,
+    },
     /// 整个响应开始。
     Start(Metadata),
     /// 一个候选开始。

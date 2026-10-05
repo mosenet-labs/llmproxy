@@ -44,6 +44,40 @@ pub(super) struct Encoder {
 }
 
 impl Encoder {
+    /// 无位置的音频事件仅用于同协议；顺序号和响应 ID 由目标重新提供。
+    pub(super) fn audio(&mut self, event: &E, context: &mut Context<'_>) -> Result<()> {
+        let sequence_number = self.tick();
+        let target = match event {
+            E::AudioDelta(delta) | E::AudioTranscriptDelta(delta) => {
+                let delta = wire::AudioDelta {
+                    delta: delta.delta.clone(),
+                    sequence_number,
+                    response_id: O::Value(context.target.id.clone()),
+                    extra: Default::default(),
+                };
+                if matches!(event, E::AudioDelta(_)) {
+                    E::AudioDelta(delta)
+                } else {
+                    E::AudioTranscriptDelta(delta)
+                }
+            }
+            E::AudioDone(_) | E::AudioTranscriptDone(_) => {
+                let done = wire::AudioDone {
+                    sequence_number,
+                    response_id: O::Value(context.target.id.clone()),
+                    extra: Default::default(),
+                };
+                if matches!(event, E::AudioDone(_)) {
+                    E::AudioDone(done)
+                } else {
+                    E::AudioTranscriptDone(done)
+                }
+            }
+            _ => return Err(Error::Invalid("Responses 原生音频事件类型错误".into())),
+        };
+        emit(context, target);
+        Ok(())
+    }
     /// 返回仍保留在快照中的字符串及引用叶子长度。
     pub(super) fn buffered_bytes(&self) -> usize {
         self.bytes

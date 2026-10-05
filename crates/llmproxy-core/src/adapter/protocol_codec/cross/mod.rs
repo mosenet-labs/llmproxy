@@ -7,7 +7,7 @@ pub(super) mod generation;
 mod native;
 mod request;
 mod response;
-mod server_output;
+pub(super) mod server_output;
 pub(super) mod tools;
 pub(super) mod usage;
 

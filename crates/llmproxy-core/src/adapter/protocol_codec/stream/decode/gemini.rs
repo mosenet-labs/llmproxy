@@ -63,6 +63,11 @@ impl Decoder {
             context.candidate(index)?;
             let candidate = self.candidates.entry(index).or_default();
             if let Some(content) = raw.content.as_option() {
+                if content.role.is_some_and(|role| {
+                    role != crate::protocol::gemini::request::message::Role::Model
+                }) {
+                    return Err(Error::Invalid("Gemini 回复角色不是 model".into()));
+                }
                 for part in &content.parts {
                     candidate.part(index, part, context)?;
                 }

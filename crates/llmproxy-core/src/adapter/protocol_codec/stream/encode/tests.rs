@@ -11,20 +11,20 @@ use crate::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-const PROTOCOLS: [Protocol; 4] = [
+pub(super) const PROTOCOLS: [Protocol; 4] = [
     Protocol::OpenAiChat,
     Protocol::OpenAiResponses,
     Protocol::AnthropicMessages,
     Protocol::Gemini,
 ];
-const TARGET: ResponseTarget<'static> = ResponseTarget {
+pub(super) const TARGET: ResponseTarget<'static> = ResponseTarget {
     id: "target",
     model: "target-model",
     created: 99,
 };
 
 /// JSON 仅作为测试的 HTTP 边界输入，不在编解码器内部中转。
-fn raw(protocol: Protocol, value: Value) -> Raw {
+pub(super) fn raw(protocol: Protocol, value: Value) -> Raw {
     let bytes = serde_json::to_vec(&value).unwrap();
     match protocol {
         Protocol::OpenAiChat => Raw::Chat(Box::new(serde_json::from_slice(&bytes).unwrap())),
@@ -38,10 +38,10 @@ fn raw(protocol: Protocol, value: Value) -> Raw {
     }
 }
 
-fn chat(choices: Value) -> Value {
+pub(super) fn chat(choices: Value) -> Value {
     json!({"id":"source","model":"source-model","created":1,"object":"chat.completion.chunk","choices":choices})
 }
-fn response(output: Value) -> Value {
+pub(super) fn response(output: Value) -> Value {
     json!({"id":"source","model":"source-model","created_at":1,"object":"response","output":output})
 }
 

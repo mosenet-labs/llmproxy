@@ -11,6 +11,8 @@ use serde_json::{Map, Value};
 /// 参考：https://ai.google.dev/gemini-api/docs/code-execution
 /// https://developers.openai.com/api/docs/guides/tools-code-interpreter
 /// https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool
+/// https://developers.openai.com/api/docs/guides/tools-connectors-mcp
+/// https://developers.openai.com/api/docs/guides/tools-shell
 pub(super) fn decode(protocol: Protocol, raw: &Map<String, Value>) -> Option<ServerOutput> {
     let mut output = ServerOutput {
         kind: Kind::Action,
@@ -104,7 +106,35 @@ pub(super) fn decode(protocol: Protocol, raw: &Map<String, Value>) -> Option<Ser
                             .join("\n")
                     });
             }
-            "server_tool_use" | "file_search_call" => {}
+            "mcp_call" => {
+                output.kind = Kind::ExecutionResult;
+                output.text = raw.get("output").and_then(Value::as_str).map(str::to_owned);
+            }
+            "shell_call_output" => {
+                output.kind = Kind::ExecutionResult;
+                let mut visible = Vec::new();
+                for value in raw
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    for key in ["stdout", "stderr"] {
+                        if let Some(text) = value.get(key).and_then(Value::as_str) {
+                            visible.push(text.to_owned());
+                        }
+                    }
+                    if let Some(outcome) = value.get("outcome") {
+                        if let Some(code) = outcome.get("exit_code").and_then(Value::as_i64) {
+                            visible.push(format!("exit_code: {code}"));
+                        } else if outcome.get("type").and_then(Value::as_str) == Some("timeout") {
+                            visible.push("timeout".into());
+                        }
+                    }
+                }
+                output.text = Some(visible.join("\n"));
+            }
+            "server_tool_use" | "file_search_call" | "mcp_list_tools" => {}
             _ => return None,
         }
     }

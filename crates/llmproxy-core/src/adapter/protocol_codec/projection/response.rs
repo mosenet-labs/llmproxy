@@ -44,15 +44,7 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&body.service_tier, "response.service_tier");
             notes.field(&body.system_fingerprint, "response.system_fingerprint");
             notes.extra(&body.extra, "response");
-            if let Some(usage) = body.usage.as_option() {
-                notes.extra(&usage.extra, "usage");
-                if let Some(details) = usage.prompt_tokens_details.as_option() {
-                    notes.extra(&details.extra, "usage.prompt_tokens_details");
-                }
-                if let Some(details) = usage.completion_tokens_details.as_option() {
-                    notes.extra(&details.extra, "usage.completion_tokens_details");
-                }
-            }
+            chat_usage(&mut notes, body.usage.as_option());
         }
         Source::Responses(body) => {
             response.model = Some(body.model.clone());
@@ -113,45 +105,7 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             if let Some(details) = body.incomplete_details.as_option() {
                 notes.extra(&details.extra, "response.incomplete_details");
             }
-            notes.field(&body.instructions, "response.instructions");
-            notes.field(&body.metadata, "response.metadata");
-            notes.field(&body.parallel_tool_calls, "response.parallel_tool_calls");
-            notes.field(&body.temperature, "response.temperature");
-            notes.field(&body.tool_choice, "response.tool_choice");
-            notes.field(&body.tools, "response.tools");
-            notes.field(&body.top_p, "response.top_p");
-            notes.field(&body.background, "response.background");
-            notes.field(&body.completed_at, "response.completed_at");
-            notes.field(&body.conversation, "response.conversation");
-            notes.field(&body.max_output_tokens, "response.max_output_tokens");
-            notes.field(&body.max_tool_calls, "response.max_tool_calls");
-            notes.field(&body.moderation, "response.moderation");
-            notes.field(&body.previous_response_id, "response.previous_response_id");
-            notes.field(&body.prompt, "response.prompt");
-            notes.field(
-                &body.prompt_cache_diagnostics,
-                "response.prompt_cache_diagnostics",
-            );
-            notes.field(&body.prompt_cache_key, "response.prompt_cache_key");
-            notes.field(&body.prompt_cache_options, "response.prompt_cache_options");
-            notes.field(
-                &body.prompt_cache_retention,
-                "response.prompt_cache_retention",
-            );
-            notes.field(&body.reasoning, "response.reasoning");
-            notes.field(&body.service_tier, "response.service_tier");
-            notes.field(&body.text, "response.text");
-            notes.field(&body.truncation, "response.truncation");
-            notes.extra(&body.extra, "response");
-            if let Some(usage) = body.usage.as_option() {
-                notes.extra(&usage.extra, "usage");
-                if let Some(details) = usage.input_tokens_details.as_option() {
-                    notes.extra(&details.extra, "usage.input_tokens_details");
-                }
-                if let Some(details) = usage.output_tokens_details.as_option() {
-                    notes.extra(&details.extra, "usage.output_tokens_details");
-                }
-            }
+            responses_fields(&mut notes, body);
         }
         Source::Messages(body) => {
             response.model = Some(body.model.clone());
@@ -168,17 +122,7 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&body.stop_details, "response.stop_details");
             notes.field(&body.stop_sequence, "response.stop_sequence");
             notes.extra(&body.extra, "response");
-            let usage = &body.usage;
-            notes.field(&usage.inference_geo, "usage.inference_geo");
-            notes.field(&usage.server_tool_use, "usage.server_tool_use");
-            notes.field(&usage.service_tier, "usage.service_tier");
-            notes.extra(&usage.extra, "usage");
-            if let Some(details) = usage.cache_creation.as_option() {
-                notes.extra(&details.extra, "usage.cache_creation");
-            }
-            if let Some(details) = usage.output_tokens_details.as_option() {
-                notes.extra(&details.extra, "usage.output_tokens_details");
-            }
+            messages_usage(&mut notes, &body.usage);
         }
         Source::Gemini(body) => {
             response.model = body.model_version.as_option().cloned();
@@ -258,42 +202,7 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
             notes.field(&body.prompt_feedback, "response.promptFeedback");
             notes.field(&body.model_status, "response.modelStatus");
             notes.extra(&body.extra, "response");
-            if let Some(usage) = body.usage_metadata.as_option() {
-                for (details, path) in [
-                    (&usage.prompt_tokens_details, "usage.promptTokensDetails"),
-                    (&usage.cache_tokens_details, "usage.cacheTokensDetails"),
-                    (
-                        &usage.candidates_tokens_details,
-                        "usage.candidatesTokensDetails",
-                    ),
-                    (
-                        &usage.tool_use_prompt_tokens_details,
-                        "usage.toolUsePromptTokensDetails",
-                    ),
-                ] {
-                    if let Some(details) = details.as_option() {
-                        let mut totals = std::collections::HashMap::<String, u64>::new();
-                        for (i, detail) in details.iter().enumerate() {
-                            let modality = detail.modality.to_ascii_uppercase();
-                            if !matches!(
-                                modality.as_str(),
-                                "TEXT" | "AUDIO" | "IMAGE" | "VIDEO" | "DOCUMENT"
-                            ) {
-                                notes.dropped(format!("{path}[{i}].modality"));
-                            }
-                            let total = totals.entry(modality).or_default();
-                            if let Some(sum) = total.checked_add(detail.token_count) {
-                                *total = sum;
-                            } else {
-                                notes.reject(path, "模态词元数溢出");
-                            }
-                            notes.extra(&detail.extra, &format!("{path}[{i}]"));
-                        }
-                    }
-                }
-                notes.field(&usage.service_tier, "usage.serviceTier");
-                notes.extra(&usage.extra, "usage");
-            }
+            gemini_usage(&mut notes, body.usage_metadata.as_option());
         }
     }
     response.diagnostics = notes.0;
@@ -316,5 +225,127 @@ pub(in crate::adapter::protocol_codec) fn finish(reason: Option<&str>) -> Finish
         ) => FinishReason::Filtered,
         Some("refusal") => FinishReason::Refusal,
         _ => FinishReason::Unknown,
+    }
+}
+
+/// 流式与非流式共用未映射字段诊断，不把字段值写入诊断。
+pub(in crate::adapter::protocol_codec) fn chat_usage(
+    notes: &mut Notes,
+    usage: Option<&crate::protocol::chat::response::usage::Usage>,
+) {
+    if let Some(usage) = usage {
+        notes.extra(&usage.extra, "usage");
+        if let Some(details) = usage.prompt_tokens_details.as_option() {
+            notes.extra(&details.extra, "usage.prompt_tokens_details");
+        }
+        if let Some(details) = usage.completion_tokens_details.as_option() {
+            notes.extra(&details.extra, "usage.completion_tokens_details");
+        }
+    }
+}
+
+/// 流式与非流式共用未映射字段诊断，不把字段值写入诊断。
+pub(in crate::adapter::protocol_codec) fn responses_fields(
+    notes: &mut Notes,
+    body: &crate::protocol::responses::response::Response,
+) {
+    notes.field(&body.instructions, "response.instructions");
+    notes.field(&body.metadata, "response.metadata");
+    notes.field(&body.parallel_tool_calls, "response.parallel_tool_calls");
+    notes.field(&body.temperature, "response.temperature");
+    notes.field(&body.tool_choice, "response.tool_choice");
+    notes.field(&body.tools, "response.tools");
+    notes.field(&body.top_p, "response.top_p");
+    notes.field(&body.background, "response.background");
+    notes.field(&body.completed_at, "response.completed_at");
+    notes.field(&body.conversation, "response.conversation");
+    notes.field(&body.max_output_tokens, "response.max_output_tokens");
+    notes.field(&body.max_tool_calls, "response.max_tool_calls");
+    notes.field(&body.moderation, "response.moderation");
+    notes.field(&body.previous_response_id, "response.previous_response_id");
+    notes.field(&body.prompt, "response.prompt");
+    notes.field(
+        &body.prompt_cache_diagnostics,
+        "response.prompt_cache_diagnostics",
+    );
+    notes.field(&body.prompt_cache_key, "response.prompt_cache_key");
+    notes.field(&body.prompt_cache_options, "response.prompt_cache_options");
+    notes.field(
+        &body.prompt_cache_retention,
+        "response.prompt_cache_retention",
+    );
+    notes.field(&body.reasoning, "response.reasoning");
+    notes.field(&body.service_tier, "response.service_tier");
+    notes.field(&body.text, "response.text");
+    notes.field(&body.truncation, "response.truncation");
+    notes.extra(&body.extra, "response");
+    if let Some(usage) = body.usage.as_option() {
+        notes.extra(&usage.extra, "usage");
+        if let Some(details) = usage.input_tokens_details.as_option() {
+            notes.extra(&details.extra, "usage.input_tokens_details");
+        }
+        if let Some(details) = usage.output_tokens_details.as_option() {
+            notes.extra(&details.extra, "usage.output_tokens_details");
+        }
+    }
+}
+
+/// 流式与非流式共用未映射字段诊断，不把字段值写入诊断。
+pub(in crate::adapter::protocol_codec) fn messages_usage(
+    notes: &mut Notes,
+    usage: &crate::protocol::messages::response::usage::Usage,
+) {
+    notes.field(&usage.inference_geo, "usage.inference_geo");
+    notes.field(&usage.server_tool_use, "usage.server_tool_use");
+    notes.field(&usage.service_tier, "usage.service_tier");
+    notes.extra(&usage.extra, "usage");
+    if let Some(details) = usage.cache_creation.as_option() {
+        notes.extra(&details.extra, "usage.cache_creation");
+    }
+    if let Some(details) = usage.output_tokens_details.as_option() {
+        notes.extra(&details.extra, "usage.output_tokens_details");
+    }
+}
+
+/// 流式与非流式共用未映射字段诊断，不把字段值写入诊断。
+pub(in crate::adapter::protocol_codec) fn gemini_usage(
+    notes: &mut Notes,
+    usage: Option<&crate::protocol::gemini::response::usage::UsageMetadata>,
+) {
+    if let Some(usage) = usage {
+        for (details, path) in [
+            (&usage.prompt_tokens_details, "usage.promptTokensDetails"),
+            (&usage.cache_tokens_details, "usage.cacheTokensDetails"),
+            (
+                &usage.candidates_tokens_details,
+                "usage.candidatesTokensDetails",
+            ),
+            (
+                &usage.tool_use_prompt_tokens_details,
+                "usage.toolUsePromptTokensDetails",
+            ),
+        ] {
+            if let Some(details) = details.as_option() {
+                let mut totals = std::collections::HashMap::<String, u64>::new();
+                for (i, detail) in details.iter().enumerate() {
+                    let modality = detail.modality.to_ascii_uppercase();
+                    if !matches!(
+                        modality.as_str(),
+                        "TEXT" | "AUDIO" | "IMAGE" | "VIDEO" | "DOCUMENT"
+                    ) {
+                        notes.dropped(format!("{path}[{i}].modality"));
+                    }
+                    let total = totals.entry(modality).or_default();
+                    if let Some(sum) = total.checked_add(detail.token_count) {
+                        *total = sum;
+                    } else {
+                        notes.reject(path, "模态词元数溢出");
+                    }
+                    notes.extra(&detail.extra, &format!("{path}[{i}]"));
+                }
+            }
+        }
+        notes.field(&usage.service_tier, "usage.serviceTier");
+        notes.extra(&usage.extra, "usage");
     }
 }

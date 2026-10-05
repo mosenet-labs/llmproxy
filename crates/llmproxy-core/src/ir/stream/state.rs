@@ -111,10 +111,20 @@ impl State {
             self.metadata = Some(metadata.clone());
             return Ok(());
         }
-        if self.metadata.is_none() && !matches!(event, Event::Heartbeat | Event::Unknown { .. }) {
+        if self.metadata.is_none()
+            && !matches!(
+                event,
+                Event::Heartbeat | Event::Unknown { .. } | Event::Diagnostic { .. }
+            )
+        {
             return invalid();
         }
-        if self.failed && !matches!(event, Event::Usage(_) | Event::Failure(_) | Event::End(_)) {
+        if self.failed
+            && !matches!(
+                event,
+                Event::Usage(_) | Event::Failure(_) | Event::End(_) | Event::Diagnostic { .. }
+            )
+        {
             return invalid();
         }
         match event {
@@ -291,7 +301,10 @@ impl State {
                     }
                 }
             }
-            Event::Heartbeat | Event::Native(_) | Event::Unknown { .. } => {}
+            Event::Heartbeat
+            | Event::Native(_)
+            | Event::Unknown { .. }
+            | Event::Diagnostic { .. } => {}
         }
         Ok(())
     }

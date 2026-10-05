@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// 仅访问已归一化字段；执行 ID、容器引用、签名及原始副本不进入目标报文。
-pub(super) fn text(
+pub(in crate::adapter::protocol_codec) fn text(
     output: &ServerOutput,
     source: Protocol,
     target: Protocol,

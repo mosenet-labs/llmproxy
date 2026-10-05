@@ -19,12 +19,15 @@ use crate::{
         stream::Event as Raw,
     },
 };
+use std::collections::BTreeMap;
 
 /// 原始用量和原生块的索引属于单次消息，不能跨响应共享。
 #[derive(Default)]
 pub(super) struct Decoder {
     usage: Option<Box<Usage>>,
     reason: Option<FinishReason>,
+    /// true 为服务端调用，false 为一次性结果；不保留其参数或正文。
+    server_blocks: BTreeMap<u64, bool>,
 }
 
 impl Decoder {
@@ -112,7 +115,9 @@ impl Decoder {
             }
             KnownEvent::ContentBlockStop(stop) => {
                 let key = key(stop.index);
-                if native(context, stop.index) {
+                if self.server_blocks.remove(&stop.index).is_some() {
+                    // 服务端结果已在 start 投影，stop 只结束边界。
+                } else if native(context, stop.index) {
                     context.emit(Event::Native(Box::new(Raw::Messages(Box::new(
                         raw.clone(),
                     )))))?;
@@ -222,6 +227,25 @@ impl Decoder {
                 {
                     return Err(Error::Invalid("Messages 原生内容块不是活动状态".into()));
                 }
+                if let Some(call) = self.server_blocks.get(&delta.index) {
+                    if *call
+                        && matches!(&delta.delta, Delta::Known(delta) if matches!(delta.as_ref(), KnownDelta::InputJsonDelta { .. }))
+                    {
+                        return context.emit(Event::Diagnostic {
+                            protocol: Protocol::AnthropicMessages,
+                            diagnostic: crate::ir::diagnostic::Diagnostic {
+                                path: "server_tool_use.input".into(),
+                                reason:
+                                    "服务端调用参数由来源 Provider 执行，不作为客户端函数调用发送"
+                                        .into(),
+                                reject: false,
+                            },
+                        });
+                    }
+                    return Err(Error::Invalid(
+                        "服务端结果必须在 start 中完整返回，调用仅接受参数增量".into(),
+                    ));
+                }
                 context.emit(Event::Native(Box::new(Raw::Messages(Box::new(
                     raw.clone(),
                 )))))?;
@@ -293,6 +317,28 @@ impl Decoder {
                     key,
                     head: Head::Native(Protocol::AnthropicMessages),
                 })?;
+                if let ContentBlock::Other(raw) = block
+                    && let Some(output) =
+                        crate::adapter::server_output::decode(Protocol::AnthropicMessages, raw)
+                {
+                    let item = index
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Invalid("服务端内容索引溢出".into()))?;
+                    self.server_blocks.insert(
+                        index,
+                        raw.get("type").and_then(serde_json::Value::as_str)
+                            == Some("server_tool_use"),
+                    );
+                    context.emit(Event::ServerOutput {
+                        key: Key {
+                            candidate: 0,
+                            item,
+                            part: 0,
+                        },
+                        output,
+                    })?;
+                    return Ok(());
+                }
                 context.emit(Event::Native(Box::new(Raw::Messages(Box::new(
                     event::Event::Known(Box::new(KnownEvent::ContentBlockStart(
                         event::ContentBlockStart {

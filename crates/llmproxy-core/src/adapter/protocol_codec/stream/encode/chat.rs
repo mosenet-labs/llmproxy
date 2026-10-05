@@ -30,6 +30,25 @@ struct Tool {
 }
 
 impl Encoder {
+    /// 音频原生增量使用目标外壳；正文等通用字段由独立 IR 事件发送。
+    pub(super) fn audio(
+        &mut self,
+        index: u64,
+        audio: &crate::protocol::chat::response::chunk::AudioDelta,
+        context: &mut Context<'_>,
+    ) {
+        let mut audio = audio.clone();
+        audio.extra.clear();
+        choice(
+            context,
+            index,
+            Delta {
+                audio: O::Value(audio),
+                ..empty_delta()
+            },
+            O::Missing,
+        );
+    }
     /// 一次 IR 事件可生成首块、正文、停止原因或最终用量分片。
     pub(super) fn encode(&mut self, event: &Event, context: &mut Context<'_>) -> Result<()> {
         match event {

@@ -28,6 +28,9 @@ pub(super) struct Decoder {
     text_bytes: BTreeMap<Key, usize>,
     annotations: BTreeMap<Key, usize>,
     had_tool: bool,
+    /// 音频和转录各有独立 done；正文不进入累计缓冲。
+    audio: Option<bool>,
+    transcript: Option<bool>,
 }
 
 impl Decoder {
@@ -66,6 +69,9 @@ impl Decoder {
             | KnownEvent::InProgress(lifecycle)
             | KnownEvent::Queued(lifecycle) => self.start(&lifecycle.response, context)?,
             KnownEvent::Completed(lifecycle) | KnownEvent::Incomplete(lifecycle) => {
+                if self.audio == Some(false) || self.transcript == Some(false) {
+                    return Err(Error::Invalid("Responses 音频或转录缺少 done 事件".into()));
+                }
                 self.start(&lifecycle.response, context)?;
                 for (index, item) in lifecycle.response.output.iter().enumerate() {
                     self.item_done(index as u64, item, context)?;
@@ -238,10 +244,54 @@ impl Decoder {
                 }))?;
                 context.emit(Event::End(Status::Failed))?;
             }
+            KnownEvent::AudioDelta(delta) | KnownEvent::AudioTranscriptDelta(delta) => {
+                audio_id(&delta.response_id, context)?;
+                let state = if matches!(event.as_ref(), KnownEvent::AudioDelta(_)) {
+                    &mut self.audio
+                } else {
+                    &mut self.transcript
+                };
+                if *state == Some(true) {
+                    return Err(Error::Invalid("Responses 音频 done 后仍有增量".into()));
+                }
+                *state = Some(false);
+                context.emit(Event::Native(Box::new(Raw::Responses(Box::new(
+                    raw.clone(),
+                )))))?;
+            }
+            KnownEvent::AudioDone(done) | KnownEvent::AudioTranscriptDone(done) => {
+                audio_id(&done.response_id, context)?;
+                let state = if matches!(event.as_ref(), KnownEvent::AudioDone(_)) {
+                    &mut self.audio
+                } else {
+                    &mut self.transcript
+                };
+                if *state != Some(false) {
+                    return Err(Error::Invalid("Responses 音频 done 重复或早于增量".into()));
+                }
+                *state = Some(true);
+                context.emit(Event::Native(Box::new(Raw::Responses(Box::new(
+                    raw.clone(),
+                )))))?;
+            }
             // 服务端执行进度、图片预览、音频和 MCP 具有各自语义，留给目标策略。
-            _ => context.emit(Event::Native(Box::new(Raw::Responses(Box::new(
-                raw.clone(),
-            )))))?,
+            _ => {
+                let index = native_index(event);
+                if !index.is_some_and(|index| {
+                    self.items.get(&index) == Some(&false)
+                        && context
+                            .state
+                            .part(key(index, 0))
+                            .is_some_and(|part| matches!(part.head, Head::Native(_)) && !part.ended)
+                }) {
+                    return Err(Error::Invalid(
+                        "Responses 原生进度没有对应活动服务端输出项".into(),
+                    ));
+                }
+                context.emit(Event::Native(Box::new(Raw::Responses(Box::new(
+                    raw.clone(),
+                )))))?;
+            }
         }
         Ok(())
     }
@@ -536,6 +586,55 @@ impl Decoder {
             Err(Error::Invalid("Responses 完成参数与增量不一致".into()))
         }
     }
+}
+
+/// 服务端进度必须归属于输出项，不能混入客户端工具或已经完成的项目。
+fn native_index(event: &KnownEvent) -> Option<u64> {
+    use KnownEvent::*;
+    Some(match event {
+        FileSearchInProgress(e)
+        | FileSearchSearching(e)
+        | FileSearchCompleted(e)
+        | WebSearchInProgress(e)
+        | WebSearchSearching(e)
+        | WebSearchCompleted(e)
+        | CodeInterpreterInProgress(e)
+        | CodeInterpreterInterpreting(e)
+        | CodeInterpreterCompleted(e)
+        | McpCallInProgress(e)
+        | McpCallCompleted(e)
+        | McpCallFailed(e)
+        | McpListToolsInProgress(e)
+        | McpListToolsCompleted(e)
+        | McpListToolsFailed(e)
+        | ImageGenerationInProgress(e)
+        | ImageGenerationGenerating(e)
+        | ImageGenerationCompleted(e)
+        | CompactionCompacting(e) => e.output_index,
+        McpArgumentsDelta(e) | CodeInterpreterCodeDelta(e) => e.output_index,
+        McpArgumentsDone(e) => e.output_index,
+        CodeInterpreterCodeDone(e) => e.output_index,
+        ImageGenerationPartial(e) => e.output_index,
+        ShellCommandAdded(e) | ShellCommandDone(e) => e.output_index,
+        ShellCommandDelta(e) => e.output_index,
+        ShellOutputDelta(e) => e.output_index,
+        ShellOutputDone(e) => e.output_index,
+        _ => return None,
+    })
+}
+
+/// 无 ID 的官方事件也可解码；携带 ID 时必须属于当前生命周期。
+fn audio_id(id: &crate::protocol::OptionalNullable<String>, context: &Context<'_>) -> Result<()> {
+    if id.as_option().is_some_and(|id| {
+        context
+            .state
+            .metadata()
+            .and_then(|metadata| metadata.id.as_ref())
+            != Some(id)
+    }) {
+        return Err(Error::Invalid("Responses 音频响应 ID 不匹配".into()));
+    }
+    Ok(())
 }
 
 /// 普通内容索引使用低半区；思考摘要使用高半区，避免与正文索引混用。
