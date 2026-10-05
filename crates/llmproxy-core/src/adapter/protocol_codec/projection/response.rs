@@ -299,7 +299,7 @@ pub(in crate::adapter::protocol_codec) fn decode(response: &mut Response, source
     response.diagnostics = notes.0;
 }
 /// 未识别结束原因保持 Unknown，不伪造成功。
-fn finish(reason: Option<&str>) -> FinishReason {
+pub(in crate::adapter::protocol_codec) fn finish(reason: Option<&str>) -> FinishReason {
     match reason {
         Some("stop" | "end_turn" | "stop_sequence" | "STOP") => FinishReason::Stop,
         Some("tool_calls" | "tool_use" | "function_call") => FinishReason::ToolCall,

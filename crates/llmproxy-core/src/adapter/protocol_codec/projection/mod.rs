@@ -8,6 +8,7 @@ mod tools;
 use crate::{ir::diagnostic::Diagnostic, protocol::OptionalNullable};
 pub(super) use request::decode as decode_request;
 pub(super) use response::decode as decode_response;
+pub(super) use response::finish;
 use serde_json::{Map, Value};
 
 /// 只收集字段路径，未知字段值不会进入转换日志。

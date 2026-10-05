@@ -34,7 +34,7 @@ pub fn encode_responses(messages: &[IrMessage]) -> Result<Vec<Message>> {
                                 text: text.clone(),
                                 annotations: wire::take_option(&mut extra, "annotations")?
                                     .unwrap_or_default(),
-                                logprobs: wire::take_option(&mut extra, "logprobs")?,
+                                logprobs: wire::take(&mut extra, "logprobs")?,
                                 extra,
                             },
                             PartKind::Refusal(text) => raw::OutputPart::Refusal {

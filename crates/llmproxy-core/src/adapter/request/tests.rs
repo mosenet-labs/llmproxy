@@ -57,7 +57,7 @@ fn responses_round_trip_and_ir_edit() {
     let source = json!([
         {"role":"user","content":"hello","extension":1},
         {"role":"user","content":[{"type":"input_text","text":"look","extension":2},{"type":"input_image","image_url":"https://example.com/a.png"}],"status":"completed"},
-        {"id":"msg_1","content":[{"type":"output_text","text":"answer","annotations":[{"type":"url_citation","url":"https://example.com"}],"extension":3}],"role":"assistant","status":"completed","type":"message","phase":null}
+        {"id":"msg_1","content":[{"type":"output_text","text":"answer","annotations":[{"type":"url_citation","url":"https://example.com"}],"logprobs":null,"extension":3}],"role":"assistant","status":"completed","type":"message","phase":null}
     ]);
     let raw: Vec<responses::request::message::Message> =
         serde_json::from_value(source.clone()).unwrap();

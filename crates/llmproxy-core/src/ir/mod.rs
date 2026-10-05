@@ -5,6 +5,7 @@ pub mod diagnostic;
 pub mod message;
 pub mod request;
 pub mod response;
+pub mod stream;
 pub mod usage;
 
 pub mod media;

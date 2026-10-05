@@ -5,6 +5,7 @@ mod projection;
 mod request;
 mod response;
 mod roundtrip;
+pub mod stream;
 
 pub use cross::{Conversion, ConversionWarning, RequestTarget, ResponseTarget};
 
@@ -28,8 +29,11 @@ use crate::{
 
 use super::{Error, Result};
 
-/// 请求及非流式响应的协议编解码契约；同协议可保留尚未规范化的字段。
+/// 请求、非流式响应及流式事件状态的协议编解码契约。
+/// 同协议可保留尚未规范化的字段，跨协议由目标规则构造载体。
 pub trait ProtocolCodec {
+    /// 为单次响应创建事件解码状态；与非流式转换共用同一协议入口。
+    fn stream_decoder(&self, limits: crate::ir::stream::Limits) -> stream::Decoder;
     /// 将来源协议请求类型投影为 IR。
     fn decode_request(&self, body: &ProtocolRequest) -> Result<Request>;
     /// 编码为当前协议：同协议保留来源字段，否则从 IR 构造正文。
@@ -55,6 +59,9 @@ pub trait ProtocolCodec {
 }
 
 impl ProtocolCodec for Protocol {
+    fn stream_decoder(&self, limits: crate::ir::stream::Limits) -> stream::Decoder {
+        stream::Decoder::new(*self, limits)
+    }
     fn encode_request_for(
         &self,
         request: &Request,

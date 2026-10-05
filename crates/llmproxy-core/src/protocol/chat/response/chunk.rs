@@ -61,6 +61,9 @@ pub struct Choice {
 /// 流式消息增量；所有字段都可能只在部分分片中出现。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Delta {
+    /// 流式音频的 ID、数据、转录或到期时间可分多次返回。
+    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+    pub audio: OptionalNullable<AudioDelta>,
     /// 当前分片的文本内容。
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub content: OptionalNullable<String>,
@@ -77,6 +80,27 @@ pub struct Delta {
     #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
     pub tool_calls: OptionalNullable<Vec<ToolCallDelta>>,
     /// 保留未声明的增量字段。
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// 音频的局部更新，不能直接复用非流式的完整 Audio。
+/// 参考：https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioDelta {
+    /// 本分片的 Base64 音频数据。
+    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+    pub data: OptionalNullable<String>,
+    /// 音频资源到期的 Unix 秒级时间戳，通常在最后一次更新出现。
+    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+    pub expires_at: OptionalNullable<i64>,
+    /// 音频标识，可能只在首个分片出现。
+    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+    pub id: OptionalNullable<String>,
+    /// 当前分片的转录文本。
+    #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+    pub transcript: OptionalNullable<String>,
+    /// 保留未声明的音频扩展。
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -144,5 +168,19 @@ mod tests {
         let parsed: Chunk = serde_json::from_value(null.clone()).unwrap();
         assert_eq!(parsed.usage, OptionalNullable::Null);
         assert_eq!(serde_json::to_value(parsed).unwrap(), null);
+    }
+
+    #[test]
+    fn audio_final_update_does_not_require_full_audio_or_finish_reason() {
+        for delta in [
+            json!({"audio":{"id":"a","data":"YQ==","transcript":"Hi"}}),
+            json!({"audio":{"expires_at":123}}),
+            json!({"audio":null}),
+        ] {
+            let source = json!({"id":"c","choices":[{"index":0,"delta":delta}],"created":1,"model":"m","object":"chat.completion.chunk"});
+            let chunk: Chunk =
+                serde_json::from_slice(&serde_json::to_vec(&source).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(chunk).unwrap(), source);
+        }
     }
 }

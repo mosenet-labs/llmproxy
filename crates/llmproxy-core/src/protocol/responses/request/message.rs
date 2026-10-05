@@ -184,9 +184,9 @@ pub enum OutputPart {
         annotations: Vec<Value>,
         /// 模型生成的文本。
         text: String,
-        /// 可选的 token 对数概率信息。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        logprobs: Option<Vec<Value>>,
+        /// 可选的词元对数概率信息，缺失与明确的 null 分开保留。
+        #[serde(default, skip_serializing_if = "OptionalNullable::is_missing")]
+        logprobs: OptionalNullable<Vec<Value>>,
         /// 保留当前未声明的扩展字段。
         #[serde(flatten)]
         extra: Map<String, Value>,

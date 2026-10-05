@@ -9,6 +9,7 @@ mod optional_nullable;
 mod request;
 mod response;
 pub mod responses;
+pub mod stream;
 pub use request::Request;
 pub use response::Response;
 

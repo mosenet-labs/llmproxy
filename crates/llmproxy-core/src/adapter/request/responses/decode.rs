@@ -72,7 +72,7 @@ pub fn decode_responses(messages: &[Message]) -> Result<Vec<IrMessage>> {
                                     "annotations".into(),
                                     Value::Array(annotations.clone()),
                                 );
-                                wire::put_option(&mut extra, "logprobs", logprobs)?;
+                                wire::put(&mut extra, "logprobs", logprobs)?;
                                 Ok(wire::text_part(
                                     text.clone(),
                                     PROTOCOL,

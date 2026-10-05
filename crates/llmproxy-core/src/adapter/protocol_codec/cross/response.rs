@@ -403,7 +403,7 @@ pub(super) fn encode_single(
                                 m::OutputPart::OutputText {
                                     text: text.clone(),
                                     annotations: vec![],
-                                    logprobs: None,
+                                    logprobs: O::Missing,
                                     extra: Default::default(),
                                 }
                             }],
