@@ -9,7 +9,7 @@ type Result<T> = std::result::Result<T, Error>;
 /// 单次流式转换保留状态的上限。
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// 尚未完成的工具标识、名称、参数和签名的字节预算。
+    /// 工具标识、名称、参数和签名的字节预算；目标编码也用此上限约束终态正文快照。
     pub buffered_bytes: usize,
     /// 候选及内容块的总数量上限，包括已结束的索引记录。
     pub entries: usize,

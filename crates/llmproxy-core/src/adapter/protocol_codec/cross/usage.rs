@@ -5,7 +5,7 @@ use super::{ConversionWarning, unsupported, warn};
 use crate::{adapter::Result, ir::usage::Usage, protocol::Protocol};
 
 /// 保留可映射计数；总数缺失时仅由已知输入、输出推导，绝不补造零用量。
-pub(super) fn normalize(
+pub(in crate::adapter::protocol_codec) fn normalize(
     usage: &Usage,
     source: Protocol,
     target: Protocol,

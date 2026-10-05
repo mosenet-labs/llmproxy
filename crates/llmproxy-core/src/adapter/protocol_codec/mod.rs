@@ -30,10 +30,17 @@ use crate::{
 use super::{Error, Result};
 
 /// 请求、非流式响应及流式事件状态的协议编解码契约。
-/// 同协议可保留尚未规范化的字段，跨协议由目标规则构造载体。
+/// 请求和非流式响应同协议保留来源字段；流式按事件规则构造目标载体。
 pub trait ProtocolCodec {
     /// 为单次响应创建事件解码状态；与非流式转换共用同一协议入口。
     fn stream_decoder(&self, limits: crate::ir::stream::Limits) -> stream::Decoder;
+    /// 为单次响应创建目标事件编码器；返回类型化事件与可记录的降级警告。
+    fn stream_encoder(
+        &self,
+        source: Protocol,
+        target: &ResponseTarget<'_>,
+        limits: crate::ir::stream::Limits,
+    ) -> Result<stream::Encoder>;
     /// 将来源协议请求类型投影为 IR。
     fn decode_request(&self, body: &ProtocolRequest) -> Result<Request>;
     /// 编码为当前协议：同协议保留来源字段，否则从 IR 构造正文。
@@ -59,6 +66,14 @@ pub trait ProtocolCodec {
 }
 
 impl ProtocolCodec for Protocol {
+    fn stream_encoder(
+        &self,
+        source: Protocol,
+        target: &ResponseTarget<'_>,
+        limits: crate::ir::stream::Limits,
+    ) -> Result<stream::Encoder> {
+        stream::Encoder::new(*self, source, target, limits)
+    }
     fn stream_decoder(&self, limits: crate::ir::stream::Limits) -> stream::Decoder {
         stream::Decoder::new(*self, limits)
     }

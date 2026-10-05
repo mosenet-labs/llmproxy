@@ -9,7 +9,7 @@ mod request;
 mod response;
 mod server_output;
 pub(super) mod tools;
-mod usage;
+pub(super) mod usage;
 
 pub(super) use candidates::encode_response;
 pub(super) use request::encode_request;
