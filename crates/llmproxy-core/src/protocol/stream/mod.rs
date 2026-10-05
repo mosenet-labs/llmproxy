@@ -2,6 +2,10 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+pub mod sse;
+#[cfg(test)]
+mod sse_tests;
+
 use super::{Protocol, chat, gemini, messages, responses};
 
 /// 单个已解码的协议事件，作为流式 codec 的输入或输出。

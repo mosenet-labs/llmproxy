@@ -206,7 +206,7 @@ pub(super) fn request_error(_: llmproxy_core::adapter::Error) -> Box<Error> {
 }
 
 /// 两种执行阶段使用一致的字段级诊断，不记录被丢弃字段的内容。
-fn warn(warnings: Vec<ConversionWarning>) {
+pub(super) fn warn(warnings: Vec<ConversionWarning>) {
     for warning in warnings {
         tracing::warn!(component="gateway",event_kind="conversion",source=warning.source.as_str(),target=warning.target.as_str(),path=%warning.path,reason=%warning.reason,"protocol conversion dropped or weakened semantics");
     }

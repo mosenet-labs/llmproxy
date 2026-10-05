@@ -2,6 +2,10 @@
 //! 参考：https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
 
 mod cache;
+mod stream;
+pub use stream::Capture as StreamCapture;
+#[cfg(test)]
+mod stream_tests;
 #[cfg(test)]
 mod tests;
 use crate::snapshot::ResolvedProvider;
@@ -144,29 +148,44 @@ impl Context {
             if calls.len() != originals.len() {
                 return Err(failure("invalid_call_group"));
             }
-            let (group, token) = cache::group()?;
-            let count = calls.len();
-            for (ordinal, (call, part)) in calls.into_iter().zip(originals).enumerate() {
-                let id = format!("{PREFIX}{token}_{ordinal}");
-                let bytes = serde_json::to_vec(part)?.len() + id.len() + 128;
-                pending.push((
-                    id.clone(),
-                    Entry {
-                        scope: self.scope,
-                        group,
-                        ordinal,
-                        count,
-                        part: part.clone(),
-                        expires: cache::expires(),
-                        bytes,
-                    },
-                ));
-                call.id = Some(id);
+            let group = self.capture_group(&originals)?;
+            for (call, (id, _)) in calls.into_iter().zip(&group.entries) {
+                call.id = Some(id.clone());
             }
+            pending.extend(group.entries);
         }
         Ok(Pending {
             cache: self.cache.clone(),
             entries: pending,
+        })
+    }
+
+    /// 非流式和流式共享完整并行调用组的引用、序号及容量计算。
+    fn capture_group(
+        &self,
+        parts: &[&llmproxy_core::protocol::gemini::request::message::Part],
+    ) -> Result<Pending> {
+        let (group, token) = cache::group()?;
+        let mut entries = Vec::with_capacity(parts.len());
+        for (ordinal, part) in parts.iter().enumerate() {
+            let id = format!("{PREFIX}{token}_{ordinal}");
+            let bytes = serde_json::to_vec(part)?.len() + id.len() + 128;
+            entries.push((
+                id,
+                Entry {
+                    scope: self.scope,
+                    group,
+                    ordinal,
+                    count: parts.len(),
+                    part: (*part).clone(),
+                    expires: cache::expires(),
+                    bytes,
+                },
+            ));
+        }
+        Ok(Pending {
+            cache: self.cache.clone(),
+            entries,
         })
     }
 

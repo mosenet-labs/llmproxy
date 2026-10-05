@@ -10,6 +10,7 @@ mod parse;
 mod request;
 #[cfg(test)]
 mod request_tests;
+pub mod stream;
 
 pub use request::{ModelRead, RequestBody};
 
@@ -48,6 +49,7 @@ pub struct BodyTransform {
     tool_state: Option<crate::tool_state::Context>,
     // JSON 等待正文结束；SSE 只保留尚未完整的事件。
     pending: Vec<u8>,
+    observer: Option<stream::Observer>,
 }
 
 impl BodyTransform {
@@ -60,12 +62,19 @@ impl BodyTransform {
             cross_error: None,
             tool_state: None,
             pending: Vec::new(),
+            observer: None,
         }
     }
 
     /// 为 JSON 正文指定来源协议及请求或响应方向。
     pub fn set_codec(&mut self, protocol: Protocol, phase: MessagePhase) {
         self.codec = Some((protocol, phase));
+        if matches!(phase, MessagePhase::Response)
+            && matches!(self.kind, BodyKind::Sse)
+            && self.cross.is_none()
+        {
+            self.observer = Some(stream::Observer::new(protocol));
+        }
     }
 
     /// 保存本次请求固定的工具回合作用域，不在正文回调中重新选路。
@@ -114,6 +123,9 @@ impl BodyTransform {
 
     /// 缓冲 JSON 到正文结束，或逐个放行完整 SSE 事件；超限后原样透传。
     pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
+        if let Some(observer) = &mut self.observer {
+            observer.push(body.as_deref().unwrap_or_default(), end);
+        }
         if let Some(complete) = self.collect(body, end)? {
             *body = Some(self.process(complete)?);
         }
@@ -140,6 +152,11 @@ impl BodyTransform {
             state.persist_response().await?;
         }
         Ok(())
+    }
+
+    /// 流式父请求与子请求复用同一签名作用域，父请求负责异步提交。
+    pub fn tool_context(&self) -> Option<crate::tool_state::Context> {
+        self.tool_state.clone()
     }
 
     /// 只管理正文边界，返回完整载荷；协议转换及数据库 I/O 由调用阶段负责。

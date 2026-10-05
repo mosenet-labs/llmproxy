@@ -19,6 +19,7 @@ use super::connection::{ConnectionProbe, Connections};
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 pub struct RequestTelemetry {
     start: Instant,
     id: u64,
@@ -47,6 +48,11 @@ pub struct RequestTelemetry {
 }
 
 impl RequestTelemetry {
+    /// 父请求保留相同请求 ID 和 span；子请求被取消而未归还上下文时仍能关联日志。
+    pub fn cancellation_snapshot(&self) -> Self {
+        self.clone()
+    }
+
     pub fn new() -> Self {
         Self {
             start: Instant::now(),

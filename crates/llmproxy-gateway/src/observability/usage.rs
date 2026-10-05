@@ -1,4 +1,4 @@
-//! 非流式响应的统一用量事件；正文、模型名和签名不进入日志。
+//! 非流式响应与流式累计快照的统一用量事件；正文、模型名和签名不进入日志。
 
 use llmproxy_core::{ir::usage::Usage, protocol::Protocol};
 

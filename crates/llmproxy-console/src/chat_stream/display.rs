@@ -111,7 +111,7 @@ fn json_text(value: &serde_json::Value) -> String {
 }
 
 /// 服务端记录只展示已规范化的可见内容，不读取 original 中的私有数据。
-fn server_part(output: &ServerOutput, reply: &mut ChatReply) {
+pub(super) fn server_part(output: &ServerOutput, reply: &mut ChatReply) {
     let title = match output.kind {
         Kind::Code => "服务端代码",
         Kind::ExecutionResult => "服务端执行结果",
@@ -129,7 +129,7 @@ fn server_part(output: &ServerOutput, reply: &mut ChatReply) {
 }
 
 /// 媒体地址只允许公开 HTTP(S) 或内联 Base64，Provider 文件 ID 只显示不可取回说明。
-fn media_part(media: &Media, reply: &mut ChatReply) {
+pub(super) fn media_part(media: &Media, reply: &mut ChatReply) {
     let title = media
         .name
         .clone()

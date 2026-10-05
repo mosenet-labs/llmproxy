@@ -1,4 +1,4 @@
-//! 非流式跨协议响应在父请求中提交；上游连接和编解码仍走同一套 Pingora 回调。
+//! 预先准备跨协议请求正文；父请求负责整包或逐帧响应的最终交付。
 use super::{Gateway, RequestContext};
 use bytes::Bytes;
 use pingora::{
@@ -68,13 +68,6 @@ pub(super) async fn forward(
         .request_body
         .decode_cross_request(&input, ctx.request_stream)?;
     ctx.request_stream = request.generation.stream;
-    // S4 只准备请求；响应 SSE、签名交付及流内失败接通后才能开放跨协议流式。
-    if ctx.request_stream {
-        return Err(Error::explain(
-            ErrorType::HTTPStatus(422),
-            "cross-protocol streaming is not enabled",
-        ));
-    }
     // 签名恢复可能等待持久化存储，准备期间也监视客户端断开并取消该 future。
     tokio::select! {
         prepared = ctx.telemetry.instrument(ctx.request_body.prepare_cross_request(&request)) => prepared?,
@@ -88,11 +81,24 @@ pub(super) async fn forward(
         Error::explain(ErrorType::InternalError, "subrequest spawner unavailable")
     })?;
     let protocol = ctx.protocol;
+    let mut streaming = if ctx.request_stream {
+        Some(
+            ctx.telemetry
+                .in_scope(|| super::streaming::Transfer::new(ctx))?,
+        )
+    } else {
+        None
+    };
+    let span = ctx.telemetry.in_scope(tracing::Span::current);
+    let telemetry = ctx.telemetry.cancellation_snapshot();
+    let provider = ctx.provider.clone();
     let shared = Exchange(Arc::new(Mutex::new(Some(std::mem::replace(
         ctx,
         gateway.new_ctx(),
     )))));
     ctx.protocol = protocol;
+    ctx.telemetry = telemetry;
+    ctx.provider = provider;
     let (request, handle) = spawner.create_subrequest(
         session.as_downstream(),
         Ctx::builder()
@@ -104,6 +110,42 @@ pub(super) async fn forward(
     let mut rx = handle.rx;
     // 发送完正文后仍持有发送端；提前关闭会被子请求当作客户端断开。
     let tx = handle.tx;
+    if let Some(transfer) = &mut streaming {
+        use tracing::Instrument;
+        // 接收或发送失败都会取消其余 future，释放上游，不创建游离任务。
+        let outcome = tokio::try_join!(
+            async {
+                request.run().await;
+                // 子请求失败通知可能先于已入队正文被父请求读取；先按序交付，避免丢掉有效增量。
+                Ok::<_, Box<Error>>(error_rx.try_recv().ok())
+            },
+            async {
+                for chunk in input {
+                    tx.send(HttpTask::Body(Some(chunk), false))
+                        .await
+                        .map_err(|_| {
+                            Error::explain(ErrorType::ConnectionClosed, "subrequest input closed")
+                        })?;
+                }
+                tx.send(HttpTask::Body(None, true)).await.map_err(|_| {
+                    Error::explain(ErrorType::ConnectionClosed, "subrequest input closed")
+                })?;
+                Ok(())
+            },
+            transfer.run(session, &mut rx).instrument(span)
+        )
+        .and_then(|(error, _, _)| error.map_or(Ok(()), Err));
+        if let Some(restored) = shared.0.lock().expect("subrequest context mutex").take() {
+            *ctx = restored;
+        } else if let Some(status) = transfer.upstream_status() {
+            ctx.telemetry.response_headers(status);
+        }
+        if let Err(error) = &outcome {
+            ctx.stream_error = Some(transfer.failure(super::error_status(error)));
+        }
+        outcome?;
+        return Ok(true);
+    }
     // 框架的 idle 读取监视客户端关闭；子请求执行期间父请求没有写出响应头。
     // 任一关闭事件会销毁整个子请求 future，从而主动释放上游连接。
     let outcome = tokio::select! {
@@ -163,14 +205,14 @@ pub(super) async fn forward(
 
 /// 只缓冲已转换后的输出；响应头和结束标记也必须完整收到。
 #[derive(Default)]
-struct Captured {
+pub(super) struct Captured {
     header: Option<Box<ResponseHeader>>,
     body: Vec<u8>,
     ended: bool,
 }
 impl Captured {
     /// 不向客户端发送任何 HttpTask；错误立即终止采集。
-    fn push(&mut self, task: HttpTask) -> Result<()> {
+    pub(super) fn push(&mut self, task: HttpTask) -> Result<()> {
         match task {
             HttpTask::Header(header, end) if !header.status.is_informational() => {
                 self.header = Some(header);
@@ -203,7 +245,7 @@ impl Captured {
         Ok(())
     }
     /// 已收响应头不等于成功，缺失正文结束标记时必须返回网关错误。
-    fn finish(self) -> Result<(Box<ResponseHeader>, Bytes)> {
+    pub(super) fn finish(self) -> Result<(Box<ResponseHeader>, Bytes)> {
         match (self.header, self.ended) {
             (Some(header), true) => Ok((header, Bytes::from(self.body))),
             _ => Err(Error::explain(

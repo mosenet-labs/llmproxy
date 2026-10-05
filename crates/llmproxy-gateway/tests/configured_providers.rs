@@ -1,5 +1,6 @@
 //! 配置库只读检查；真实联调必须显式运行 ignored 测试。
 
+mod configured_stream;
 #[allow(dead_code)] // 模拟验收还会使用该目录中的夹具和测试密钥。
 mod nonstream;
 mod support;
@@ -61,6 +62,18 @@ async fn provider_failure(response: reqwest::Response) -> String {
 #[tokio::test]
 #[ignore = "需要本地 OpenObserve；显式写入少量验收日志与遥测"]
 async fn configured_openobserve_nonstream() {
+    openobserve(false).await;
+}
+
+/// 实际查询 OpenObserve 的流式计数和 trace；不通过真实模型制造测试用量。
+#[tokio::test]
+#[ignore = "需要本地 OpenObserve；显式写入少量流式验收遥测"]
+async fn configured_openobserve_stream() {
+    openobserve(true).await;
+}
+
+/// 两种 HTTP 交付方式共用存储查询，核对统计口径和日志隐私。
+async fn openobserve(streaming: bool) {
     use llmproxy_core::protocol::{MessagesAuth, Protocol};
     use llmproxy_store::ProviderPaths;
     use nonstream::{Database, MASTER_KEY, alias, fixtures, path};
@@ -96,23 +109,52 @@ async fn configured_openobserve_nonstream() {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
     );
-    let service = format!("llmproxy-nonstream-acceptance-{}", std::process::id());
+    let service = format!(
+        "llmproxy-{}-acceptance-{}",
+        if streaming { "stream" } else { "nonstream" },
+        std::process::id()
+    );
     let start = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_micros() as u64;
-    let (upstream, _) = Mock::http(|_, stream| {
+    let (upstream, _) = Mock::http(move |_, stream| {
         let mut body = fixtures::response(Protocol::AnthropicMessages, false);
         body["usage"] = serde_json::json!({
             "input_tokens":4,"output_tokens":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,
             "cache_creation":{"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":1}
         });
-        respond(
-            stream,
-            200,
-            "Content-Type: application/json\r\n",
-            &serde_json::to_vec(&body).unwrap(),
-        );
+        if streaming {
+            support::sse_headers(stream);
+            let frames = [
+                serde_json::json!({"type":"message_start","message":{"id":"raw","type":"message","model":"upstream-model","role":"assistant","content":[],"stop_reason":null,"usage":{"input_tokens":4,"output_tokens":0,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"cache_creation":{"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":1}}}}),
+                serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}),
+                serde_json::json!({"type":"content_block_stop","index":0}),
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":body["usage"]}),
+                serde_json::json!({"type":"message_stop"}),
+            ];
+            for frame in frames {
+                support::chunk(
+                    stream,
+                    format!(
+                        "event: {}\ndata: {}\n\n",
+                        frame["type"].as_str().unwrap(),
+                        frame
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            }
+            support::finish_chunks(stream);
+        } else {
+            respond(
+                stream,
+                200,
+                "Content-Type: application/json\r\n",
+                &serde_json::to_vec(&body).unwrap(),
+            );
+        }
     });
     let database = Database::new().await;
     database
@@ -152,6 +194,7 @@ async fn configured_openobserve_nonstream() {
     let alias = alias(Protocol::OpenAiChat, Protocol::AnthropicMessages);
     let mut request = fixtures::request(Protocol::OpenAiChat, &alias, "private-acceptance-prompt");
     request["metadata"] = serde_json::json!({"private_hint":"private-acceptance-metadata"});
+    request["stream"] = serde_json::json!(streaming);
     let response = gateway.request(
         "POST",
         &path(Protocol::OpenAiChat, &alias),
@@ -203,6 +246,14 @@ async fn configured_openobserve_nonstream() {
         .iter()
         .find(|hit| observed_field(hit, "event_kind") == &serde_json::json!("usage"))
         .expect("OpenObserve 未存储用量事件");
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|hit| observed_field(hit, "event_kind") == &serde_json::json!("usage"))
+            .count(),
+        1,
+        "累计快照只写入一次"
+    );
     for (key, expected) in [
         ("input_tokens", 10),
         ("output_tokens", 3),

@@ -2,6 +2,7 @@ mod buffered;
 mod request;
 #[cfg(test)]
 mod request_tests;
+mod streaming;
 
 use std::{
     sync::{
@@ -50,6 +51,7 @@ pub struct RequestContext {
     console: bool,
     upstream_model_id: Option<String>,
     request_stream: bool,
+    stream_error: Option<Bytes>,
     request_body: RequestBody,
     response_body: BodyTransform,
 }
@@ -121,6 +123,7 @@ impl ProxyHttp for Gateway {
             console: false,
             upstream_model_id: None,
             request_stream: false,
+            stream_error: None,
             request_body: RequestBody::new(),
             response_body: BodyTransform::default(),
         }
@@ -161,10 +164,6 @@ impl ProxyHttp for Gateway {
                     }
                 };
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
-                if provider.protocol != protocol && stream {
-                    crate::transform::respond_error(session, ctx.protocol, 422).await?;
-                    return Ok(true);
-                }
                 let content_encoding = session.get_header_bytes("content-encoding");
                 if provider.protocol != protocol
                     && !content_encoding.is_empty()
@@ -372,22 +371,42 @@ impl ProxyHttp for Gateway {
             response.remove_header("content-length");
             response.remove_header("content-md5");
             response.remove_header("digest");
-            response.insert_header("content-type", "application/json")?;
+            response.insert_header(
+                "content-type",
+                if ctx.request_stream && response.status.is_success() {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            )?;
             if response.status.is_success() {
-                if !matches!(kind, crate::transform::BodyKind::Json) {
+                let expected = if ctx.request_stream {
+                    matches!(kind, crate::transform::BodyKind::Sse)
+                } else {
+                    matches!(kind, crate::transform::BodyKind::Json)
+                };
+                if !expected {
                     return Err(Error::explain(
                         ErrorType::HTTPStatus(502),
-                        "cross-protocol response must be JSON",
+                        "cross-protocol response format mismatch",
                     )
                     .into_up());
                 }
-                ctx.response_body.set_cross_response(
-                    provider_protocol,
-                    client_protocol,
-                    ctx.client_model.as_deref().expect("client model selected"),
-                    &ctx.response_id,
-                    ctx.response_created,
-                );
+                if ctx.request_stream {
+                    // 父请求逐帧转换并异步提交签名，子请求只交付未经压缩的来源 SSE。
+                    ctx.response_body
+                        .replace_kind(crate::transform::BodyKind::Passthrough);
+                    response.remove_header("etag");
+                    response.insert_header("cache-control", "no-store")?;
+                } else {
+                    ctx.response_body.set_cross_response(
+                        provider_protocol,
+                        client_protocol,
+                        ctx.client_model.as_deref().expect("client model selected"),
+                        &ctx.response_id,
+                        ctx.response_created,
+                    );
+                }
             } else {
                 ctx.response_body
                     .set_cross_error(client_protocol, response.status.as_u16());
@@ -395,11 +414,16 @@ impl ProxyHttp for Gateway {
                 response.remove_header("etag");
             }
         }
-        ctx.response_body.replace_kind(kind);
-        ctx.response_body.set_codec(
-            ctx.protocol.expect("request_filter set protocol"),
-            MessagePhase::Response,
-        );
+        if !(ctx.request_stream
+            && client_protocol != provider_protocol
+            && response.status.is_success())
+        {
+            ctx.response_body.replace_kind(kind);
+        }
+        ctx.telemetry.in_scope(|| {
+            ctx.response_body
+                .set_codec(client_protocol, MessagePhase::Response)
+        });
         // This is a copy of the upstream header, before downstream framing is
         // selected. The upstream reader keeps its original framing information.
         let mut nominated = Vec::new();
@@ -494,13 +518,32 @@ impl ProxyHttp for Gateway {
         error: &Error,
         ctx: &mut Self::CTX,
     ) -> FailToProxy {
-        // A stream that already started can only be terminated. Its HTTP status
-        // remains the one the client received; never append an error body to SSE.
+        // 已发头的跨协议流以客户端错误事件结束，HTTP 状态保留已发送的值。
         if let Some(response) = session.response_written()
             && (!response.status.is_informational() || response.status.as_u16() == 101)
         {
+            let status = response.status.as_u16();
+            if let Some(body) = ctx.stream_error.take() {
+                let timeout = std::time::Duration::from_millis(
+                    ctx.provider.as_ref().unwrap().write_timeout_ms,
+                );
+                // 慢客户端导致原发送超时后，错误事件同样受写超时约束。
+                let written =
+                    tokio::time::timeout(timeout, session.write_response_body(Some(body), true))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(Error::explain(
+                                ErrorType::WriteTimedout,
+                                "client error write timed out",
+                            )
+                            .into_down())
+                        });
+                if let Err(write_error) = written {
+                    ctx.telemetry.error_response_failed(&write_error);
+                }
+            }
             return FailToProxy {
-                error_code: response.status.as_u16(),
+                error_code: status,
                 can_reuse_downstream: false,
             };
         }

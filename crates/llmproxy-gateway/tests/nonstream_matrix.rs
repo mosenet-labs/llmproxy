@@ -86,8 +86,8 @@ async fn four_by_four_nonstream_http_matrix() {
         upstreams.push((upstream, requests));
     }
     let gateway = Gateway::database(&database.url, MASTER_KEY);
-    // 请求转换已支持 stream，但增量响应与签名提交接通前，HTTP 门槛仍拒绝全部跨方向。
-    for (target, (upstream, _)) in ALL.into_iter().zip(&upstreams) {
+    // 流式入口不能把 Provider 返回的 JSON 伪装成 SSE，格式错误在客户端发头前拒绝。
+    for (target, (upstream, requests)) in ALL.into_iter().zip(&upstreams) {
         for source in ALL.into_iter().filter(|source| *source != target) {
             let alias = alias(source, target);
             let mut body = fixtures::request(source, &alias, "text");
@@ -104,8 +104,13 @@ async fn four_by_four_nonstream_http_matrix() {
                 "Content-Type: application/json\r\nAccept: text/event-stream\r\n",
                 &serde_json::to_vec(&body).unwrap(),
             );
-            assert_eq!(response.status, 422, "流式门槛 {source:?} -> {target:?}");
-            assert_eq!(upstream.count(), before, "拒绝的流式请求不能到达 Provider");
+            assert_eq!(
+                response.status, 502,
+                "流式响应格式 {source:?} -> {target:?}"
+            );
+            assert_eq!(upstream.count(), before + 1);
+            let received = requests.recv_timeout(DEADLINE).unwrap();
+            assert_eq!(values(&received.headers, "accept"), ["text/event-stream"]);
         }
     }
     for (target, (_, requests)) in ALL.into_iter().zip(&upstreams) {

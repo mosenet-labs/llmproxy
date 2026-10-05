@@ -146,7 +146,7 @@ rtk proxy env LLMPROXY_LIVE_DATABASE_ENV=LLMPROXY_DATABASE_URL LLMPROXY_LIVE_CAP
 - [x] 浏览器中的四协议文本非流式对话与逐轮 usage/cache；Chat→Gemini 停止、恢复与失败显示。
 - [x] 工具和多模态的页面原生展示及浏览器验收：四客户端纯工具调用、Gemini 图片/音频/视频、服务端代码与结果、Chat 未知格式音频下载与转录；不新增客户端工具执行器。
 - [x] OpenObserve 中的请求关联、用量/缓存日志、对应 trace 与请求指标读回；模拟 Provider 不消费 token。
-- [ ] 跨协议流式：事件 IR、四协议解码/编码状态机、逐帧 SSE 转换、工具参数分片、终止与错误、usage/cache 合并、取消与背压验收。
+- [x] 跨协议流式基础链路：事件 IR、四协议状态机、逐帧 SSE、签名组持久化、安全错误、usage/cache、取消/背压及 16 方向真实/页面矩阵；专项外部门槛见[文档 24](24-protocol-completion-tasks.md)。
 
 非流式门槛尚未全部关闭，不能将上述文本矩阵通过表述为完整非流式能力验收，也不能宣称跨协议流式已可用。
 

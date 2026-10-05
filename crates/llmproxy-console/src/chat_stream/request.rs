@@ -19,6 +19,17 @@ pub(super) fn request_body(
             model: alias.to_owned(),
             max_completion_tokens: OptionalNullable::Value(2048),
             stream: OptionalNullable::Value(stream),
+            // 同协议流式也请求结束用量，便于页面逐轮展示缓存与 token 统计。
+            // 参考：https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+            stream_options: if stream {
+                OptionalNullable::Value(chat::body::StreamOptions {
+                    include_usage: OptionalNullable::Value(true),
+                    include_obfuscation: OptionalNullable::Missing,
+                    extra: Default::default(),
+                })
+            } else {
+                OptionalNullable::Missing
+            },
             messages: history
                 .map(|message| {
                     if message.role == ChatBubbleRole::User {

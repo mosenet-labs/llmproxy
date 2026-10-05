@@ -40,6 +40,7 @@ fn context(source: Protocol, target: Protocol, stream: bool) -> RequestContext {
         console: false,
         upstream_model_id: Some("models/a/b ?".into()),
         request_stream: stream,
+        stream_error: None,
         request_body: RequestBody::new(),
         response_body: BodyTransform::default(),
     }

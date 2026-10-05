@@ -155,6 +155,13 @@ impl ChatSession {
             message.content = reply.content.clone();
             message.status = ChatMessageStatus::Streaming;
             let id = message.id.clone();
+            // 工具参数、媒体和累计用量与文字一起逐帧更新，纯工具回复也能在生成中展示。
+            if !reply.parts.is_empty() {
+                state.parts.insert(id.clone(), reply.parts.clone());
+            }
+            if let Some(usage) = reply.usage.as_ref().map(usage_label) {
+                state.usage.insert(id.clone(), usage);
+            }
             if !reply.visible_thinking().is_empty() {
                 state
                     .thinking
@@ -198,6 +205,10 @@ impl ChatSession {
                     } else {
                         ChatMessageStatus::Failed
                     };
+                    let id = message.id.clone();
+                    // 未完成的工具和累计快照不能作为完整回复或最终用量保留。
+                    state.parts.remove(&id);
+                    state.usage.remove(&id);
                 }
             }
         }
@@ -374,6 +385,32 @@ mod tests {
 #[cfg(test)]
 mod usage_tests {
     use super::*;
+    #[test]
+    fn streaming_tools_and_usage_update_before_completion_and_are_cleared_on_failure() {
+        let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
+        assert!(room.begin("hi"));
+        let usage = llmproxy_core::ir::usage::Usage {
+            input_tokens: Some(10),
+            ..Default::default()
+        };
+        room.update(&ChatReply {
+            parts: vec![DisplayPart {
+                title: "工具调用 · lookup".into(),
+                text: "{\"q\":".into(),
+                media: None,
+            }],
+            usage: Some(usage),
+            ..Default::default()
+        });
+        assert!(room.snapshot().2);
+        assert_eq!(room.parts_snapshot()["2"][0].text, "{\"q\":");
+        assert_eq!(room.usage_snapshot()["2"], "输入 10");
+        room.finish(Err("Provider 生成失败".into()));
+        assert!(!room.snapshot().2);
+        assert!(room.parts_snapshot().is_empty());
+        assert!(room.usage_snapshot().is_empty());
+    }
+
     #[test]
     fn usage_is_separate_from_history_and_preserves_zero() {
         let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());

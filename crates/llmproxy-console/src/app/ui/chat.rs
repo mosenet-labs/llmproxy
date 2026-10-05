@@ -154,7 +154,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                         </div>
                         <p class="mt-2 mb-0 pl-10 text-[11px] leading-[1.5] text-[#8a94a3]">"切换协议将开始新会话"</p>
                         <label class="mt-3 flex items-center gap-2 text-[12px] text-secondary"><input type="checkbox" :checked=$(streaming.get()) :disabled=$(busy.get()) @change=$(|event: Event| { streaming.set(event.target.checked); })>"流式输出"</label>
-                        <p class="mt-2 mb-0 text-[11px] text-secondary">"跨协议请使用非流式；流式转换尚未开放。"</p>
+                        <p class="mt-2 mb-0 text-[11px] text-secondary">"流式输出会逐步显示回复。"</p>
                     </div>
                     <div class="mt-6 flex min-h-0 flex-1 flex-col border-t border-[#e9edf2] px-2 pt-4 max-[760px]:mt-3 max-[760px]:pt-3">
                         <div class="flex items-center justify-between"><h3 class="m-0 text-[11px] font-semibold tracking-[0.12em] text-[#8793a2]">"历史会话"</h3><span class="text-[11px] text-[#9aa4b0]">"本页"</span></div>
