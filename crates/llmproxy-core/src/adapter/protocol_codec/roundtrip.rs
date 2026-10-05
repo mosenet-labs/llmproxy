@@ -72,7 +72,11 @@ pub(super) fn request(
         }
         cross::generation::write(body, &edited.generation, Some(&before.generation))?;
     }
-    let actual = protocol.decode_request(body)?;
+    let mut actual = protocol.decode_request(body)?;
+    if protocol == Protocol::Gemini {
+        // 流式模式属于 URL，调用方继续持有 IR 中的模式；不能用正文解码结果否定它。
+        actual.generation.stream = edited.generation.stream;
+    }
     if actual.model != edited.model
         || actual.native_tools != edited.native_tools
         || actual.tools != edited.tools

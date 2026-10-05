@@ -86,6 +86,28 @@ async fn four_by_four_nonstream_http_matrix() {
         upstreams.push((upstream, requests));
     }
     let gateway = Gateway::database(&database.url, MASTER_KEY);
+    // 请求转换已支持 stream，但增量响应与签名提交接通前，HTTP 门槛仍拒绝全部跨方向。
+    for (target, (upstream, _)) in ALL.into_iter().zip(&upstreams) {
+        for source in ALL.into_iter().filter(|source| *source != target) {
+            let alias = alias(source, target);
+            let mut body = fixtures::request(source, &alias, "text");
+            let path = if source == Protocol::Gemini {
+                format!("/v1beta/models/{alias}:streamGenerateContent?alt=sse")
+            } else {
+                body["stream"] = serde_json::json!(true);
+                path(source, &alias)
+            };
+            let before = upstream.count();
+            let response = gateway.request(
+                "POST",
+                &path,
+                "Content-Type: application/json\r\nAccept: text/event-stream\r\n",
+                &serde_json::to_vec(&body).unwrap(),
+            );
+            assert_eq!(response.status, 422, "流式门槛 {source:?} -> {target:?}");
+            assert_eq!(upstream.count(), before, "拒绝的流式请求不能到达 Provider");
+        }
+    }
     for (target, (_, requests)) in ALL.into_iter().zip(&upstreams) {
         for source in ALL {
             let alias = alias(source, target);
@@ -93,7 +115,7 @@ async fn four_by_four_nonstream_http_matrix() {
                 let response = gateway.request(
                     "POST",
                     &path(source, &alias),
-                    "Content-Type: application/json\r\nAuthorization: Bearer client-secret\r\n",
+                    "Content-Type: application/json\r\nAuthorization: Bearer client-secret\r\nAccept: text/event-stream\r\n",
                     &serde_json::to_vec(&if prompt == "tool" {
                         fixtures::tool_request(source, &alias)
                     } else {
@@ -110,6 +132,7 @@ async fn four_by_four_nonstream_http_matrix() {
                 let received = requests.recv_timeout(DEADLINE).unwrap();
                 assert_eq!(received.target, path(target, "upstream-model"));
                 let ir = fixtures::decode_request(target, &received.body);
+                assert!(!ir.generation.stream, "Accept 不应改变正文的非流式意图");
                 assert_eq!(ir.generation.max_output_tokens, Some(128));
                 if prompt == "tool" {
                     assert_eq!(ir.tools.len(), 1);
@@ -133,6 +156,12 @@ async fn four_by_four_nonstream_http_matrix() {
                 assert_eq!(values(&received.headers, header), [expected]);
                 if source != target {
                     assert!(values(&response.headers, "etag").is_empty());
+                    assert_eq!(values(&received.headers, "accept"), ["application/json"]);
+                    assert_eq!(values(&received.headers, "accept-encoding"), ["identity"]);
+                    assert_eq!(
+                        values(&received.headers, "content-length"),
+                        [received.body.len().to_string()]
+                    );
                 }
                 let body = response.body();
                 if prompt == "reject" {

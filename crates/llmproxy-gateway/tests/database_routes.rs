@@ -101,8 +101,12 @@ async fn chat_route_to_messages_provider_converts_request_and_response() {
     assert_eq!(request.target, "/v1/messages");
     assert_eq!(values(&request.headers, "x-api-key"), ["provider-secret"]);
     assert!(values(&request.headers, "authorization").is_empty());
-    assert!(values(&request.headers, "content-length").is_empty());
-    assert_eq!(values(&request.headers, "transfer-encoding"), ["chunked"]);
+    // 目标正文在上游发头前已准备，按实际字节长度发送，不再使用 chunked。
+    assert_eq!(
+        values(&request.headers, "content-length"),
+        [request.body.len().to_string()]
+    );
+    assert!(values(&request.headers, "transfer-encoding").is_empty());
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["model"], "claude-model");
     assert_eq!(body["max_tokens"], 32);

@@ -8,6 +8,8 @@ pub use error::respond as respond_error;
 mod model;
 mod parse;
 mod request;
+#[cfg(test)]
+mod request_tests;
 
 pub use request::{ModelRead, RequestBody};
 
@@ -371,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_protocol_stream_request_is_rejected() {
+    fn cross_protocol_request_preserves_stream_intent() {
         let mut request = BodyTransform::new(BodyKind::Json);
         request.set_cross_request(
             Protocol::OpenAiChat,
@@ -379,6 +381,9 @@ mod tests {
             "claude-model",
         );
         let mut body = Some(Bytes::from_static(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":32,"stream":true}"#));
-        assert!(request.push(&mut body, true).is_err());
+        request.push(&mut body, true).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["model"], "claude-model");
     }
 }

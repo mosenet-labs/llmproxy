@@ -64,6 +64,26 @@ pub(super) async fn forward(
         return Ok(false);
     }
     let input = ctx.request_body.buffered_input(session).await?;
+    let request = ctx
+        .request_body
+        .decode_cross_request(&input, ctx.request_stream)?;
+    ctx.request_stream = request.generation.stream;
+    // S4 只准备请求；响应 SSE、签名交付及流内失败接通后才能开放跨协议流式。
+    if ctx.request_stream {
+        return Err(Error::explain(
+            ErrorType::HTTPStatus(422),
+            "cross-protocol streaming is not enabled",
+        ));
+    }
+    // 签名恢复可能等待持久化存储，准备期间也监视客户端断开并取消该 future。
+    tokio::select! {
+        prepared = ctx.telemetry.instrument(ctx.request_body.prepare_cross_request(&request)) => prepared?,
+        closed = session.read_body_or_idle(true) => return Err(closed.err().unwrap_or_else(|| {
+            Error::explain(ErrorType::ConnectionClosed, "client closed during request preparation")
+        }).into_down()),
+    }
+    // 子请求只需要目标字节与原始输入边界，不持有整份来源结构体和 IR。
+    drop(request);
     let spawner = session.subrequest_spawner.as_ref().ok_or_else(|| {
         Error::explain(ErrorType::InternalError, "subrequest spawner unavailable")
     })?;

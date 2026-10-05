@@ -34,9 +34,6 @@ pub(in crate::adapter::protocol_codec) fn encode_request(
         protocol,
         &mut warnings,
     )?;
-    if request.generation.stream {
-        return Err(unsupported("stream", "仅支持非流式请求"));
-    }
     let limit = request.generation.max_output_tokens;
     if let (Some(source_limit), Some(target_limit)) = (limit, target.max_output_tokens)
         && source_limit != target_limit

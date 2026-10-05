@@ -207,13 +207,7 @@ fn rejects_unmapped_request_semantics() {
     let mut body = request(Protocol::OpenAiChat);
     body["stream"] = json!(true);
     let ir = Protocol::OpenAiChat.decode_request(&body).unwrap();
-    assert!(
-        Protocol::Gemini
-            .encode_request_for(&ir, &target)
-            .unwrap_err()
-            .to_string()
-            .contains("stream")
-    );
+    assert!(Protocol::Gemini.encode_request_for(&ir, &target).is_ok());
 
     let mut body = request(Protocol::AnthropicMessages);
     body.as_object_mut().unwrap().remove("max_tokens");

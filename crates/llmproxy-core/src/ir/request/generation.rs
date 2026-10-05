@@ -34,6 +34,6 @@ pub struct Generation {
     pub output_format: Option<super::controls::OutputFormat>,
     /// 推理模式、预算及摘要。
     pub reasoning: super::controls::Reasoning,
-    /// 是否请求事件流；非流式编码器会拒绝 true。
+    /// 是否请求事件流；Gemini 由 HTTP 接入层从 URL 补入，编码时仍保留在 IR 中。
     pub stream: bool,
 }

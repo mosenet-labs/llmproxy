@@ -16,6 +16,8 @@ mod json_test_support;
 #[cfg(test)]
 mod normalized_tests;
 #[cfg(test)]
+mod stream_request_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod typed_tests;
@@ -51,7 +53,8 @@ pub trait ProtocolCodec {
     /// 编码为当前协议的非流式响应；无来源副本时使用 IR 中的响应外壳。
     /// 跨协议调用若需处理有损警告，应使用 `encode_response_for`。
     fn encode_response(&self, response: &Response) -> Result<ProtocolResponse>;
-    /// 将 IR 编为指定目标协议的非流式请求，返回无法保留的语义警告。
+    /// 将 IR 编为指定目标协议的请求，返回无法保留的语义警告。
+    /// Gemini 的模型和流式模式由 HTTP 层写入 URL，不生成正文扩展字段。
     fn encode_request_for(
         &self,
         request: &Request,

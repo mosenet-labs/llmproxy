@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use bytes::Bytes;
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::{ir::request::Request as IrRequest, protocol::Protocol};
 use pingora::{Error, ErrorType, Result, proxy::Session};
 
 use super::{
@@ -25,6 +25,9 @@ pub struct RequestBody {
     original_prefix_len: usize,
     body_delta: isize,
     body: BodyTransform,
+    /// 父请求完成转换后的目标正文；子请求仍按原始输入长度读取框架通道。
+    prepared: Option<Bytes>,
+    prepared_input: bool,
 }
 
 impl RequestBody {
@@ -36,6 +39,8 @@ impl RequestBody {
             original_prefix_len: 0,
             body_delta: 0,
             body: BodyTransform::new(BodyKind::Json),
+            prepared: None,
+            prepared_input: false,
         }
     }
 
@@ -82,7 +87,7 @@ impl RequestBody {
         Ok(())
     }
 
-    /// 保存原始请求体及已预读前缀，供非流式子请求按原边界回放一次。
+    /// 保存原始请求体及已预读前缀，供跨协议子请求按原边界回放一次。
     pub async fn buffered_input(&self, session: &mut Session) -> Result<Vec<Bytes>> {
         // 已知长度超限时直接拒绝，避免等待客户端继续上传无用正文。
         // chunked 请求仍逐块累计，不能只信任 Content-Length。
@@ -127,6 +132,52 @@ impl RequestBody {
         self.body_delta
     }
 
+    /// 在创建子请求之前完整解码一次，Gemini 的流式意图来自已匹配的 URL。
+    pub fn decode_cross_request(&self, chunks: &[Bytes], gemini_stream: bool) -> Result<IrRequest> {
+        let Some(super::cross::CrossConversion::Request { source, .. }) = &self.body.cross else {
+            return Err(Error::explain(
+                ErrorType::InternalError,
+                "cross request conversion missing",
+            ));
+        };
+        let length = chunks
+            .iter()
+            .try_fold(0usize, |length, chunk| length.checked_add(chunk.len()))
+            .filter(|length| *length <= super::MAX_BUFFERED_BODY)
+            .ok_or_else(|| {
+                Error::explain(ErrorType::HTTPStatus(413), "cross request exceeds limit")
+            })?;
+        let mut bytes = Vec::with_capacity(length);
+        for chunk in chunks {
+            bytes.extend_from_slice(chunk);
+        }
+        let mut ir =
+            super::cross::decode_request(&bytes, *source).map_err(super::cross::request_error)?;
+        if *source == Protocol::Gemini {
+            ir.generation.stream = gemini_stream;
+        }
+        Ok(ir)
+    }
+
+    /// 转换与签名恢复先于上游请求头，目标正文仅在子请求正文结束时交付一次。
+    pub async fn prepare_cross_request(&mut self, request: &IrRequest) -> Result<()> {
+        let conversion = self.body.cross.as_ref().ok_or_else(|| {
+            Error::explain(ErrorType::InternalError, "cross request conversion missing")
+        })?;
+        self.prepared = Some(
+            super::cross::prepare_request(request, conversion, self.body.tool_state.as_ref())
+                .await?,
+        );
+        self.prepared_input = true;
+        self.replay_prefix = None;
+        Ok(())
+    }
+
+    /// 目标正文长度已知时供上游 HTTP 层直接设置 Content-Length。
+    pub fn prepared_length(&self) -> Option<usize> {
+        self.prepared.as_ref().map(Bytes::len)
+    }
+
     /// 为请求 JSON 正文选择对应协议的编解码器。
     pub fn set_protocol(&mut self, protocol: Protocol) {
         self.body.set_codec(protocol, MessagePhase::Request);
@@ -144,6 +195,16 @@ impl RequestBody {
 
     /// 将路由阶段预读的前缀回放到正文过滤器，再处理当前分块。
     pub async fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
+        if self.prepared_input {
+            *body = Some(if end {
+                self.prepared.take().ok_or_else(|| {
+                    Error::explain(ErrorType::InternalError, "prepared request already sent")
+                })?
+            } else {
+                Bytes::new()
+            });
+            return Ok(());
+        }
         if let Some(rewritten) = self.replay_prefix.take() {
             // 路由阶段读取的前缀在此回放，再与后续正文交给同一个缓冲状态。
             if body.as_ref().map(Bytes::len) != Some(self.original_prefix_len) {

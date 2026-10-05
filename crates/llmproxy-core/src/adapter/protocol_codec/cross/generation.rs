@@ -157,15 +157,25 @@ fn write_scalars(
                     .map(StopSequences::Many)
                     .into();
             }
-            if before.is_some_and(|old| old.stream != generation.stream) {
+            if before.map_or(generation.stream, |old| old.stream != generation.stream) {
                 body.stream = O::Value(generation.stream);
+            }
+            if before.is_none() && generation.stream {
+                // 重建 Chat 流式请求时主动请求结束用量，避免跨协议统计缺失。
+                // 参考：https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+                body.stream_options =
+                    O::Value(crate::protocol::chat::request::body::StreamOptions {
+                        include_usage: O::Value(true),
+                        include_obfuscation: O::Missing,
+                        extra: Default::default(),
+                    });
             }
         }
         Request::Responses(body) => {
             set!(body, max_output_tokens, max_output_tokens);
             set!(body, temperature, temperature);
             set!(body, top_p, top_p);
-            if before.is_some_and(|old| old.stream != generation.stream) {
+            if before.map_or(generation.stream, |old| old.stream != generation.stream) {
                 body.stream = O::Value(generation.stream);
             }
         }
@@ -179,14 +189,13 @@ fn write_scalars(
             set!(body, temperature, temperature);
             set!(body, top_p, top_p);
             set!(body, stop_sequences, stop_sequences);
-            if before.is_some_and(|old| old.stream != generation.stream) {
+            if before.map_or(generation.stream, |old| old.stream != generation.stream) {
                 body.stream = O::Value(generation.stream);
             }
         }
         Request::Gemini(body) => {
-            if generation.stream {
-                return Err(unsupported("stream", "Gemini 流式模式位于 URL"));
-            }
+            // 两种 Gemini HTTP 方法使用同一请求结构，流式标记不写入正文。
+            // 参考：https://ai.google.dev/api/generate-content#method:-models.streamgeneratecontent
             let mut config = body
                 .generation_config
                 .as_option()

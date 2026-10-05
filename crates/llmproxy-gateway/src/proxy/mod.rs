@@ -1,4 +1,7 @@
 mod buffered;
+mod request;
+#[cfg(test)]
+mod request_tests;
 
 use std::{
     sync::{
@@ -11,10 +14,9 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use llmproxy_core::{
-    protocol::{MessagesAuth, Protocol},
+    protocol::Protocol,
     routing::{Route, match_route},
 };
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use pingora::{
     Error, ErrorSource, ErrorType, Result,
     protocols::Digest,
@@ -29,11 +31,6 @@ use crate::{
     transform::{BodyTransform, MessagePhase, ModelRead, RequestBody, response_kind},
 };
 
-const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'~');
 static RESPONSE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct Gateway {
@@ -51,8 +48,8 @@ pub struct RequestContext {
     response_created: i64,
     provider: Option<Arc<ResolvedProvider>>,
     console: bool,
-    gemini_model_id: Option<String>,
-    gemini_stream: bool,
+    upstream_model_id: Option<String>,
+    request_stream: bool,
     request_body: RequestBody,
     response_body: BodyTransform,
 }
@@ -122,8 +119,8 @@ impl ProxyHttp for Gateway {
             response_created: 0,
             provider: None,
             console: false,
-            gemini_model_id: None,
-            gemini_stream: false,
+            upstream_model_id: None,
+            request_stream: false,
             request_body: RequestBody::new(),
             response_body: BodyTransform::default(),
         }
@@ -187,8 +184,8 @@ impl ProxyHttp for Gateway {
                     prepare_response_shell(ctx);
                 }
                 ctx.provider = Some(provider);
-                ctx.gemini_model_id = Some(upstream_model_id);
-                ctx.gemini_stream = stream;
+                ctx.upstream_model_id = Some(upstream_model_id);
+                ctx.request_stream = stream;
                 buffered::forward(self, session, ctx).await
             }
             Route::Proxy(protocol) => {
@@ -236,9 +233,7 @@ impl ProxyHttp for Gateway {
                     );
                     prepare_response_shell(ctx);
                 }
-                if provider.protocol == Protocol::Gemini {
-                    ctx.gemini_model_id = Some(upstream_model_id);
-                }
+                ctx.upstream_model_id = Some(upstream_model_id);
                 // Pin one immutable provider for the full request, including SSE.
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
                 ctx.provider = Some(provider);
@@ -338,109 +333,7 @@ impl ProxyHttp for Gateway {
         request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        let client_protocol = ctx.protocol.expect("request_filter set protocol");
-        let provider = ctx
-            .provider
-            .as_ref()
-            .expect("request_filter selected provider");
-        let protocol = provider.protocol;
-        let base_path = if protocol == Protocol::Gemini {
-            let model = ctx
-                .gemini_model_id
-                .as_deref()
-                .expect("Gemini route selected model");
-            let model = model.strip_prefix("models/").unwrap_or(model);
-            let encoded = utf8_percent_encode(model, MODEL_SEGMENT);
-            let method = if ctx.gemini_stream {
-                "streamGenerateContent"
-            } else {
-                "generateContent"
-            };
-            format!(
-                "{}/{}:{method}",
-                provider.upstream_path.trim_end_matches('/'),
-                encoded
-            )
-        } else {
-            provider.upstream_path.clone()
-        };
-        let query = if protocol == client_protocol {
-            request.uri.query().unwrap_or_default()
-        } else {
-            ""
-        };
-        let path = if ctx.gemini_stream && !query.split('&').any(|part| part == "alt=sse") {
-            format!(
-                "{base_path}?{query}{}alt=sse",
-                if query.is_empty() { "" } else { "&" }
-            )
-        } else if query.is_empty() {
-            base_path
-        } else {
-            format!("{base_path}?{query}")
-        };
-        request.set_uri(
-            path.parse().map_err(|_| {
-                Error::explain(ErrorType::InvalidHTTPHeader, "invalid upstream path")
-            })?,
-        );
-        request.remove_header("authorization");
-        request.remove_header("x-api-key");
-        request.remove_header("x-goog-api-key");
-        request.insert_header("host", provider.authority())?;
-        if protocol != client_protocol {
-            request.remove_header("content-length");
-            request.remove_header("transfer-encoding");
-            request.insert_header("content-type", "application/json")?;
-            request.insert_header("accept", "application/json")?;
-        } else if let Some(length) = request.headers.get("content-length") {
-            let length = length
-                .to_str()
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .ok_or_else(|| {
-                    Error::explain(ErrorType::InvalidHTTPHeader, "invalid content length")
-                })?;
-            let adjusted = length
-                .checked_add_signed(ctx.request_body.body_delta())
-                .ok_or_else(|| {
-                    Error::explain(
-                        ErrorType::InvalidHTTPHeader,
-                        "invalid rewritten content length",
-                    )
-                })?;
-            request.insert_header("content-length", adjusted.to_string())?;
-        }
-        request.remove_header("content-md5");
-        request.remove_header("digest");
-        if protocol != client_protocol {
-            request.remove_header("anthropic-version");
-            request.remove_header("anthropic-beta");
-            request.remove_header("openai-organization");
-            request.remove_header("openai-project");
-            request.remove_header("x-goog-api-client");
-            request.remove_header("x-goog-user-project");
-        }
-        match protocol {
-            Protocol::AnthropicMessages => {
-                if provider.messages_auth == MessagesAuth::Bearer {
-                    request
-                        .insert_header("authorization", format!("Bearer {}", provider.secret))?;
-                } else {
-                    request.insert_header("x-api-key", provider.secret.as_str())?;
-                }
-                if let Some(version) = &provider.anthropic_version {
-                    request.insert_header("anthropic-version", version.as_str())?;
-                }
-            }
-            Protocol::OpenAiChat | Protocol::OpenAiResponses => {
-                request.insert_header("authorization", format!("Bearer {}", provider.secret))?;
-            }
-            Protocol::Gemini => {
-                request.insert_header("x-goog-api-key", provider.secret.as_str())?;
-            }
-        }
-        Ok(())
+        request::filter(request, ctx)
     }
 
     async fn request_body_filter(

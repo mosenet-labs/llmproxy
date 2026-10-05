@@ -214,7 +214,7 @@ fn same_protocol_edits_common_fields_and_retains_extensions() {
 }
 
 #[test]
-fn source_diagnostics_and_stream_rejection_survive_detachment() {
+fn source_diagnostics_and_stream_intent_survive_detachment() {
     let mut body = request(Protocol::OpenAiResponses);
     body["previous_response_id"] = json!("private-value");
     let ir = Protocol::OpenAiResponses
@@ -240,10 +240,11 @@ fn source_diagnostics_and_stream_rejection_survive_detachment() {
     body["stream"] = json!(true);
     let ir = Protocol::OpenAiChat.decode_request(&body).unwrap();
     assert_eq!(Protocol::OpenAiChat.encode_request(&ir).unwrap(), body);
+    assert!(ir.generation.stream);
     assert!(
         Protocol::Gemini
             .encode_request(&ir.without_source())
-            .is_err()
+            .is_ok()
     );
 }
 

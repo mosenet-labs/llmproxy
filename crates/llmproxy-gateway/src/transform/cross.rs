@@ -5,6 +5,7 @@ use llmproxy_core::{
     adapter::protocol_codec::{
         Conversion, ConversionWarning, ProtocolCodec, RequestTarget, ResponseTarget,
     },
+    ir::request::Request as IrRequest,
     protocol::{Protocol, Request},
 };
 use pingora::{Error, ErrorType, Result};
@@ -112,12 +113,49 @@ pub(super) async fn convert_request(
         unreachable!()
     };
     let mut converted = request(&bytes, *source, *target, model).map_err(request_error)?;
+    finish_request(&mut converted, tool_state).await
+}
+
+/// 已解码的请求先构造目标协议，再恢复签名；父请求无需重复解析正文。
+pub(super) async fn prepare_request(
+    request: &IrRequest,
+    conversion: &CrossConversion,
+    tool_state: Option<&crate::tool_state::Context>,
+) -> Result<Bytes> {
+    let CrossConversion::Request {
+        source,
+        target,
+        model,
+    } = conversion
+    else {
+        unreachable!()
+    };
+    if request.source_protocol() != *source {
+        return Err(request_error(llmproxy_core::adapter::Error::Invalid(
+            "请求 IR 与来源协议不匹配".into(),
+        )));
+    }
+    let mut converted = encode_request(request, *target, model).map_err(request_error)?;
+    finish_request(&mut converted, tool_state).await
+}
+
+/// 签名恢复和 HTTP 序列化只在目标结构体上执行，转换警告不含字段值。
+async fn finish_request(
+    converted: &mut Conversion<Request>,
+    tool_state: Option<&crate::tool_state::Context>,
+) -> Result<Bytes> {
     if let Some(state) = tool_state {
         state.restore_persisted(&mut converted.body).await?;
     }
     let bytes =
         codec::encode_request(&converted.body).map_err(|error| request_error(error.into()))?;
-    warn(converted.warnings);
+    if bytes.len() > super::MAX_BUFFERED_BODY {
+        return Err(Error::explain(
+            ErrorType::HTTPStatus(413),
+            "converted request exceeds limit",
+        ));
+    }
+    warn(std::mem::take(&mut converted.warnings));
     Ok(bytes.into())
 }
 
@@ -128,10 +166,27 @@ fn request(
     target: Protocol,
     model: &str,
 ) -> std::result::Result<Conversion<Request>, llmproxy_core::adapter::Error> {
+    let request = decode_request(bytes, source)?;
+    encode_request(&request, target, model)
+}
+
+/// HTTP 边界读成来源 struct，再投影 IR；不解释客户端 Accept 来猜流式意图。
+pub(super) fn decode_request(
+    bytes: &[u8],
+    source: Protocol,
+) -> std::result::Result<IrRequest, llmproxy_core::adapter::Error> {
     let body = codec::decode_request(source, bytes)?;
-    let request = source.decode_request(&body)?;
+    source.decode_request(&body)
+}
+
+/// 请求的流式标记和消息使用同一套目标协议构造规则。
+fn encode_request(
+    request: &IrRequest,
+    target: Protocol,
+    model: &str,
+) -> std::result::Result<Conversion<Request>, llmproxy_core::adapter::Error> {
     target.encode_request_for(
-        &request,
+        request,
         &RequestTarget {
             model,
             max_output_tokens: None,
@@ -140,7 +195,7 @@ fn request(
 }
 
 /// 转换错误与存储错误分开处理，拒绝时不输出原始正文。
-fn request_error(_: llmproxy_core::adapter::Error) -> Box<Error> {
+pub(super) fn request_error(_: llmproxy_core::adapter::Error) -> Box<Error> {
     tracing::warn!(
         component = "gateway",
         event_kind = "conversion",
