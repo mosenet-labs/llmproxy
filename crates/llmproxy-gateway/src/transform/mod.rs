@@ -1,12 +1,11 @@
 //! 在 Pingora 分块回调与 JSON 解析之间管理单次请求的正文边界。
 //! 同协议保留未修改的原始字节；跨协议等待完整 JSON 后转换。
 
-mod codec;
+use llmproxy_core::protocol::wire as codec;
 mod cross;
 mod error;
 pub use error::respond as respond_error;
 mod model;
-mod parse;
 mod request;
 #[cfg(test)]
 mod request_tests;
@@ -40,14 +39,24 @@ pub enum MessagePhase {
     Response,
 }
 
+/// 同一次正文只能观察、转换或替换错误，避免多个可选标志同时生效。
+enum Operation {
+    Observe(Option<(Protocol, MessagePhase)>),
+    Convert(CrossConversion),
+    Error { protocol: Protocol, status: u16 },
+}
+impl Default for Operation {
+    fn default() -> Self {
+        Self::Observe(None)
+    }
+}
+
 #[derive(Default)]
 pub struct BodyTransform {
     kind: BodyKind,
-    codec: Option<(Protocol, MessagePhase)>,
-    cross: Option<CrossConversion>,
-    cross_error: Option<(Protocol, u16)>,
+    operation: Operation,
     tool_state: Option<crate::tool_state::Context>,
-    // JSON 等待正文结束；SSE 只保留尚未完整的事件。
+    // 仅 JSON 缓冲整包；同协议 SSE 原样交付，观察器独立分帧。
     pending: Vec<u8>,
     observer: Option<stream::Observer>,
 }
@@ -57,9 +66,7 @@ impl BodyTransform {
     pub fn new(kind: BodyKind) -> Self {
         Self {
             kind,
-            codec: None,
-            cross: None,
-            cross_error: None,
+            operation: Operation::default(),
             tool_state: None,
             pending: Vec::new(),
             observer: None,
@@ -68,12 +75,19 @@ impl BodyTransform {
 
     /// 为 JSON 正文指定来源协议及请求或响应方向。
     pub fn set_codec(&mut self, protocol: Protocol, phase: MessagePhase) {
-        self.codec = Some((protocol, phase));
-        if matches!(phase, MessagePhase::Response)
-            && matches!(self.kind, BodyKind::Sse)
-            && self.cross.is_none()
-        {
-            self.observer = Some(stream::Observer::new(protocol));
+        if matches!(self.operation, Operation::Observe(_)) {
+            self.operation = Operation::Observe(Some((protocol, phase)));
+            self.observer = (matches!(phase, MessagePhase::Response)
+                && matches!(self.kind, BodyKind::Sse))
+            .then(|| stream::Observer::new(protocol));
+        }
+    }
+
+    /// 请求准备阶段只读取转换状态，不依赖可选标志的组合。
+    fn conversion(&self) -> Option<&CrossConversion> {
+        match &self.operation {
+            Operation::Convert(conversion) => Some(conversion),
+            _ => None,
         }
     }
 
@@ -84,7 +98,8 @@ impl BodyTransform {
 
     /// 启用请求跨协议转换；完整 JSON 会在正文结束时写成 Provider 协议。
     pub fn set_cross_request(&mut self, source: Protocol, target: Protocol, model: &str) {
-        self.cross = Some(CrossConversion::Request {
+        self.observer = None;
+        self.operation = Operation::Convert(CrossConversion::Request {
             source,
             target,
             model: model.to_owned(),
@@ -100,7 +115,8 @@ impl BodyTransform {
         id: &str,
         created: i64,
     ) {
-        self.cross = Some(CrossConversion::Response {
+        self.observer = None;
+        self.operation = Operation::Convert(CrossConversion::Response {
             source,
             target,
             model: model.to_owned(),
@@ -111,7 +127,9 @@ impl BodyTransform {
 
     /// 上游失败时保留 HTTP 状态，改用客户端协议的通用错误外壳。
     pub fn set_cross_error(&mut self, protocol: Protocol, status: u16) {
-        self.cross_error = Some((protocol, status));
+        self.observer = None;
+        self.pending.clear();
+        self.operation = Operation::Error { protocol, status };
     }
 
     /// 根据上游响应头切换正文处理方式，并清空上一种方式的暂存片段。
@@ -121,7 +139,7 @@ impl BodyTransform {
         self.pending.clear();
     }
 
-    /// 缓冲 JSON 到正文结束，或逐个放行完整 SSE 事件；超限后原样透传。
+    /// 缓冲 JSON 到正文结束；同协议 SSE 原样透传并由观察器读取用量。
     pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
         if let Some(observer) = &mut self.observer {
             observer.push(body.as_deref().unwrap_or_default(), end);
@@ -136,7 +154,7 @@ impl BodyTransform {
     pub async fn push_request(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
         if let Some(complete) = self.collect(body, end)? {
             *body = Some(
-                if let Some(cross @ CrossConversion::Request { .. }) = &self.cross {
+                if let Some(cross @ CrossConversion::Request { .. }) = self.conversion() {
                     cross::convert_request(complete, cross, self.tool_state.as_ref()).await?
                 } else {
                     self.process(complete)?
@@ -161,7 +179,7 @@ impl BodyTransform {
 
     /// 只管理正文边界，返回完整载荷；协议转换及数据库 I/O 由调用阶段负责。
     fn collect(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<Option<Bytes>> {
-        if let Some((protocol, status)) = self.cross_error {
+        if let Operation::Error { protocol, status } = self.operation {
             *body = Some(if end {
                 error::body(protocol, status)
             } else {
@@ -169,12 +187,12 @@ impl BodyTransform {
             });
             return Ok(None);
         }
-        if matches!(self.kind, BodyKind::Passthrough) {
+        if matches!(self.kind, BodyKind::Passthrough | BodyKind::Sse) {
             return Ok(None);
         }
         let chunk = body.take().unwrap_or_default();
         if self.pending.len().saturating_add(chunk.len()) > MAX_BUFFERED_BODY {
-            if let Some(cross) = &self.cross {
+            if let Some(cross) = self.conversion() {
                 let status = if matches!(cross, CrossConversion::Response { .. }) {
                     502
                 } else {
@@ -192,59 +210,36 @@ impl BodyTransform {
             return Ok(None);
         }
         self.pending.extend_from_slice(&chunk);
-        let ready = match self.kind {
-            BodyKind::Json => end.then_some(self.pending.len()),
-            BodyKind::Sse => parse::complete_sse_prefix(&self.pending, end),
-            BodyKind::Passthrough => unreachable!(),
-        };
-        let Some(ready) = ready else {
+        if !end {
             // Pingora 的请求路径可能将 None 视为正文结束；空 Bytes 表示当前暂无输出。
             *body = Some(Bytes::new());
             return Ok(None);
-        };
-        // 发出完整事件，留下后续尚未完整的 SSE 事件。
-        let remaining = self.pending.split_off(ready);
-        let complete = std::mem::replace(&mut self.pending, remaining);
-        let complete = Bytes::from(complete);
-        Ok(Some(complete))
+        }
+        // JSON 完整后取出缓冲，字节所有权直接交给输出。
+        Ok(Some(Bytes::from(std::mem::take(&mut self.pending))))
     }
 
     /// 同步响应转换只暂存新引用，持久化留给尚未发头的父请求。
     fn process(&self, complete: Bytes) -> Result<Bytes> {
-        Ok(match self.kind {
-            BodyKind::Json => {
-                if let Some(cross) = &self.cross {
-                    cross::convert(complete, cross, self.tool_state.as_ref())?
-                } else {
-                    process_json(complete, self.codec)
-                }
-            }
-            BodyKind::Sse => {
-                parse::sse_json(&complete, |_| {});
-                complete
-            }
-            BodyKind::Passthrough => unreachable!(),
-        })
+        match &self.operation {
+            Operation::Convert(cross) => cross::convert(complete, cross, self.tool_state.as_ref()),
+            Operation::Observe(codec) => Ok(process_json(complete, *codec)),
+            Operation::Error { .. } => unreachable!("错误状态已在正文收集阶段处理"),
+        }
     }
 }
 
-/// 在完整 JSON 中执行整体 IR 投影；当前未编辑 IR，保持原始字节输出。
+/// 完整 JSON 只投影和观察 IR；未编辑时直接保留原始字节输出。
 fn process_json(bytes: Bytes, codec: Option<(Protocol, MessagePhase)>) -> Bytes {
     let Some((protocol, phase)) = codec else {
         return bytes;
     };
-    // 无编辑时按类型比较并保留原始字节；解析失败沿用同协议透传行为。
-    let result = (|| -> std::result::Result<Option<Vec<u8>>, AdapterError> {
+    // 当前分支仅观察 IR，完整转换由跨协议分支承担；保持输入字节和同协议透传策略。
+    let _ = (|| -> std::result::Result<(), AdapterError> {
         match phase {
             MessagePhase::Request => {
                 let body = codec::decode_request(protocol, &bytes)?;
-                let ir = protocol.decode_request(&body)?;
-                let encoded = protocol.encode_request(&ir)?;
-                if body == encoded {
-                    Ok(None)
-                } else {
-                    Ok(Some(codec::encode_request(&encoded)?))
-                }
+                protocol.decode_request(&body)?;
             }
             MessagePhase::Response => {
                 let body = codec::decode_response(protocol, &bytes)?;
@@ -252,19 +247,11 @@ fn process_json(bytes: Bytes, codec: Option<(Protocol, MessagePhase)>) -> Bytes 
                 if let Some(usage) = &ir.usage {
                     crate::observability::response_usage(protocol, protocol, usage);
                 }
-                let encoded = protocol.encode_response(&ir)?;
-                if body == encoded {
-                    Ok(None)
-                } else {
-                    Ok(Some(codec::encode_response(&encoded)?))
-                }
             }
         }
+        Ok(())
     })();
-    match result {
-        Ok(Some(encoded)) => Bytes::from(encoded),
-        _ => bytes,
-    }
+    bytes
 }
 
 /// 仅对未压缩的 JSON 和 SSE 响应启用相应的正文处理方式。
@@ -338,20 +325,46 @@ mod tests {
     }
 
     #[test]
-    fn sse_waits_only_for_a_complete_event() {
+    fn same_protocol_sse_preserves_original_http_chunks() {
         let mut transform = BodyTransform::new(BodyKind::Sse);
-        let mut first = Some(Bytes::from_static(b"data: {\"x\":1}\n"));
-        transform.push(&mut first, false).unwrap();
-        assert_eq!(first.unwrap(), Bytes::new());
-        let mut second = Some(Bytes::from_static(b"\ndata: [DONE]\n\npartial"));
-        transform.push(&mut second, false).unwrap();
-        assert_eq!(
-            second.unwrap(),
-            Bytes::from_static(b"data: {\"x\":1}\n\ndata: [DONE]\n\n")
-        );
+        transform.set_codec(Protocol::OpenAiChat, MessagePhase::Response);
+        for chunk in [
+            b"data: {\"x\":1}\r".as_slice(),
+            b"\n\r\ndata: [DONE]\n\npartial",
+        ] {
+            let original = Bytes::copy_from_slice(chunk);
+            let mut body = Some(original.clone());
+            transform.push(&mut body, false).unwrap();
+            assert_eq!(body, Some(original));
+        }
         let mut end = None;
         transform.push(&mut end, true).unwrap();
-        assert_eq!(end.unwrap(), Bytes::from_static(b"partial"));
+        assert!(end.is_none());
+    }
+
+    #[test]
+    fn error_state_replaces_conversion_and_is_not_reset_by_observation() {
+        let mut transform = BodyTransform::new(BodyKind::Json);
+        transform.set_cross_response(
+            Protocol::AnthropicMessages,
+            Protocol::OpenAiChat,
+            "m",
+            "id",
+            1,
+        );
+        let mut body = Some(Bytes::from_static(b"private provider prefix"));
+        transform.push(&mut body, false).unwrap();
+        transform.set_cross_error(Protocol::OpenAiChat, 429);
+        transform.set_codec(Protocol::OpenAiChat, MessagePhase::Response);
+        transform.replace_kind(BodyKind::Sse);
+        let mut body = Some(Bytes::from_static(b"private provider tail"));
+        transform.push(&mut body, false).unwrap();
+        assert!(body.unwrap().is_empty());
+        let mut body = None;
+        transform.push(&mut body, true).unwrap();
+        let body = body.unwrap();
+        assert_eq!(body, super::error::body(Protocol::OpenAiChat, 429));
+        assert!(!String::from_utf8_lossy(&body).contains("private"));
     }
 
     #[test]

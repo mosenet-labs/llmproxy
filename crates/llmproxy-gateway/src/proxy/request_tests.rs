@@ -1,5 +1,5 @@
 //! 上游 HTTP 头独立于正文编解码，四协议和两种模式均按目标生成。
-use super::{RequestContext, request};
+use super::{RequestContext, request, route::SelectedRoute};
 use crate::{
     observability::RequestTelemetry,
     snapshot::ResolvedProvider,
@@ -21,25 +21,26 @@ fn context(source: Protocol, target: Protocol, stream: bool) -> RequestContext {
     RequestContext {
         telemetry: RequestTelemetry::new(),
         protocol: Some(source),
-        client_model: Some("alias".into()),
-        response_id: "response".into(),
-        response_created: 0,
-        provider: Some(Arc::new(ResolvedProvider {
-            protocol: target,
-            upstream_path: target.upstream_path().into(),
-            host: "provider.test".into(),
-            port: 443,
-            tls: true,
-            secret: "test-provider-key".into(),
-            anthropic_version: Some("2023-06-01".into()),
-            messages_auth: MessagesAuth::ApiKey,
-            connect_timeout_ms: 1000,
-            read_timeout_ms: 1000,
-            write_timeout_ms: 1000,
-        })),
+        route: Some(SelectedRoute::new(
+            source,
+            "alias".into(),
+            Arc::new(ResolvedProvider {
+                protocol: target,
+                upstream_path: target.upstream_path().into(),
+                host: "provider.test".into(),
+                port: 443,
+                tls: true,
+                secret: "test-provider-key".into(),
+                anthropic_version: Some("2023-06-01".into()),
+                messages_auth: MessagesAuth::ApiKey,
+                connect_timeout_ms: 1000,
+                read_timeout_ms: 1000,
+                write_timeout_ms: 1000,
+            }),
+            "models/a/b ?".into(),
+            stream,
+        )),
         console: false,
-        upstream_model_id: Some("models/a/b ?".into()),
-        request_stream: stream,
         stream_error: None,
         request_body: RequestBody::new(),
         response_body: BodyTransform::default(),
@@ -194,7 +195,7 @@ fn gemini_query_mode_is_canonical_and_client_keys_are_removed() {
 #[tokio::test]
 async fn prepared_body_length_and_provider_bearer_auth_are_sent() {
     let mut ctx = context(Protocol::OpenAiChat, Protocol::AnthropicMessages, false);
-    Arc::get_mut(ctx.provider.as_mut().unwrap())
+    Arc::get_mut(&mut ctx.route.as_mut().unwrap().provider)
         .unwrap()
         .messages_auth = MessagesAuth::Bearer;
     ctx.request_body.set_cross_protocol(

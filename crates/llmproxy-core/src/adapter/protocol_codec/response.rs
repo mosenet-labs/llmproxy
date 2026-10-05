@@ -88,7 +88,14 @@ pub(super) fn decode_items(source: &Source, message_count: usize) -> Result<Vec<
 }
 
 /// 将编辑后的消息写回来源响应类型，保留候选及非消息输出项。
-pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result<()> {
+pub(super) fn encode_messages(
+    source: &mut Source,
+    edited: &[Message],
+    before: &[Message],
+) -> Result<()> {
+    if edited == before {
+        return Ok(());
+    }
     match source {
         Source::Chat(body) => {
             let original = body
@@ -96,12 +103,9 @@ pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result
                 .iter()
                 .map(|choice| choice.message.clone())
                 .collect::<Vec<_>>();
-            if let Some(messages) = encode_changed(
-                &original,
-                edited,
-                response::decode_chat,
-                response::encode_chat,
-            )? {
+            if let Some(messages) =
+                encode_changed(&original, edited, before, response::encode_chat)?
+            {
                 for (choice, message) in body.choices.iter_mut().zip(messages) {
                     choice.message = message;
                 }
@@ -109,12 +113,9 @@ pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result
         }
         Source::Responses(body) => {
             let original = response_output_messages(&body.output);
-            if let Some(messages) = encode_changed(
-                &original,
-                edited,
-                response::decode_responses,
-                response::encode_responses,
-            )? {
+            if let Some(messages) =
+                encode_changed(&original, edited, before, response::encode_responses)?
+            {
                 let mut messages = messages.into_iter();
                 for item in &mut body.output {
                     if let OutputItem::Message(message) = item {
@@ -127,7 +128,7 @@ pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result
             if let Some(messages) = encode_changed(
                 std::slice::from_ref(body.as_ref()),
                 edited,
-                response::decode_messages,
+                before,
                 response::encode_messages,
             )? {
                 **body = messages.into_iter().next().expect("顶层响应只有一条消息");
@@ -135,12 +136,9 @@ pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result
         }
         Source::Gemini(body) => {
             let original = gemini_candidate_messages(&body.candidates);
-            if let Some(messages) = encode_changed(
-                &original,
-                edited,
-                response::decode_gemini,
-                response::encode_gemini,
-            )? {
+            if let Some(messages) =
+                encode_changed(&original, edited, before, response::encode_gemini)?
+            {
                 let mut messages = messages.into_iter();
                 if let OptionalNullable::Value(candidates) = &mut body.candidates {
                     for candidate in candidates {

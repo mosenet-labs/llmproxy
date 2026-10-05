@@ -148,26 +148,27 @@ pub(super) fn decode_items(source: &Source, message_count: usize) -> Result<Vec<
 }
 
 /// 将编辑后的消息写回来源请求类型。
-pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result<()> {
+pub(super) fn encode_messages(
+    source: &mut Source,
+    edited: &[Message],
+    before: &[Message],
+) -> Result<()> {
+    if edited == before {
+        return Ok(());
+    }
     match source {
         Source::Chat(body) => {
-            if let Some(messages) = encode_changed(
-                &body.messages,
-                edited,
-                request::decode_chat,
-                request::encode_chat,
-            )? {
+            if let Some(messages) =
+                encode_changed(&body.messages, edited, before, request::encode_chat)?
+            {
                 body.messages = messages;
             }
         }
         Source::Responses(body) => {
             let original = response_input_messages(&body.input);
-            if let Some(messages) = encode_changed(
-                &original,
-                edited,
-                request::decode_responses,
-                request::encode_responses,
-            )? {
+            if let Some(messages) =
+                encode_changed(&original, edited, before, request::encode_responses)?
+            {
                 match &mut body.input {
                     OptionalNullable::Value(Input::Items(items)) => {
                         let mut messages = messages.into_iter();
@@ -199,22 +200,16 @@ pub(super) fn encode_messages(source: &mut Source, edited: &[Message]) -> Result
             }
         }
         Source::Messages(body) => {
-            if let Some(messages) = encode_changed(
-                &body.messages,
-                edited,
-                request::decode_messages,
-                request::encode_messages,
-            )? {
+            if let Some(messages) =
+                encode_changed(&body.messages, edited, before, request::encode_messages)?
+            {
                 body.messages = messages;
             }
         }
         Source::Gemini(body) => {
-            if let Some(messages) = encode_changed(
-                &body.contents,
-                edited,
-                request::decode_gemini,
-                request::encode_gemini,
-            )? {
+            if let Some(messages) =
+                encode_changed(&body.contents, edited, before, request::encode_gemini)?
+            {
                 body.contents = messages;
             }
         }

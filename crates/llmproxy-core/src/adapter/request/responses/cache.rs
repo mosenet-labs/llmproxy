@@ -1,50 +1,32 @@
-//! Responses 请求缓存参数与通用缓存配置的映射。
-
+//! Responses 缓存参数的协议字段接入；共用缓存映射算法。
+use crate::protocol::responses::request::Request;
 use crate::{
-    adapter::nullable::present,
+    adapter::nullable::{present, set},
     ir::cache::CacheSettings,
-    protocol::{
-        OptionalNullable,
-        responses::request::body::{PromptCacheOptions, Request},
-    },
 };
 
-/// 从 Responses 请求提取显式缓存设置。
+/// 提取显式缓存配置，消息内容的断点独立保留。
 pub fn decode_responses_cache(request: &Request) -> CacheSettings {
-    let options = match &request.prompt_cache_options {
-        OptionalNullable::Value(options) => Some(options),
-        _ => None,
-    };
-    CacheSettings {
-        key: present(&request.prompt_cache_key),
-        mode: options.and_then(|options| present(&options.mode)),
-        ttl: options.and_then(|options| present(&options.ttl)),
-        retention: present(&request.prompt_cache_retention),
-        reference: None,
-    }
+    super::super::cache::decode(
+        &request.prompt_cache_key,
+        &request.prompt_cache_retention,
+        &request.prompt_cache_options,
+        |options| (present(&options.mode), present(&options.ttl)),
+    )
 }
 
-/// 将 IR 中有值的缓存参数写回请求，保留未映射字段和显式 `null`。
+/// 仅写回有值的缓存配置，保留缺失、null 和协议扩展。
 pub fn encode_responses_cache(request: &mut Request, cache: &CacheSettings) {
-    if let Some(key) = &cache.key {
-        request.prompt_cache_key = OptionalNullable::Value(key.clone());
-    }
-    if let Some(retention) = &cache.retention {
-        request.prompt_cache_retention = OptionalNullable::Value(retention.clone());
-    }
-    if cache.mode.is_some() || cache.ttl.is_some() {
-        if !matches!(request.prompt_cache_options, OptionalNullable::Value(_)) {
-            request.prompt_cache_options = OptionalNullable::Value(PromptCacheOptions::default());
-        }
-        if let OptionalNullable::Value(options) = &mut request.prompt_cache_options {
-            if let Some(mode) = &cache.mode {
-                options.mode = OptionalNullable::Value(mode.clone());
-            }
-            if let Some(ttl) = &cache.ttl {
-                options.ttl = OptionalNullable::Value(ttl.clone());
-            }
-        }
-    }
+    super::super::cache::encode(
+        &mut request.prompt_cache_key,
+        &mut request.prompt_cache_retention,
+        &mut request.prompt_cache_options,
+        cache,
+        |options, cache| {
+            set(&mut options.mode, cache.mode.clone());
+            set(&mut options.ttl, cache.ttl.clone());
+        },
+    )
 }
 
 #[cfg(test)]

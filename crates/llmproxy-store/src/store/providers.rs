@@ -267,21 +267,7 @@ impl ProviderStore {
             if !provider.enabled {
                 return Err(StoreError::Internal);
             }
-            active.push(ActiveProvider {
-                id,
-                protocol,
-                upstream_path,
-                host: provider.host,
-                port: provider.port,
-                tls: provider.tls,
-                secret: self.cipher.decrypt(&provider.encrypted_key)?,
-                anthropic_version: provider.anthropic_version,
-                messages_auth: MessagesAuth::parse(&provider.messages_auth)
-                    .ok_or(StoreError::Internal)?,
-                connect_timeout_ms: provider.connect_timeout_ms,
-                read_timeout_ms: provider.read_timeout_ms,
-                write_timeout_ms: provider.write_timeout_ms,
-            });
+            active.push(self.active_provider(&provider, protocol, upstream_path)?);
         }
         tx.commit().await?;
         Ok(active)

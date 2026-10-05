@@ -13,20 +13,15 @@ const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 
 /// 本次请求的目标协议、模型及流式模式在上游连接前已确定。
 pub(super) fn filter(request: &mut RequestHeader, ctx: &RequestContext) -> Result<()> {
-    let client_protocol = ctx.protocol.expect("request_filter set protocol");
-    let provider = ctx
-        .provider
-        .as_ref()
-        .expect("request_filter selected provider");
+    let route = ctx.route.as_ref().expect("request_filter selected route");
+    let client_protocol = route.protocol;
+    let provider = &route.provider;
     let protocol = provider.protocol;
     let base_path = if protocol == Protocol::Gemini {
-        let model = ctx
-            .upstream_model_id
-            .as_deref()
-            .expect("Gemini route selected model");
+        let model = route.upstream_model.as_str();
         let model = model.strip_prefix("models/").unwrap_or(model);
         let encoded = utf8_percent_encode(model, MODEL_SEGMENT);
-        let method = if ctx.request_stream {
+        let method = if route.stream {
             "streamGenerateContent"
         } else {
             "generateContent"
@@ -61,7 +56,7 @@ pub(super) fn filter(request: &mut RequestHeader, ctx: &RequestContext) -> Resul
     };
     // alt=sse 仅用于 Gemini，不会泄漏到 Chat、Responses 或 Messages 的 URL。
     // 参考：https://ai.google.dev/api/generate-content#method:-models.streamgeneratecontent
-    let path = if protocol == Protocol::Gemini && ctx.request_stream {
+    let path = if protocol == Protocol::Gemini && route.stream {
         format!(
             "{base_path}?{query}{}alt=sse",
             if query.is_empty() { "" } else { "&" }
@@ -90,7 +85,7 @@ pub(super) fn filter(request: &mut RequestHeader, ctx: &RequestContext) -> Resul
         request.insert_header("content-type", "application/json")?;
         request.insert_header(
             "accept",
-            if ctx.request_stream {
+            if route.stream {
                 "text/event-stream"
             } else {
                 "application/json"

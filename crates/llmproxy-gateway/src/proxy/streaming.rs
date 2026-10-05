@@ -2,7 +2,6 @@
 use super::{RequestContext, buffered::Captured};
 use crate::transform::stream::Stream;
 use bytes::Bytes;
-use llmproxy_core::adapter::protocol_codec::ResponseTarget;
 use pingora::{Error, ErrorType, Result, protocols::http::HttpTask, proxy::Session};
 use pingora_http::ResponseHeader;
 use tokio::sync::mpsc::Receiver;
@@ -18,24 +17,19 @@ pub(super) struct Transfer {
 impl Transfer {
     /// 在上下文移交子请求前固定目标外壳、来源协议和签名作用域。
     pub(super) fn new(ctx: &RequestContext) -> Result<Self> {
+        let route = ctx.route.as_ref().expect("stream route selected");
         Ok(Self {
             stream: Stream::new(
-                ctx.provider.as_ref().unwrap().protocol,
-                ctx.protocol.unwrap(),
-                &ResponseTarget {
-                    model: ctx.client_model.as_deref().unwrap(),
-                    id: &ctx.response_id,
-                    created: ctx.response_created,
-                },
+                route.provider.protocol,
+                route.protocol,
+                &route.response_target(),
                 ctx.response_body.tool_context(),
             )?,
             header: None,
             error: None,
             ended: false,
             upstream_status: None,
-            write_timeout: std::time::Duration::from_millis(
-                ctx.provider.as_ref().unwrap().write_timeout_ms,
-            ),
+            write_timeout: std::time::Duration::from_millis(route.provider.write_timeout_ms),
         })
     }
     /// 收到完整帧就转换发送，正文后续尚未就绪时监视真实客户端关闭。

@@ -1,28 +1,79 @@
 //! 同协议直接编辑协议类型，保留未改动的 null、缺失值和专有字段。
-use super::{ProtocolCodec, cross};
+use super::{cross, project_request, project_response};
 use crate::{
     adapter::{Error, Result},
     ir::{request::Request, response::Response},
     protocol::{Protocol, Request as RawRequest, Response as RawResponse},
 };
 
+/// 保留模式要求来源协议一致，消息、缓存及公共字段共用一次来源基线。
+pub(super) fn encode_request(protocol: Protocol, edited: &Request) -> Result<RawRequest> {
+    let original = edited
+        .source
+        .as_ref()
+        .filter(|body| body.protocol() == protocol)
+        .ok_or_else(|| Error::Unsupported("保留模式要求同协议来源副本".into()))?;
+    let before = project_request(original)?;
+    if edited.instructions != before.instructions || edited.items != before.items {
+        return Err(Error::Unsupported(
+            "保留模式不支持修改顶层指令或独立输入项，请使用重建模式".into(),
+        ));
+    }
+    let mut body = original.clone();
+    super::request::encode_messages(&mut body, &edited.messages, &before.messages)?;
+    if edited.cache != before.cache {
+        super::request::encode_cache(&mut body, &edited.cache);
+        if super::request::decode_cache(&body) != edited.cache {
+            return Err(Error::Unsupported(
+                "目标协议无法表达修改后的缓存设置".into(),
+            ));
+        }
+    }
+    request(protocol, edited, &before, &mut body)?;
+    Ok(body)
+}
+
+/// 响应编辑复用来源用量和候选基线，只有返回正文需要拥有来源副本。
+pub(super) fn encode_response(protocol: Protocol, edited: &Response) -> Result<RawResponse> {
+    let original = edited
+        .source
+        .as_ref()
+        .filter(|body| body.protocol() == protocol)
+        .ok_or_else(|| Error::Unsupported("保留模式要求同协议来源副本".into()))?;
+    let before = project_response(original)?;
+    if edited.items != before.items {
+        return Err(Error::Unsupported(
+            "保留模式不支持修改独立输出项，请使用重建模式".into(),
+        ));
+    }
+    let mut body = original.clone();
+    super::response::encode_messages(&mut body, &edited.messages, &before.messages)?;
+    if edited.usage != before.usage {
+        super::response::encode_usage(&mut body, edited.usage.as_ref())?;
+        if !super::response::changed_usage_fields_match(
+            &before.usage,
+            &edited.usage,
+            &super::response::decode_usage(&body),
+        ) {
+            return Err(Error::Unsupported("目标协议无法表达修改后的用量".into()));
+        }
+    }
+    response(edited, &before, &mut body)?;
+    Ok(body)
+}
+
 /// 新增通用请求字段只回写实际变化的部分。
 pub(super) fn request(
     protocol: Protocol,
     edited: &Request,
-    source: &RawRequest,
+    before: &Request,
     body: &mut RawRequest,
 ) -> Result<()> {
-    let before = protocol.decode_request(source)?;
     if edited.native_tools != before.native_tools {
-        return Err(Error::Unsupported(
-            "编辑内置工具时请移除来源副本后重新编码".into(),
-        ));
+        return Err(Error::Unsupported("编辑内置工具时请使用重建模式".into()));
     }
     if edited.cache_breakpoints != before.cache_breakpoints {
-        return Err(Error::Unsupported(
-            "修改断点位置时请使用不含来源副本的 IR 重新构造请求".into(),
-        ));
+        return Err(Error::Unsupported("修改断点位置时请使用重建模式".into()));
     }
     if edited.model != before.model {
         match body {
@@ -72,7 +123,7 @@ pub(super) fn request(
         }
         cross::generation::write(body, &edited.generation, Some(&before.generation))?;
     }
-    let mut actual = protocol.decode_request(body)?;
+    let mut actual = project_request(body)?;
     if protocol == Protocol::Gemini {
         // 流式模式属于 URL，调用方继续持有 IR 中的模式；不能用正文解码结果否定它。
         actual.generation.stream = edited.generation.stream;
@@ -89,13 +140,7 @@ pub(super) fn request(
     Ok(())
 }
 /// 响应外壳直接回写；未实现的候选结构编辑仍明确拒绝。
-pub(super) fn response(
-    protocol: Protocol,
-    edited: &Response,
-    source: &RawResponse,
-    body: &mut RawResponse,
-) -> Result<()> {
-    let before = protocol.decode_response(source)?;
+pub(super) fn response(edited: &Response, before: &Response, body: &mut RawResponse) -> Result<()> {
     if edited.status != before.status || edited.candidates != before.candidates {
         return Err(Error::Unsupported(
             "同协议回写暂不支持修改状态或候选边界".into(),

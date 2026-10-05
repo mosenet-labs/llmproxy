@@ -45,6 +45,30 @@ pub struct ProviderStore {
 }
 
 impl ProviderStore {
+    /// 统一读取凭据和鉴权配置；路由调用方负责选择协议、路径及启用状态。
+    fn active_provider(
+        &self,
+        provider: &Provider,
+        protocol: Protocol,
+        upstream_path: String,
+    ) -> StoreResult<ActiveProvider> {
+        Ok(ActiveProvider {
+            id: provider.id,
+            protocol,
+            upstream_path,
+            host: provider.host.clone(),
+            port: provider.port,
+            tls: provider.tls,
+            secret: self.cipher.decrypt(&provider.encrypted_key)?,
+            anthropic_version: provider.anthropic_version.clone(),
+            messages_auth: MessagesAuth::parse(&provider.messages_auth)
+                .ok_or(StoreError::Internal)?,
+            connect_timeout_ms: provider.connect_timeout_ms,
+            read_timeout_ms: provider.read_timeout_ms,
+            write_timeout_ms: provider.write_timeout_ms,
+        })
+    }
+
     /// Connect to an existing database. Schema changes require `migrate`.
     pub async fn connect(url: &str, master_key: &str) -> StoreResult<Self> {
         let backend = Backend::parse(url)?;

@@ -237,3 +237,20 @@ P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --w
   - [x] S8-3：16 方向浏览器增量文字与 cache/usage；四客户端纯工具、停止和安全错误。
   - [ ] S8-4：将流式服务端输出、推理/签名、音频尾帧、拒绝事件和缓存 TTL 的类型层专项扩展到 HTTP 及适用的页面场景。
   - [ ] S8-5：原厂专属工具、真实媒体输出和缓存创建/命中/TTL；复用 N2/N3 验收，等待模型权限及配额。
+
+## 代码复用与设计优化
+
+设计与验收标准见 [文档 25](25-code-reuse-and-design.md)。
+
+- [x] R1：共同 HTTP 边界序列化。
+- [x] R2：Probe 复用 IR usage。
+- [x] R3：SSE 解析收敛。
+- [x] R4：整体编码统一返回转换结果和警告。
+- [x] R5：显式保留来源与从 IR 重建模式。
+- [x] R6：来源基线复用及 Gateway 观察路径。
+- [x] R7：Chat/Responses 缓存公共算法。
+- [x] R8：Console 媒体策略复用。
+- [x] R9：Store Provider 构造复用。
+- [x] R10：Gateway 路由与正文状态整理。
+
+验收：工作区 323 项测试通过，10 项显式环境／人工验收用例忽略；Clippy、格式及 diff 检查通过。

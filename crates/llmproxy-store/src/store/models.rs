@@ -275,25 +275,17 @@ impl ProviderStore {
                     && mapping.protocols().contains(&provider_protocol)
             });
             let resolved = if let Some((_, _, provider)) = selected {
-                Some(ActiveProvider {
-                    id: provider.id,
-                    protocol: provider_protocol,
-                    upstream_path: provider
-                        .paths()
-                        .get(provider_protocol)
-                        .ok_or(StoreError::Internal)?
-                        .to_owned(),
-                    host: provider.host.clone(),
-                    port: provider.port,
-                    tls: provider.tls,
-                    secret: self.cipher.decrypt(&provider.encrypted_key)?,
-                    anthropic_version: provider.anthropic_version.clone(),
-                    messages_auth: MessagesAuth::parse(&provider.messages_auth)
-                        .ok_or(StoreError::Internal)?,
-                    connect_timeout_ms: provider.connect_timeout_ms,
-                    read_timeout_ms: provider.read_timeout_ms,
-                    write_timeout_ms: provider.write_timeout_ms,
-                })
+                Some(
+                    self.active_provider(
+                        provider,
+                        provider_protocol,
+                        provider
+                            .paths()
+                            .get(provider_protocol)
+                            .ok_or(StoreError::Internal)?
+                            .to_owned(),
+                    )?,
+                )
             } else {
                 None
             };
@@ -314,25 +306,17 @@ impl ProviderStore {
                     continue;
                 }
                 let resolved = if provider.enabled {
-                    Some(ActiveProvider {
-                        id: provider.id,
-                        protocol,
-                        upstream_path: provider
-                            .paths()
-                            .get(protocol)
-                            .ok_or(StoreError::Internal)?
-                            .to_owned(),
-                        host: provider.host.clone(),
-                        port: provider.port,
-                        tls: provider.tls,
-                        secret: self.cipher.decrypt(&provider.encrypted_key)?,
-                        anthropic_version: provider.anthropic_version.clone(),
-                        messages_auth: MessagesAuth::parse(&provider.messages_auth)
-                            .ok_or(StoreError::Internal)?,
-                        connect_timeout_ms: provider.connect_timeout_ms,
-                        read_timeout_ms: provider.read_timeout_ms,
-                        write_timeout_ms: provider.write_timeout_ms,
-                    })
+                    Some(
+                        self.active_provider(
+                            &provider,
+                            protocol,
+                            provider
+                                .paths()
+                                .get(protocol)
+                                .ok_or(StoreError::Internal)?
+                                .to_owned(),
+                        )?,
+                    )
                 } else {
                     None
                 };
@@ -363,21 +347,7 @@ impl ProviderStore {
             .ok_or(StoreError::Internal)?
             .to_owned();
         let resolved = if provider.enabled {
-            Some(ActiveProvider {
-                id: provider.id,
-                protocol,
-                upstream_path,
-                host: provider.host,
-                port: provider.port,
-                tls: provider.tls,
-                secret: self.cipher.decrypt(&provider.encrypted_key)?,
-                anthropic_version: provider.anthropic_version,
-                messages_auth: MessagesAuth::parse(&provider.messages_auth)
-                    .ok_or(StoreError::Internal)?,
-                connect_timeout_ms: provider.connect_timeout_ms,
-                read_timeout_ms: provider.read_timeout_ms,
-                write_timeout_ms: provider.write_timeout_ms,
-            })
+            Some(self.active_provider(&provider, protocol, upstream_path)?)
         } else {
             None
         };

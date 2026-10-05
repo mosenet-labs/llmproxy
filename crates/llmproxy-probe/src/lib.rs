@@ -1,3 +1,5 @@
+mod usage;
+
 use std::time::{Duration, Instant};
 
 use llmproxy_core::protocol::{MessagesAuth, Protocol};
@@ -277,17 +279,7 @@ async fn run_probe(
             thinking.mode(),
         );
     }
-    let usage = match target.protocol {
-        Protocol::OpenAiChat => token_usage(&value["usage"], "prompt_tokens", "completion_tokens"),
-        Protocol::OpenAiResponses | Protocol::AnthropicMessages => {
-            token_usage(&value["usage"], "input_tokens", "output_tokens")
-        }
-        Protocol::Gemini => token_usage(
-            &value["usageMetadata"],
-            "promptTokenCount",
-            "candidatesTokenCount",
-        ),
-    };
+    let usage = usage::decode(target.protocol, &value);
     if thinking.mode() == ThinkingMode::DisabledRequested
         && response_contains_reasoning(target.protocol, &value)
     {
@@ -504,13 +496,6 @@ fn response_contains_reasoning(protocol: Protocol, value: &Value) -> bool {
             .is_some_and(|content| content.iter().any(|item| item["type"] == "thinking")),
         Protocol::Gemini => false,
     }
-}
-
-fn token_usage(value: &Value, input_key: &str, output_key: &str) -> Option<TokenUsage> {
-    Some(TokenUsage {
-        input: value.get(input_key)?.as_u64()?,
-        output: value.get(output_key)?.as_u64()?,
-    })
 }
 
 fn result(

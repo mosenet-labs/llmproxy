@@ -5,6 +5,7 @@ mod display;
 mod incremental;
 #[cfg(test)]
 mod incremental_tests;
+mod media;
 mod request;
 pub(crate) use display::DisplayPart;
 use llmproxy_core::protocol::Protocol;

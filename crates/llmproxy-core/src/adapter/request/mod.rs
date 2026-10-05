@@ -1,4 +1,5 @@
 //! 请求消息序列适配器；调用方负责 HTTP 正文的读取和重写。
+mod cache;
 
 pub(in crate::adapter) mod chat;
 mod gemini;

@@ -1,14 +1,11 @@
 //! 原生音频仅投影到页面，不将资源 ID、转录或下载地址混入文本历史。
 //! 参考：https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events
 //! 参考：https://developers.openai.com/api/reference/resources/responses/streaming-events
-use super::{ChatReply, DisplayPart, MAX_REPLY_BYTES, display::DisplayMedia};
+use super::{ChatReply, DisplayPart, MAX_REPLY_BYTES};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use llmproxy_core::{
-    ir::media::MediaKind,
-    protocol::{
-        responses::response::{Event, event::KnownEvent},
-        stream,
-    },
+use llmproxy_core::protocol::{
+    responses::response::{Event, event::KnownEvent},
+    stream,
 };
 
 /// 一个可见候选的音频与转录共用收集器；生命周期由协议 decoder 校验。
@@ -111,36 +108,6 @@ impl Audio {
     fn complete(&mut self, reply: &mut ChatReply) {
         let Some(index) = self.part else { return };
         let bytes = std::mem::take(&mut self.bytes);
-        let mime = if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {
-            "audio/wav"
-        } else if bytes.starts_with(b"OggS") {
-            "audio/ogg"
-        } else if bytes.starts_with(b"fLaC") {
-            "audio/flac"
-        } else if bytes.starts_with(b"ID3") {
-            "audio/mpeg"
-        } else {
-            "application/octet-stream"
-        };
-        let preview = mime != "application/octet-stream";
-        reply.parts[index] = DisplayPart {
-            title: if preview {
-                "音频"
-            } else {
-                "音频（格式未报告）"
-            }
-            .into(),
-            text: if preview {
-                ""
-            } else {
-                "下载音频；Provider 未报告编码格式"
-            }
-            .into(),
-            media: Some(DisplayMedia {
-                kind: MediaKind::Audio,
-                uri: format!("data:{mime};base64,{}", STANDARD.encode(bytes)),
-                preview,
-            }),
-        };
+        reply.parts[index] = super::media::audio_part(&bytes);
     }
 }

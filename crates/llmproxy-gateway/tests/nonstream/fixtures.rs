@@ -4,7 +4,7 @@
 use llmproxy_core::{
     adapter::protocol_codec::{ProtocolCodec, RequestTarget},
     ir,
-    protocol::{Protocol, Request, Response},
+    protocol::{Protocol, wire},
 };
 use serde_json::{Value, json};
 
@@ -185,22 +185,17 @@ pub fn tool_result_request(
     // 第二轮只验证工具结果和历史的转换，禁止模型再次调用工具。
     request.generation.tool_choice = Some(ir::request::controls::ToolChoice::None);
     let encoded = protocol
-        .encode_request_for(
+        .encode_request(
             &request,
             &RequestTarget {
                 model,
                 max_output_tokens: None,
             },
+            llmproxy_core::adapter::protocol_codec::EncodeMode::Rebuild,
         )
         .map_err(|_| "工具结果历史无法编码为客户端协议")?
         .body;
-    let value = match encoded {
-        Request::Chat(body) => serde_json::to_value(body),
-        Request::Responses(body) => serde_json::to_value(body),
-        Request::Messages(body) => serde_json::to_value(body),
-        Request::Gemini(body) => serde_json::to_value(body),
-    };
-    value.map_err(|_| "工具结果请求序列化失败")
+    serde_json::to_value(wire::request(&encoded)).map_err(|_| "工具结果请求序列化失败")
 }
 
 /// 四种客户端协议分别声明并强制调用同一函数，验证真实工具入口和参数转换。
@@ -351,12 +346,7 @@ pub fn code_response(protocol: Protocol) -> Value {
 
 /// 在 HTTP 边界直接解析协议 struct，再进入公共 IR。
 pub fn decode_request(protocol: Protocol, bytes: &[u8]) -> ir::request::Request {
-    let raw = match protocol {
-        Protocol::OpenAiChat => Request::Chat(serde_json::from_slice(bytes).unwrap()),
-        Protocol::OpenAiResponses => Request::Responses(serde_json::from_slice(bytes).unwrap()),
-        Protocol::AnthropicMessages => Request::Messages(serde_json::from_slice(bytes).unwrap()),
-        Protocol::Gemini => Request::Gemini(serde_json::from_slice(bytes).unwrap()),
-    };
+    let raw = wire::decode_request(protocol, bytes).unwrap();
     protocol.decode_request(&raw).unwrap()
 }
 
@@ -365,13 +355,7 @@ pub fn decode_response(
     protocol: Protocol,
     bytes: &[u8],
 ) -> Result<ir::response::Response, &'static str> {
-    let raw = match protocol {
-        Protocol::OpenAiChat => serde_json::from_slice(bytes).map(Response::Chat),
-        Protocol::OpenAiResponses => serde_json::from_slice(bytes).map(Response::Responses),
-        Protocol::AnthropicMessages => serde_json::from_slice(bytes).map(Response::Messages),
-        Protocol::Gemini => serde_json::from_slice(bytes).map(Response::Gemini),
-    }
-    .map_err(|_| "响应不符合客户端协议结构")?;
+    let raw = wire::decode_response(protocol, bytes).map_err(|_| "响应不符合客户端协议结构")?;
     protocol
         .decode_response(&raw)
         .map_err(|_| "响应无法解码到 IR")

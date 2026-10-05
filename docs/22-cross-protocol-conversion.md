@@ -77,7 +77,7 @@ Gateway 在转换过程中记录结构化警告；日志只含来源、目标、
 
 响应保留候选与有序输出项之间的索引关系，防止把多个候选展平成一个回复。目前目标编码仍只接受单候选、正常完成或工具调用；长度截断、过滤等原因可进入 IR，但暂不生成跨协议响应。创建时间缺失时不伪造，调用方通过 `ResponseTarget` 提供目标响应外壳。缓存与用量的原始统计继续留在 IR；跨协议正文当前仅映射基础输入、输出和总计，细分项丢弃并警告。
 
-同协议且仍有来源副本时，`encode_request_for` / `encode_response_for` 保留原往返行为，不套用目标外壳覆盖。跨协议或移除副本后使用目标编码。直接 `encode_request` / `encode_response` 从 IR 取得模型和响应外壳，只返回正文；Gateway 使用带 `_for` 的入口取得警告并记录日志。
+当前公共接口统一为 `encode_request(ir, target, mode)` / `encode_response(ir, target, mode)`，均返回正文和结构化警告 `Conversion<T>`。`EncodeMode::Preserve` 要求同协议来源副本并保留原外壳，`EncodeMode::Rebuild` 显式从 IR 与目标外壳构造正文，同协议时也可重建；是否保留 `source` 不再决定编码模式。Gateway 选择重建并记录警告；`without_source()` 只负责移除来源副本。详见 [代码复用与设计优化](25-code-reuse-and-design.md)。
 
 - [x] N1：请求加入模型、函数声明、输出上限、温度、top-p、停止序列、候选数及流式标记；响应加入模型、ID、时间、状态和候选边界。
 - [x] N2：来源字段检查移到解码阶段；以不含正文的诊断记录尚未映射的语义，目标编码不再读取来源类型。
@@ -102,7 +102,7 @@ Gateway 在转换过程中记录结构化警告；日志只含来源、目标、
 | `adapter/protocol_codec/cross/` | 直接构造目标请求、响应和工具项 |
 | `adapter/protocol_codec/roundtrip.rs` | 同协议直接回写结构体，只更新实际编辑字段 |
 | `adapter/request/`、`adapter/response/` | 直接匹配消息／内容块类型，投影和构造消息字段 |
-| `gateway/transform/codec.rs` | HTTP 边界按路由协议反序列化、序列化 |
+| `core/protocol/wire.rs` | 接入方共用的 HTTP 边界反序列化与无枚举标签序列化 |
 
 函数声明以及 Responses 独立函数调用、结果补充了类型声明。已知工具项不能因字段无效而静默退回未知项；兼容 Provider 未提供调用 ID 的情况，仍沿用显式补号及配对警告规则。JSON 测试夹具的转换辅助仅在测试模块存在，不构成生产接口。
 

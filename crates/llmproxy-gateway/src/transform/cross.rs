@@ -66,13 +66,14 @@ pub(super) fn convert(
                 } else {
                     None
                 };
-                let converted = target.encode_response_for(
+                let converted = target.encode_response(
                     &response,
                     &ResponseTarget {
                         model,
                         id,
                         created: *created,
                     },
+                    llmproxy_core::adapter::protocol_codec::EncodeMode::Rebuild,
                 )?;
                 let bytes = codec::encode_response(&converted.body)?;
                 if let Some(pending) = pending {
@@ -185,12 +186,13 @@ fn encode_request(
     target: Protocol,
     model: &str,
 ) -> std::result::Result<Conversion<Request>, llmproxy_core::adapter::Error> {
-    target.encode_request_for(
+    target.encode_request(
         request,
         &RequestTarget {
             model,
             max_output_tokens: None,
         },
+        llmproxy_core::adapter::protocol_codec::EncodeMode::Rebuild,
     )
 }
 

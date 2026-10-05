@@ -1,15 +1,14 @@
 mod buffered;
 mod request;
+mod route;
+use route::SelectedRoute;
 #[cfg(test)]
 mod request_tests;
 mod streaming;
 
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -32,8 +31,6 @@ use crate::{
     transform::{BodyTransform, MessagePhase, ModelRead, RequestBody, response_kind},
 };
 
-static RESPONSE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 pub struct Gateway {
     providers: ProviderSnapshots,
     telemetry: GatewayTelemetry,
@@ -44,13 +41,9 @@ pub struct Gateway {
 pub struct RequestContext {
     telemetry: RequestTelemetry,
     protocol: Option<Protocol>,
-    client_model: Option<String>,
-    response_id: String,
-    response_created: i64,
-    provider: Option<Arc<ResolvedProvider>>,
+    // 未选路时只保留入口协议供错误响应使用；选路结果作为整体移交子请求。
+    route: Option<SelectedRoute>,
     console: bool,
-    upstream_model_id: Option<String>,
-    request_stream: bool,
     stream_error: Option<Bytes>,
     request_body: RequestBody,
     response_body: BodyTransform,
@@ -80,22 +73,15 @@ impl Gateway {
         Ok((provider, model.upstream_model_id.clone()))
     }
 
-    /// 仅 Gemini 跨协议工具回合需要短期状态；鉴权读取发生在上游头替换之前。
-    fn prepare_tool_state(
-        &self,
-        session: &Session,
-        ctx: &mut RequestContext,
-        provider: &ResolvedProvider,
-        model: &str,
-    ) {
-        let protocol = ctx.protocol.expect("client protocol selected");
-        if provider.protocol == Protocol::Gemini && protocol != Protocol::Gemini {
+    /// 统一准备路由、转换模式和工具作用域，Pingora 阶段只负责读取及选择。
+    fn prepare_route(&self, session: &Session, ctx: &mut RequestContext, route: SelectedRoute) {
+        if route.provider.protocol == Protocol::Gemini && route.is_cross_protocol() {
             let context = crate::tool_state::Context::new(
                 self.tool_states.clone(),
-                provider,
-                model,
-                protocol,
-                ctx.client_model.as_deref().expect("client route selected"),
+                &route.provider,
+                &route.upstream_model,
+                route.protocol,
+                &route.client_model,
                 [
                     session.get_header_bytes("authorization"),
                     session.get_header_bytes("x-api-key"),
@@ -105,6 +91,14 @@ impl Gateway {
             ctx.request_body.set_tool_state(context.clone());
             ctx.response_body.set_tool_state(context);
         }
+        if route.is_cross_protocol() {
+            ctx.request_body.set_cross_protocol(
+                route.protocol,
+                route.provider.protocol,
+                &route.upstream_model,
+            );
+        }
+        ctx.route = Some(route);
     }
 }
 
@@ -116,13 +110,8 @@ impl ProxyHttp for Gateway {
         RequestContext {
             telemetry: RequestTelemetry::new(),
             protocol: None,
-            client_model: None,
-            response_id: String::new(),
-            response_created: 0,
-            provider: None,
+            route: None,
             console: false,
-            upstream_model_id: None,
-            request_stream: false,
             stream_error: None,
             request_body: RequestBody::new(),
             response_body: BodyTransform::default(),
@@ -172,19 +161,11 @@ impl ProxyHttp for Gateway {
                     crate::transform::respond_error(session, ctx.protocol, 415).await?;
                     return Ok(true);
                 }
-                ctx.client_model = Some(alias);
-                self.prepare_tool_state(session, ctx, &provider, &upstream_model_id);
-                if provider.protocol != protocol {
-                    ctx.request_body.set_cross_protocol(
-                        protocol,
-                        provider.protocol,
-                        &upstream_model_id,
-                    );
-                    prepare_response_shell(ctx);
-                }
-                ctx.provider = Some(provider);
-                ctx.upstream_model_id = Some(upstream_model_id);
-                ctx.request_stream = stream;
+                self.prepare_route(
+                    session,
+                    ctx,
+                    SelectedRoute::new(protocol, alias, provider, upstream_model_id, stream),
+                );
                 buffered::forward(self, session, ctx).await
             }
             Route::Proxy(protocol) => {
@@ -222,20 +203,12 @@ impl ProxyHttp for Gateway {
                     .map_err(|_| {
                         Error::explain(ErrorType::InternalError, "cannot encode upstream model")
                     })?;
-                ctx.client_model = Some(alias);
-                self.prepare_tool_state(session, ctx, &provider, &upstream_model_id);
-                if provider.protocol != protocol {
-                    ctx.request_body.set_cross_protocol(
-                        protocol,
-                        provider.protocol,
-                        &upstream_model_id,
-                    );
-                    prepare_response_shell(ctx);
-                }
-                ctx.upstream_model_id = Some(upstream_model_id);
-                // Pin one immutable provider for the full request, including SSE.
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
-                ctx.provider = Some(provider);
+                self.prepare_route(
+                    session,
+                    ctx,
+                    SelectedRoute::new(protocol, alias, provider, upstream_model_id, false),
+                );
                 buffered::forward(self, session, ctx).await
             }
             Route::Auto => {
@@ -264,10 +237,11 @@ impl ProxyHttp for Gateway {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let provider = ctx
-            .provider
+        let provider = &ctx
+            .route
             .as_ref()
-            .expect("request_filter selected provider");
+            .expect("request_filter selected route")
+            .provider;
         // Resolve before constructing HttpPeer, which would panic on a DNS error.
         let connect_timeout = Duration::from_millis(provider.connect_timeout_ms);
         let dns_start = Instant::now();
@@ -365,22 +339,23 @@ impl ProxyHttp for Gateway {
                 .get("content-encoding")
                 .map(|value| value.as_bytes()),
         );
-        let client_protocol = ctx.protocol.expect("request_filter set protocol");
-        let provider_protocol = ctx.provider.as_ref().expect("provider selected").protocol;
+        let route = ctx.route.as_ref().expect("request_filter selected route");
+        let client_protocol = route.protocol;
+        let provider_protocol = route.provider.protocol;
         if client_protocol != provider_protocol {
             response.remove_header("content-length");
             response.remove_header("content-md5");
             response.remove_header("digest");
             response.insert_header(
                 "content-type",
-                if ctx.request_stream && response.status.is_success() {
+                if route.stream && response.status.is_success() {
                     "text/event-stream"
                 } else {
                     "application/json"
                 },
             )?;
             if response.status.is_success() {
-                let expected = if ctx.request_stream {
+                let expected = if route.stream {
                     matches!(kind, crate::transform::BodyKind::Sse)
                 } else {
                     matches!(kind, crate::transform::BodyKind::Json)
@@ -392,19 +367,20 @@ impl ProxyHttp for Gateway {
                     )
                     .into_up());
                 }
-                if ctx.request_stream {
+                if route.stream {
                     // 父请求逐帧转换并异步提交签名，子请求只交付未经压缩的来源 SSE。
                     ctx.response_body
                         .replace_kind(crate::transform::BodyKind::Passthrough);
                     response.remove_header("etag");
                     response.insert_header("cache-control", "no-store")?;
                 } else {
+                    let target = route.response_target();
                     ctx.response_body.set_cross_response(
                         provider_protocol,
                         client_protocol,
-                        ctx.client_model.as_deref().expect("client model selected"),
-                        &ctx.response_id,
-                        ctx.response_created,
+                        target.model,
+                        target.id,
+                        target.created,
                     );
                 }
             } else {
@@ -414,10 +390,7 @@ impl ProxyHttp for Gateway {
                 response.remove_header("etag");
             }
         }
-        if !(ctx.request_stream
-            && client_protocol != provider_protocol
-            && response.status.is_success())
-        {
+        if !(route.stream && client_protocol != provider_protocol && response.status.is_success()) {
             ctx.response_body.replace_kind(kind);
         }
         ctx.telemetry.in_scope(|| {
@@ -525,7 +498,11 @@ impl ProxyHttp for Gateway {
             let status = response.status.as_u16();
             if let Some(body) = ctx.stream_error.take() {
                 let timeout = std::time::Duration::from_millis(
-                    ctx.provider.as_ref().unwrap().write_timeout_ms,
+                    ctx.route
+                        .as_ref()
+                        .expect("stream route selected")
+                        .provider
+                        .write_timeout_ms,
                 );
                 // 慢客户端导致原发送超时后，错误事件同样受写超时约束。
                 let written =
@@ -585,16 +562,6 @@ impl ProxyHttp for Gateway {
             .map(|header| header.status.as_u16());
         self.telemetry.finish(&mut ctx.telemetry, status, error);
     }
-}
-
-/// 在选定跨协议路由时固定客户端响应外壳，避免逐块创建不同 ID。
-fn prepare_response_shell(ctx: &mut RequestContext) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let sequence = RESPONSE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    ctx.response_id = format!("llmproxy-{}-{sequence}", now.as_nanos());
-    ctx.response_created = now.as_secs() as i64;
 }
 
 fn error_status(error: &Error) -> u16 {

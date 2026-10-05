@@ -134,7 +134,8 @@ impl RequestBody {
 
     /// 在创建子请求之前完整解码一次，Gemini 的流式意图来自已匹配的 URL。
     pub fn decode_cross_request(&self, chunks: &[Bytes], gemini_stream: bool) -> Result<IrRequest> {
-        let Some(super::cross::CrossConversion::Request { source, .. }) = &self.body.cross else {
+        let Some(super::cross::CrossConversion::Request { source, .. }) = self.body.conversion()
+        else {
             return Err(Error::explain(
                 ErrorType::InternalError,
                 "cross request conversion missing",
@@ -161,7 +162,7 @@ impl RequestBody {
 
     /// 转换与签名恢复先于上游请求头，目标正文仅在子请求正文结束时交付一次。
     pub async fn prepare_cross_request(&mut self, request: &IrRequest) -> Result<()> {
-        let conversion = self.body.cross.as_ref().ok_or_else(|| {
+        let conversion = self.body.conversion().ok_or_else(|| {
             Error::explain(ErrorType::InternalError, "cross request conversion missing")
         })?;
         self.prepared = Some(

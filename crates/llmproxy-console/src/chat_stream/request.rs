@@ -123,10 +123,5 @@ pub(super) fn request_body(
 
 /// 在 HTTP 边界序列化具体协议结构，避免将统一载体的枚举标签写入请求正文。
 pub(super) fn with_request_body(builder: RequestBuilder, body: &Request) -> RequestBuilder {
-    match body {
-        Request::Chat(body) => builder.json(body),
-        Request::Responses(body) => builder.json(body),
-        Request::Messages(body) => builder.json(body),
-        Request::Gemini(body) => builder.json(body),
-    }
+    builder.json(&llmproxy_core::protocol::wire::request(body))
 }

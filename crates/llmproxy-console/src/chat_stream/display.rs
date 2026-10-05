@@ -1,5 +1,9 @@
 //! 从响应 IR 提取页面内容；展示标题、统计和媒体链接不混入模型历史。
-use super::ChatReply;
+use super::{
+    ChatReply,
+    media::{inline_uri, safe_mime},
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use llmproxy_core::ir::{
     media::{Media, MediaKind, MediaSource},
     message::{PartKind, ToolCall},
@@ -173,18 +177,7 @@ pub(super) fn media_part(media: &Media, reply: &mut ChatReply) {
         }
         MediaSource::FileId(_) => (None, None),
     };
-    let preview = mime.is_some_and(|mime| match media.kind {
-        MediaKind::Image => matches!(
-            mime,
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        ),
-        MediaKind::Audio => matches!(
-            mime,
-            "audio/wav" | "audio/mpeg" | "audio/ogg" | "audio/flac"
-        ),
-        MediaKind::Video => matches!(mime, "video/mp4" | "video/webm"),
-        MediaKind::File => false,
-    });
+    let preview = mime.is_some_and(|mime| super::media::preview(media.kind, mime));
     let text = if uri.is_none() {
         "媒体未提供可公开访问的地址"
     } else if !preview {
@@ -203,39 +196,15 @@ pub(super) fn media_part(media: &Media, reply: &mut ChatReply) {
     });
 }
 
-/// HTML/SVG 等主动内容不作为 data URI 的类型，下载使用二进制类型。
-fn safe_mime(mime: &str) -> bool {
-    matches!(
-        mime,
-        "image/png"
-            | "image/jpeg"
-            | "image/gif"
-            | "image/webp"
-            | "audio/wav"
-            | "audio/mpeg"
-            | "audio/ogg"
-            | "audio/flac"
-            | "video/mp4"
-            | "video/webm"
-            | "application/pdf"
-            | "application/octet-stream"
-    )
-}
-
-/// Chat 音频响应没有编码格式，沿用二进制下载，转录文字独立展示。
+/// Chat 音频响应共用容器识别及附件策略，转录文字独立展示。
 pub(super) fn chat_audio(
     audio: &llmproxy_core::protocol::chat::response::message::Audio,
     reply: &mut ChatReply,
-) {
-    reply.parts.push(DisplayPart {
-        title: "音频（格式未报告）".into(),
-        text: "下载音频；Provider 未报告编码格式".into(),
-        media: inline_uri(&audio.data, "application/octet-stream").map(|uri| DisplayMedia {
-            kind: MediaKind::Audio,
-            uri,
-            preview: false,
-        }),
-    });
+) -> Result<(), String> {
+    let bytes = STANDARD
+        .decode(&audio.data)
+        .map_err(|_| "上游音频数据无效")?;
+    reply.parts.push(super::media::audio_part(&bytes));
     if !audio.transcript.is_empty() {
         reply.parts.push(DisplayPart {
             title: "音频转录".into(),
@@ -243,11 +212,5 @@ pub(super) fn chat_audio(
             media: None,
         });
     }
-}
-
-/// 内联数据只允许 Base64 字符，地址头不接受上游提供的主动内容类型。
-fn inline_uri(data: &str, mime: &str) -> Option<String> {
-    data.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
-        .then(|| format!("data:{mime};base64,{data}"))
+    Ok(())
 }

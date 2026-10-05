@@ -34,11 +34,17 @@ fn stream_requests_cross_all_protocols_without_source_body() {
         max_output_tokens: None,
     };
     for source in ALL {
-        let original = source.encode_request_for(&base, &target).unwrap().body;
+        let original = source
+            .encode_request(&base, &target, super::EncodeMode::Rebuild)
+            .unwrap()
+            .body;
         let mut ir = source.decode_request(&original).unwrap().without_source();
         ir.generation.stream = true;
         for dest in ALL {
-            let encoded = dest.encode_request_for(&ir, &target).unwrap().body;
+            let encoded = dest
+                .encode_request(&ir, &target, super::EncodeMode::Rebuild)
+                .unwrap()
+                .body;
             assert_eq!(encoded.protocol(), dest);
             match &encoded {
                 protocol::Request::Chat(body) => {
@@ -80,9 +86,33 @@ fn same_protocol_stream_edits_keep_native_options() {
     });
     let original = protocol::Request::Chat(body);
     let mut ir = Protocol::OpenAiChat.decode_request(&original).unwrap();
-    assert_eq!(Protocol::OpenAiChat.encode_request(&ir).unwrap(), original);
+    assert_eq!(
+        Protocol::OpenAiChat
+            .encode_request(
+                &ir,
+                &RequestTarget {
+                    model: "",
+                    max_output_tokens: None
+                },
+                super::EncodeMode::Preserve
+            )
+            .unwrap()
+            .body,
+        original
+    );
     ir.generation.stream = false;
-    let protocol::Request::Chat(body) = Protocol::OpenAiChat.encode_request(&ir).unwrap() else {
+    let protocol::Request::Chat(body) = Protocol::OpenAiChat
+        .encode_request(
+            &ir,
+            &RequestTarget {
+                model: "",
+                max_output_tokens: None,
+            },
+            super::EncodeMode::Preserve,
+        )
+        .unwrap()
+        .body
+    else {
         unreachable!()
     };
     assert_eq!(body.stream, O::Value(false));
@@ -96,16 +126,49 @@ fn same_protocol_stream_edits_keep_native_options() {
         .unwrap()
         .without_source();
     for protocol in ALL {
-        let original = protocol.encode_request(&base).unwrap();
+        let original = protocol
+            .encode_request(
+                &base,
+                &RequestTarget {
+                    model: "model",
+                    max_output_tokens: None,
+                },
+                super::EncodeMode::Rebuild,
+            )
+            .unwrap()
+            .body;
         let mut ir = protocol.decode_request(&original).unwrap();
         ir.generation.stream = true;
-        let stream = protocol.encode_request(&ir).unwrap();
+        let stream = protocol
+            .encode_request(
+                &ir,
+                &RequestTarget {
+                    model: "",
+                    max_output_tokens: None,
+                },
+                super::EncodeMode::Preserve,
+            )
+            .unwrap()
+            .body;
         if protocol == Protocol::Gemini {
             assert_eq!(stream, original, "Gemini 只修改 HTTP 方法，正文保持原样");
         } else {
             assert!(protocol.decode_request(&stream).unwrap().generation.stream);
         }
         ir.generation.stream = false;
-        assert_eq!(protocol.encode_request(&ir).unwrap(), original);
+        assert_eq!(
+            protocol
+                .encode_request(
+                    &ir,
+                    &RequestTarget {
+                        model: "",
+                        max_output_tokens: None
+                    },
+                    super::EncodeMode::Preserve
+                )
+                .unwrap()
+                .body,
+            original
+        );
     }
 }

@@ -10,6 +10,7 @@ mod request;
 mod response;
 pub mod responses;
 pub mod stream;
+pub mod wire;
 pub use request::Request;
 pub use response::Response;
 

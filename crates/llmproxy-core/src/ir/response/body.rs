@@ -54,7 +54,7 @@ impl Response {
         }
     }
 
-    /// 移除同协议往返副本，后续编码完全使用通用字段。
+    /// 释放同协议往返副本；此后仅可选择 Rebuild，以通用字段构造目标协议。
     pub fn without_source(mut self) -> Self {
         self.source = None;
         self

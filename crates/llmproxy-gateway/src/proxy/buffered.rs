@@ -56,18 +56,19 @@ pub(super) async fn forward(
     session: &mut Session,
     ctx: &mut RequestContext,
 ) -> Result<bool> {
-    if ctx
-        .provider
+    if !ctx
+        .route
         .as_ref()
-        .is_none_or(|p| Some(p.protocol) == ctx.protocol)
+        .expect("request_filter selected route")
+        .is_cross_protocol()
     {
         return Ok(false);
     }
     let input = ctx.request_body.buffered_input(session).await?;
     let request = ctx
         .request_body
-        .decode_cross_request(&input, ctx.request_stream)?;
-    ctx.request_stream = request.generation.stream;
+        .decode_cross_request(&input, ctx.route.as_ref().unwrap().stream)?;
+    ctx.route.as_mut().unwrap().stream = request.generation.stream;
     // 签名恢复可能等待持久化存储，准备期间也监视客户端断开并取消该 future。
     tokio::select! {
         prepared = ctx.telemetry.instrument(ctx.request_body.prepare_cross_request(&request)) => prepared?,
@@ -81,7 +82,7 @@ pub(super) async fn forward(
         Error::explain(ErrorType::InternalError, "subrequest spawner unavailable")
     })?;
     let protocol = ctx.protocol;
-    let mut streaming = if ctx.request_stream {
+    let mut streaming = if ctx.route.as_ref().unwrap().stream {
         Some(
             ctx.telemetry
                 .in_scope(|| super::streaming::Transfer::new(ctx))?,
@@ -91,14 +92,14 @@ pub(super) async fn forward(
     };
     let span = ctx.telemetry.in_scope(tracing::Span::current);
     let telemetry = ctx.telemetry.cancellation_snapshot();
-    let provider = ctx.provider.clone();
+    let route = ctx.route.clone();
     let shared = Exchange(Arc::new(Mutex::new(Some(std::mem::replace(
         ctx,
         gateway.new_ctx(),
     )))));
     ctx.protocol = protocol;
     ctx.telemetry = telemetry;
-    ctx.provider = provider;
+    ctx.route = route;
     let (request, handle) = spawner.create_subrequest(
         session.as_downstream(),
         Ctx::builder()

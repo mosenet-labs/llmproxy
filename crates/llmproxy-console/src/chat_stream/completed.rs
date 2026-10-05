@@ -7,19 +7,8 @@ use llmproxy_core::{
 
 /// HTTP 边界解析协议类型，再通过整体 IR 取得正文、展示块和统一 cache / usage。
 pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, String> {
-    let parsed: serde_json::Result<Response> = (|| {
-        Ok(match protocol {
-            Protocol::OpenAiChat => Response::Chat(Box::new(serde_json::from_slice(bytes)?)),
-            Protocol::OpenAiResponses => {
-                Response::Responses(Box::new(serde_json::from_slice(bytes)?))
-            }
-            Protocol::AnthropicMessages => {
-                Response::Messages(Box::new(serde_json::from_slice(bytes)?))
-            }
-            Protocol::Gemini => Response::Gemini(Box::new(serde_json::from_slice(bytes)?)),
-        })
-    })();
-    let body = parsed.map_err(|_| "无法解析上游非流式响应".to_owned())?;
+    let body = llmproxy_core::protocol::wire::decode_response(protocol, bytes)
+        .map_err(|_| "无法解析上游非流式响应".to_owned())?;
     let ir = protocol
         .decode_response(&body)
         .map_err(|_| "无法解码上游非流式响应".to_owned())?;
@@ -40,7 +29,7 @@ pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, Stri
             .min_by_key(|choice| choice.index)
             .and_then(|choice| choice.message.audio.as_option())
     {
-        super::display::chat_audio(audio, &mut reply);
+        super::display::chat_audio(audio, &mut reply)?;
     }
     if reply.content.is_empty()
         && reply.parts.is_empty()
@@ -154,6 +143,22 @@ mod tests {
         assert_eq!(reply.parts[0].title, "服务端执行结果");
         assert!(reply.parts[0].text.contains("42"));
         assert!(!format!("{:?}", reply.parts).contains("private"));
+    }
+
+    #[test]
+    fn nonstream_audio_recognizes_containers_and_rejects_invalid_base64() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let mut body = serde_json::json!({"id":"c","created":1,"model":"m","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","audio":{"id":"audio","data":STANDARD.encode(b"RIFF\0\0\0\0WAVE"),"expires_at":100,"transcript":"transcript"}}}]});
+        let reply = decode(Protocol::OpenAiChat, &serde_json::to_vec(&body).unwrap()).unwrap();
+        let media = reply.parts[0].media.as_ref().unwrap();
+        assert!(media.preview);
+        assert!(media.uri.starts_with("data:audio/wav;base64,"));
+        assert_eq!(reply.parts[1].text, "transcript");
+        body["choices"][0]["message"]["audio"]["data"] = "invalid-base64".into();
+        assert_eq!(
+            decode(Protocol::OpenAiChat, &serde_json::to_vec(&body).unwrap()).unwrap_err(),
+            "上游音频数据无效"
+        );
     }
 
     #[test]
