@@ -21,10 +21,11 @@ pub(super) struct Reply {
     texts: BTreeMap<Key, usize>,
     tools: BTreeMap<Key, (String, usize)>,
     audio: Audio,
+    history: super::history::Collector,
     reply: ChatReply,
 }
 impl Reply {
-    /// 容量按页面可展示正文限制；不保存不透明签名和原始协议副本。
+    /// 容量按页面正文限制；私有签名只进入结构化历史，原始协议副本不保存。
     pub(super) fn new(protocol: Protocol) -> Self {
         Self {
             protocol,
@@ -37,8 +38,13 @@ impl Reply {
             texts: BTreeMap::new(),
             tools: BTreeMap::new(),
             audio: Audio::default(),
+            history: super::history::Collector::default(),
             reply: ChatReply::default(),
         }
+    }
+    /// 请求历史的兼容提示随逐帧回复一起展示。
+    pub(super) fn set_warnings(&mut self, warnings: Vec<String>) {
+        self.reply.warnings = warnings;
     }
     /// 已完成的每一帧触发页面更新，包括没有文字变化的用量和工具更新。
     pub(super) fn push(
@@ -71,6 +77,12 @@ impl Reply {
         {
             return Err("上游未返回可显示的内容".into());
         }
+        self.reply.history = self.history.finish();
+        self.reply.model = self
+            .decoder
+            .state()
+            .metadata()
+            .and_then(|metadata| metadata.model.clone());
         Ok(self.reply)
     }
     /// 将类型化事件投影到页面的有序内容；签名和私有资源不进入展示数据。
@@ -94,6 +106,7 @@ impl Reply {
             .push(raw)
             .map_err(|_| "无法解码上游流式响应".to_owned())?
         {
+            self.history.push(&event)?;
             match event {
                 Event::PartStart { key, head } if key.candidate == 0 => {
                     if let Head::Tool(tool) = &head {

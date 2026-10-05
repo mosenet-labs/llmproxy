@@ -65,6 +65,7 @@ impl Console {
             .route(app::ui::chat::send_chat)
             .route(app::ui::chat::stop_chat)
             .route(app::ui::chat::new_chat)
+            .route(app::ui::chat::switch_chat)
             .route(app::ui::chat::default_protocol)
             .route(app::ui::routes::save_route)
             .route(app::ui::routes::delete_route)

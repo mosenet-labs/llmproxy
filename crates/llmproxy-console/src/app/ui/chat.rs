@@ -1,3 +1,6 @@
+// Topcoat 生成的 shard 函数含框架 Cx 与独立 Signal 参数，不能用 tuple 分组传输。
+#![allow(clippy::too_many_arguments)]
+
 use std::{collections::HashMap, io};
 
 use llmproxy_core::protocol::Protocol;
@@ -16,7 +19,10 @@ use topcoat_ant_design::{
     chat_message_list, chat_sender, chat_think, select,
 };
 
-use crate::{app::AppState, chat_stream::chat_reply};
+use crate::{
+    app::AppState,
+    chat_stream::{chat_reply, history::Selection},
+};
 
 fn protocol_label(protocol: Protocol) -> &'static str {
     match protocol {
@@ -28,13 +34,7 @@ fn protocol_label(protocol: Protocol) -> &'static str {
 }
 
 fn selected_protocol(protocol: &str) -> std::result::Result<Protocol, String> {
-    Ok(match protocol {
-        "openai_chat" => Protocol::OpenAiChat,
-        "openai_responses" => Protocol::OpenAiResponses,
-        "anthropic_messages" => Protocol::AnthropicMessages,
-        "gemini" => Protocol::Gemini,
-        _ => return Err("请选择有效的协议".to_owned()),
-    })
+    Protocol::parse(protocol).ok_or_else(|| "请选择有效的协议".to_owned())
 }
 
 fn route_available(route: &ModelRouteView) -> bool {
@@ -101,7 +101,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         .and_then(|model| model.protocols.first())
         .or_else(|| routes.first().map(|route| &route.protocol))
         .map(|protocol| protocol.as_str().to_owned())
-        .unwrap_or_default();
+        .unwrap_or_else(|| Protocol::OpenAiChat.as_str().to_owned());
     let initial = state
         .chat_sessions
         .create(None, &first_model, &first_protocol)?;
@@ -109,6 +109,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
     let model_id = signal(cx, || first_model);
     let protocol = signal(cx, || first_protocol);
     let draft = signal(cx, String::new);
+    let selection_error = signal(cx, String::new);
     let busy = signal(cx, || false);
     let streaming = signal(cx, || true);
     let refresh = signal(cx, || 0usize);
@@ -133,7 +134,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
     let model_csrf = state.csrf.clone();
     let stop_csrf = state.csrf.clone();
     Ok(view! {
-        <section class="chat-workspace flex h-[calc(100dvh-80px)] min-h-[560px] w-full overflow-hidden rounded-xl border border-border bg-white shadow-[0_12px_32px_-24px_rgba(16,24,40,.28)] max-[760px]:h-[calc(100dvh-180px)] max-[760px]:min-h-[650px] max-[760px]:flex-col" aria-label="模型聊天">
+        <section :data-chat-session=$(session.get()) class="chat-workspace flex h-[calc(100dvh-80px)] min-h-[560px] w-full overflow-hidden rounded-xl border border-border bg-white shadow-[0_12px_32px_-24px_rgba(16,24,40,.28)] max-[760px]:h-[calc(100dvh-180px)] max-[760px]:min-h-[650px] max-[760px]:flex-col" aria-label="模型聊天">
             <aside class="flex w-[232px] shrink-0 flex-col border-r border-[#e9edf2] bg-[#f9fafc] px-3 py-4 max-[760px]:w-full max-[760px]:border-r-0 max-[760px]:border-b max-[760px]:py-3" aria-label="聊天设置与历史会话">
                 <div class="px-2 pb-4 max-[760px]:pb-2">
                     <p class="m-0 text-[11px] font-semibold tracking-[0.13em] text-[#8a94a3]">"LLMPROXY / CHAT"</p>
@@ -141,24 +142,28 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                 </div>
                 if available {
                     <button type="button" class="chat-new-button mb-5 flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-[#dce4ee] bg-white text-[13px] font-medium text-heading hover:border-[#a9bdd8] hover:bg-[#f7faff] max-[760px]:mb-3" :disabled=$(busy.get()) @click=$(async |_event: Event| {
-                        let next = new_chat(reset_csrf.clone(), session.get(), model_id.get(), protocol.get()).await;
+                        busy.set(true);
+                        let next = new_chat(reset_csrf.clone(), session.get()).await;
                         session.set(next);
                         draft.set("".to_owned());
+                        selection_error.set("".to_owned());
                         refresh.increment();
+                        busy.set(false);
                     })>icon(data: PLUS_OUTLINED, attrs: attributes! { class="size-3.5" aria-hidden="true" })"新会话"</button>
                     <div class="border-t border-[#e9edf2] px-2 pt-4 max-[760px]:pt-3">
                         <h3 class="m-0 text-[11px] font-semibold tracking-[0.12em] text-[#8793a2]">"设置"</h3>
                         <div class="mt-3 grid grid-cols-[32px_minmax(0,1fr)] items-center gap-2">
                             <label class="text-[12px] font-medium text-secondary" for="chat-protocol">"协议"</label>
-                            chat_protocol_picker(model_id: $(model_id), protocol: $(protocol), session: $(session), refresh: $(refresh), busy: $(busy))
+                            chat_protocol_picker(model_id: $(model_id), protocol: $(protocol), session: $(session), refresh: $(refresh), busy: $(busy), selection_error: $(selection_error))
                         </div>
-                        <p class="mt-2 mb-0 pl-10 text-[11px] leading-[1.5] text-[#8a94a3]">"切换协议将开始新会话"</p>
+                        <p class="mt-2 mb-0 pl-10 text-[11px] leading-[1.5] text-[#8a94a3]">"切换模型或协议会保留当前对话上下文"</p>
+                        if !selection_error.get().is_empty() {<p role="alert" class="mt-2 mb-0 text-[12px] text-red-600">$(selection_error.get())</p>}
                         <label class="mt-3 flex items-center gap-2 text-[12px] text-secondary"><input type="checkbox" :checked=$(streaming.get()) :disabled=$(busy.get()) @change=$(|event: Event| { streaming.set(event.target.checked); })>"流式输出"</label>
                         <p class="mt-2 mb-0 text-[11px] text-secondary">"流式输出会逐步显示回复。"</p>
                     </div>
                     <div class="mt-6 flex min-h-0 flex-1 flex-col border-t border-[#e9edf2] px-2 pt-4 max-[760px]:mt-3 max-[760px]:pt-3">
                         <div class="flex items-center justify-between"><h3 class="m-0 text-[11px] font-semibold tracking-[0.12em] text-[#8793a2]">"历史会话"</h3><span class="text-[11px] text-[#9aa4b0]">"本页"</span></div>
-                        <div class="mt-2 min-h-0 overflow-y-auto max-[760px]:max-h-24">chat_session_list(session: $(session), model_id: $(model_id), protocol: $(protocol), draft: $(draft), refresh: $(refresh))</div>
+                        <div class="mt-2 min-h-0 overflow-y-auto max-[760px]:max-h-24">chat_session_list(session: $(session), model_id: $(model_id), protocol: $(protocol), draft: $(draft), refresh: $(refresh), busy: $(busy))</div>
                     </div>
                     <p class="mt-3 mb-0 px-2 text-[11px] leading-[1.5] text-[#9aa4b0] max-[760px]:hidden">"刷新或关闭页面后不保留会话"</p>
                 }
@@ -177,14 +182,21 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                 select(attrs: attributes! { cx => id="chat-model" aria-label="选择聊天模型" class="min-w-0 max-w-[320px]" :value=$(model_id.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
                                     busy.set(true);
                                     let next_model = event.target.value;
-                                    let next_protocol = default_protocol(model_csrf.clone(), next_model.clone()).await;
+                                    let next_protocol = default_protocol(model_csrf.clone(), next_model.clone(), protocol.get()).await;
                                     if !next_protocol.is_empty() {
-                                        let next = new_chat(model_csrf.clone(), session.get(), next_model.clone(), next_protocol.clone()).await;
-                                        model_id.set(next_model);
-                                        protocol.set(next_protocol);
-                                        session.set(next);
-                                        draft.set("".to_owned());
-                                        refresh.increment();
+                                        let error = switch_chat(model_csrf.clone(), session.get(), next_model.clone(), next_protocol.clone()).await;
+                                        if error.is_empty() {
+                                            model_id.set(next_model);
+                                            protocol.set(next_protocol);
+                                            refresh.increment();
+                                        } else {
+                                            // 原生 select 已先改变 DOM，拒绝后重新应用当前选择。
+                                            model_id.set(model_id.get().clone());
+                                        }
+                                        selection_error.set(error);
+                                    } else {
+                                        model_id.set(model_id.get().clone());
+                                        selection_error.set("所选模型已不可用，当前对话和选择已保留".to_owned());
                                     }
                                     busy.set(false);
                                 }) },
@@ -206,45 +218,101 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/new-chat")]
-pub async fn new_chat(
-    cx: &Cx,
-    csrf: String,
-    current_session: String,
-    model_id: String,
-    protocol: String,
-) -> Result<String> {
+pub async fn new_chat(cx: &Cx, csrf: String, current_session: String) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
     let sessions = &state.chat_sessions;
     let current = sessions
         .get(&current_session)
         .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
+    if current.snapshot().2 {
+        return Err(io::Error::other("正在生成回复，请先停止或等待完成").into());
+    }
     let scope = current.scope().to_owned();
-    let protocol_kind = selected_protocol(&protocol).map_err(io::Error::other)?;
-    let (_, protocols, available) = chat_target(&state.store, &model_id)
+    let selection = current.selection();
+    let protocol_kind = selection.protocol;
+    let (_, protocols, available) = chat_target(&state.store, &selection.model_id)
         .await
         .map_err(io::Error::other)?;
     if !available || !protocols.contains(&protocol_kind) {
         return Err(io::Error::other("当前模型或协议已不可用").into());
     }
-    Ok(sessions.create(Some(&scope), &model_id, &protocol)?)
+    // 模型校验会等待数据库，等待期间可能从另一个请求开始生成。
+    if current.snapshot().2 {
+        return Err(io::Error::other("正在生成回复，请先停止或等待完成").into());
+    }
+    Ok(sessions.create(
+        Some(&scope),
+        &selection.model_id,
+        selection.protocol.as_str(),
+    )?)
+}
+
+/// 校验目标后在原会话内更新下一轮选择，失败时不改变选择及历史。
+#[procedure("/ui/_topcoat/runtime/procedures/switch-chat")]
+pub async fn switch_chat(
+    cx: &Cx,
+    csrf: String,
+    session_id: String,
+    model_id: String,
+    protocol: String,
+) -> Result<String> {
+    crate::app::check_csrf(cx, &csrf)?;
+    let state = app_context::<AppState>(cx);
+    let Some(session) = state.chat_sessions.get(&session_id) else {
+        return Ok("聊天会话已过期，请刷新页面".into());
+    };
+    let kind = match selected_protocol(&protocol) {
+        Ok(kind) => kind,
+        Err(error) => return Ok(error),
+    };
+    let (_, protocols, available) = match chat_target(&state.store, &model_id).await {
+        Ok(target) => target,
+        Err(error) => return Ok(error),
+    };
+    if !available || !protocols.contains(&kind) {
+        return Ok("所选模型或协议已不可用，当前选择已保留".into());
+    }
+    Ok(
+        if session.select(Selection {
+            model_id,
+            protocol: kind,
+        }) {
+            String::new()
+        } else {
+            "正在生成回复，请先停止或等待完成后切换".into()
+        },
+    )
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/default-chat-protocol")]
-pub async fn default_protocol(cx: &Cx, csrf: String, model_id: String) -> Result<String> {
+pub async fn default_protocol(
+    cx: &Cx,
+    csrf: String,
+    model_id: String,
+    current: String,
+) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
-    let (_, protocols, available) = chat_target(&app_context::<AppState>(cx).store, &model_id)
-        .await
-        .map_err(io::Error::other)?;
-    Ok(if available {
-        protocols
-            .first()
-            .map(|protocol| protocol.as_str())
-            .unwrap_or_default()
-            .to_owned()
-    } else {
-        String::new()
-    })
+    let Ok((_, protocols, available)) =
+        chat_target(&app_context::<AppState>(cx).store, &model_id).await
+    else {
+        return Ok(String::new());
+    };
+    Ok(
+        if available
+            && selected_protocol(&current).is_ok_and(|current| protocols.contains(&current))
+        {
+            current
+        } else if available {
+            protocols
+                .first()
+                .map(|protocol| protocol.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            String::new()
+        },
+    )
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/begin-chat")]
@@ -274,22 +342,24 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: boo
     let Some(session) = state.chat_sessions.get(&session_id) else {
         return Ok(false);
     };
-    let Some(history) = session.start_request() else {
+    let Some(turn) = session.start_request() else {
         return Ok(false);
     };
     let mut cancellation = session.cancellation();
     let request = async {
-        let protocol = selected_protocol(session.protocol())?;
-        let (alias, protocols, available) = chat_target(&state.store, session.model_id()).await?;
+        let protocol = turn.selection.protocol;
+        let (alias, protocols, available) =
+            chat_target(&state.store, &turn.selection.model_id).await?;
         if !available || !protocols.contains(&protocol) {
             return Err("当前模型或协议已不可用".to_owned());
         }
+        session.request_model(&alias);
         chat_reply(
             &state.chat_client,
             &state.gateway_origin,
-            protocol,
+            &turn.selection,
             &alias,
-            &history,
+            &turn.history,
             streaming,
             |reply| session.update(reply),
         )
@@ -313,6 +383,7 @@ pub async fn chat_protocol_picker(
     session: Signal<String>,
     refresh: Signal<usize>,
     busy: Signal<bool>,
+    selection_error: Signal<String>,
 ) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
     let csrf = state.csrf.clone();
@@ -323,10 +394,10 @@ pub async fn chat_protocol_picker(
         select(attrs: attributes! { cx => id="chat-protocol" aria-label="选择模型协议" class="w-full" :value=$(protocol.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
             busy.set(true);
             let next_protocol = event.target.value;
-            let next = new_chat(csrf.clone(), session.get(), model_id.get(), next_protocol.clone()).await;
-            protocol.set(next_protocol);
-            session.set(next);
-            refresh.increment();
+            let error = switch_chat(csrf.clone(), session.get(), model_id.get(), next_protocol.clone()).await;
+            if error.is_empty() { protocol.set(next_protocol); refresh.increment(); }
+            else { protocol.set(protocol.get().clone()); }
+            selection_error.set(error);
             busy.set(false);
         }) },
             for kind in &protocols {
@@ -344,6 +415,7 @@ pub async fn chat_session_list(
     protocol: Signal<String>,
     draft: Signal<String>,
     refresh: Signal<usize>,
+    busy: Signal<bool>,
 ) -> Result<impl View> {
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
@@ -374,7 +446,7 @@ pub async fn chat_session_list(
         <nav class="grid gap-1" aria-label="本页历史会话">
             #[key(id.clone())]
             for (id, title, model, kind, alias) in rooms {
-                <button type="button" class="chat-session-item flex w-full min-w-0 flex-col items-start rounded-lg px-2.5 py-2 text-left hover:bg-[#edf2f8]" :data-active=$(session.get() == id) @click=$(|_event: Event| {
+                <button type="button" class="chat-session-item flex w-full min-w-0 flex-col items-start rounded-lg px-2.5 py-2 text-left hover:bg-[#edf2f8]" :data-active=$(session.get() == id) :disabled=$(busy.get()) @click=$(|_event: Event| {
                     session.set(id.clone());
                     model_id.set(model.clone());
                     protocol.set(kind.clone());
@@ -405,13 +477,17 @@ pub async fn chat_history(
             let (messages, thinking, busy) = room.snapshot();
             let usage = room.usage_snapshot();
             let parts = room.parts_snapshot();
+            let models = room.model_snapshot();
+            let warnings = room.warning_snapshot();
             let entries: Vec<_> = messages
                 .into_iter()
                 .map(|message| {
                     let thought = thinking.get(&message.id).cloned().unwrap_or_default();
                     let usage = usage.get(&message.id).cloned().unwrap_or_default();
                     let parts = parts.get(&message.id).cloned().unwrap_or_default();
-                    (message, thought, usage, parts)
+                    let model = models.get(&message.id).cloned().unwrap_or_default();
+                    let warning = warnings.get(&message.id).cloned().unwrap_or_default();
+                    (message, thought, usage, parts, model, warning)
                 })
                 .collect();
             let token = emit! {
@@ -423,8 +499,8 @@ pub async fn chat_history(
                 } else {
                     chat_message_list(label: "聊天消息", attrs: attributes! { class="pb-2" },
                         #[key(message.id.clone())]
-                        for (message, thought, usage, parts) in entries {
-                            chat_message_entry(message: message, thought: thought, usage: usage, parts: parts)
+                        for (message, thought, usage, parts, model, warning) in entries {
+                            chat_message_entry(message: message, thought: thought, usage: usage, parts: parts, model: model, warning: warning)
                         }
                     )
                 }
@@ -444,6 +520,8 @@ async fn chat_message_entry(
     thought: String,
     usage: String,
     parts: Vec<crate::chat_stream::DisplayPart>,
+    model: String,
+    warning: String,
 ) -> Result<impl View> {
     let thought_id = format!("chat-thought-{}", message.id);
     let thought_open = signal(cx, || false);
@@ -488,6 +566,8 @@ async fn chat_message_entry(
                     }
                 }
             }
+            if message.role == ChatBubbleRole::Assistant && !model.is_empty() {<p class="mt-3 mb-0 text-[11px] text-secondary" aria-label="本轮模型">(model.as_str())</p>}
+            if !warning.is_empty() {<p class="mt-2 mb-0 text-[11px] text-secondary" aria-label="历史兼容提示">(warning.as_str())</p>}
             if !usage.is_empty() {
                 <p class="mt-3 mb-0 text-[11px] text-secondary" aria-label="本轮词元用量">(usage.as_str())</p>
             }

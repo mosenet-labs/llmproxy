@@ -9,17 +9,60 @@ use std::{
 use tokio::sync::{broadcast, watch};
 use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
 
-use crate::chat_stream::{ChatReply, DisplayPart};
+use crate::chat_stream::{
+    ChatReply, DisplayPart,
+    history::{Content, Conversation, Selection},
+};
+use llmproxy_core::{ir::message::Role, protocol::Protocol};
 
 const SESSION_IDLE_LIMIT: Duration = Duration::from_secs(60 * 60);
+
+/// 请求选择与 IR 历史在同一次锁内取得，异步发送不再读取可变会话选择。
+#[derive(Clone, Debug)]
+pub(crate) struct TurnRequest {
+    pub selection: Selection,
+    pub history: Conversation,
+}
+
+struct TurnInfo {
+    selection: Selection,
+    alias: String,
+    reported_model: Option<String>,
+    warnings: Vec<String>,
+}
+impl TurnInfo {
+    /// 本轮实际模型、入口协议与路由别名保持独立。
+    fn label(&self) -> String {
+        let model = self
+            .reported_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .unwrap_or(&self.alias);
+        let protocol = match self.selection.protocol {
+            Protocol::OpenAiChat => "Chat",
+            Protocol::OpenAiResponses => "Responses",
+            Protocol::AnthropicMessages => "Messages",
+            Protocol::Gemini => "Gemini",
+        };
+        if model.is_empty() {
+            protocol.into()
+        } else if self.alias.is_empty() || model == self.alias {
+            format!("{model} · {protocol}")
+        } else {
+            format!("{} · {protocol} · 返回模型 {model}", self.alias)
+        }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct ChatSessions {
     entries: Mutex<HashMap<String, (Instant, Arc<ChatSession>)>>,
 }
 
-#[derive(Default)]
 struct ChatState {
+    selection: Selection,
+    history: Conversation,
+    turns: HashMap<String, TurnInfo>,
     messages: Vec<ChatMessage>,
     thinking: HashMap<String, String>,
     usage: HashMap<String, String>,
@@ -32,8 +75,6 @@ struct ChatState {
 
 pub(crate) struct ChatSession {
     scope: String,
-    model_id: String,
-    protocol: String,
     created: Instant,
     state: Mutex<ChatState>,
     changed: broadcast::Sender<()>,
@@ -44,10 +85,23 @@ impl ChatSession {
     fn new(scope: String, model_id: String, protocol: String) -> Self {
         Self {
             scope,
-            model_id,
-            protocol,
             created: Instant::now(),
-            state: Mutex::new(ChatState::default()),
+            state: Mutex::new(ChatState {
+                selection: Selection {
+                    model_id,
+                    protocol: Protocol::parse(&protocol).expect("validated chat protocol"),
+                },
+                history: Conversation::default(),
+                turns: HashMap::new(),
+                messages: Vec::new(),
+                thinking: HashMap::new(),
+                usage: HashMap::new(),
+                parts: HashMap::new(),
+                title: String::new(),
+                next_id: 0,
+                busy: false,
+                request_started: false,
+            }),
             changed: broadcast::channel(32).0,
             cancelled: watch::channel(false).0,
         }
@@ -57,12 +111,58 @@ impl ChatSession {
         &self.scope
     }
 
-    pub(crate) fn model_id(&self) -> &str {
-        &self.model_id
+    /// 原会话内改变下一轮选择，服务端也禁止在生成期间切换。
+    pub(crate) fn select(&self, selection: Selection) -> bool {
+        let mut state = self.state.lock().expect("chat state mutex");
+        if state.busy {
+            return false;
+        }
+        state.selection = selection;
+        drop(state);
+        let _ = self.changed.send(());
+        true
     }
 
-    pub(crate) fn protocol(&self) -> &str {
-        &self.protocol
+    /// 历史列表与控件读取当前选择，不暴露状态锁中的借用。
+    pub(crate) fn selection(&self) -> Selection {
+        self.state
+            .lock()
+            .expect("chat state mutex")
+            .selection
+            .clone()
+    }
+
+    /// 每轮模型标签独立保存，不随下一轮选择改变。
+    pub(crate) fn model_snapshot(&self) -> HashMap<String, String> {
+        self.state
+            .lock()
+            .expect("chat state mutex")
+            .turns
+            .iter()
+            .map(|(id, turn)| (id.clone(), turn.label()))
+            .collect()
+    }
+
+    /// 兼容提示与展示、发送历史分别保存。
+    pub(crate) fn warning_snapshot(&self) -> HashMap<String, String> {
+        self.state
+            .lock()
+            .expect("chat state mutex")
+            .turns
+            .iter()
+            .map(|(id, turn)| (id.clone(), turn.warnings.join("；")))
+            .collect()
+    }
+
+    /// 目标校验完成后记录实际使用的路由别名，随后才发 HTTP 请求。
+    pub(crate) fn request_model(&self, alias: &str) {
+        let mut state = self.state.lock().expect("chat state mutex");
+        if state.busy && state.request_started {
+            let id = state.messages.last().map(|message| message.id.clone());
+            if let Some(turn) = id.and_then(|id| state.turns.get_mut(&id)) {
+                turn.alias = alias.into();
+            }
+        }
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<()> {
@@ -129,6 +229,19 @@ impl ChatSession {
         ));
         state.next_id += 1;
         let assistant_id = state.next_id.to_string();
+        let selection = state.selection.clone();
+        state
+            .history
+            .append(&selection, Content::text(Role::User, prompt));
+        state.turns.insert(
+            assistant_id.clone(),
+            TurnInfo {
+                selection,
+                alias: String::new(),
+                reported_model: None,
+                warnings: Vec::new(),
+            },
+        );
         state.messages.push(ChatMessage::new(
             assistant_id,
             ChatBubbleRole::Assistant,
@@ -140,13 +253,16 @@ impl ChatSession {
         true
     }
 
-    pub(crate) fn start_request(&self) -> Option<Vec<ChatMessage>> {
+    pub(crate) fn start_request(&self) -> Option<TurnRequest> {
         let mut state = self.state.lock().expect("chat state mutex");
         if !state.busy || state.request_started {
             return None;
         }
         state.request_started = true;
-        Some(state.messages.clone())
+        Some(TurnRequest {
+            selection: state.selection.clone(),
+            history: state.history.clone(),
+        })
     }
 
     pub(crate) fn update(&self, reply: &ChatReply) {
@@ -155,6 +271,9 @@ impl ChatSession {
             message.content = reply.content.clone();
             message.status = ChatMessageStatus::Streaming;
             let id = message.id.clone();
+            if let Some(turn) = state.turns.get_mut(&id) {
+                turn.warnings.clone_from(&reply.warnings);
+            }
             // 工具参数、媒体和累计用量与文字一起逐帧更新，纯工具回复也能在生成中展示。
             if !reply.parts.is_empty() {
                 state.parts.insert(id.clone(), reply.parts.clone());
@@ -183,11 +302,18 @@ impl ChatSession {
         if let Some(message) = state.messages.last_mut() {
             match result {
                 Ok(reply) => {
+                    let history = reply.history.clone();
                     let thinking = reply.visible_thinking().to_owned();
                     let usage = reply.usage.as_ref().map(usage_label);
                     message.content = reply.content;
                     message.status = ChatMessageStatus::Complete;
                     let id = message.id.clone();
+                    if let Some(turn) = state.turns.get_mut(&id) {
+                        turn.reported_model = reply.model;
+                        turn.warnings = reply.warnings;
+                        let selection = turn.selection.clone();
+                        state.history.append(&selection, history);
+                    }
                     if !thinking.is_empty() {
                         state.thinking.insert(id.clone(), thinking);
                     }
@@ -245,6 +371,9 @@ impl ChatSessions {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| io::Error::other("无法创建聊天会话"))?;
         let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        if Protocol::parse(protocol).is_none() {
+            return Err(io::Error::other("请选择有效的协议"));
+        }
         let scope = scope.unwrap_or(&id).to_owned();
         let now = Instant::now();
         let mut entries = self.entries.lock().expect("chat sessions mutex");
@@ -293,8 +422,8 @@ impl ChatSessions {
                     } else {
                         title
                     },
-                    room.model_id.clone(),
-                    room.protocol.clone(),
+                    state.selection.model_id.clone(),
+                    state.selection.protocol.as_str().to_owned(),
                 ))
             })
             .collect();
@@ -307,166 +436,4 @@ impl ChatSessions {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::ChatSessions;
-    use crate::chat_stream::ChatReply;
-    use topcoat_ant_design::ChatMessageStatus;
-
-    #[test]
-    fn session_keeps_turns_in_page_history() {
-        let sessions = ChatSessions::default();
-        let first = sessions.create(None, "1", "openai_chat").unwrap();
-        let room = sessions.get(&first).unwrap();
-        assert!(room.begin("  hello  "));
-        assert_eq!(room.snapshot().0[0].content, "hello");
-        assert!(!room.begin("again"));
-        assert!(room.start_request().is_some());
-        assert!(room.start_request().is_none());
-        room.update(&ChatReply {
-            thinking: "thinking".to_owned(),
-            ..ChatReply::default()
-        });
-        assert_eq!(room.snapshot().0[1].status, ChatMessageStatus::Streaming);
-        assert_eq!(room.snapshot().1["2"], "thinking");
-        room.update(&ChatReply {
-            content: "partial".to_owned(),
-            thinking: "thinking".to_owned(),
-            ..ChatReply::default()
-        });
-        assert_eq!(room.snapshot().0[1].content, "partial");
-        assert_eq!(room.snapshot().1["2"], "thinking");
-        room.finish(Ok(ChatReply {
-            content: "reply".to_owned(),
-            thinking: "thinking done".to_owned(),
-            ..ChatReply::default()
-        }));
-        assert_eq!(room.snapshot().0[1].content, "reply");
-        assert_eq!(room.snapshot().1["2"], "thinking done");
-        let next = sessions
-            .create(Some(&first), "2", "openai_responses")
-            .unwrap();
-        assert!(sessions.get(&next).unwrap().snapshot().0.is_empty());
-        assert_eq!(sessions.list(&first, &next).len(), 2);
-        assert_eq!(sessions.list(&first, &next)[1].1, "hello");
-        assert!(sessions.get(&first).is_some());
-        let third = sessions
-            .create(Some(&first), "2", "anthropic_messages")
-            .unwrap();
-        assert_eq!(sessions.list(&first, &third).len(), 2);
-        let other_page = sessions.create(None, "3", "anthropic_messages").unwrap();
-        assert_eq!(sessions.list(&other_page, &other_page).len(), 1);
-    }
-
-    #[tokio::test]
-    async fn stop_before_request_is_remembered_and_next_turn_resets_it() {
-        let sessions = ChatSessions::default();
-        let id = sessions.create(None, "1", "openai_chat").unwrap();
-        let room = sessions.get(&id).unwrap();
-        assert!(!room.stop());
-        assert!(room.begin("first"));
-        assert!(room.stop());
-        assert!(room.start_request().is_some());
-        let mut cancellation = room.cancellation();
-        assert!(*cancellation.wait_for(|stopped| *stopped).await.unwrap());
-        assert!(!room.begin("too early"));
-        room.finish(Err("已停止生成".into()));
-        assert_eq!(room.snapshot().0[1].status, ChatMessageStatus::Cancelled);
-        assert!(!room.snapshot().2);
-        assert!(room.usage_snapshot().is_empty());
-        assert!(!room.stop());
-        assert!(room.begin("second"));
-        assert!(!*cancellation.borrow());
-        assert!(room.start_request().is_some());
-        assert!(room.stop());
-        assert!(*cancellation.wait_for(|stopped| *stopped).await.unwrap());
-    }
-}
-
-#[cfg(test)]
-mod usage_tests {
-    use super::*;
-    #[test]
-    fn streaming_audio_is_cleared_on_stop_or_failure_and_never_enters_history() {
-        for stopped in [false, true] {
-            let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
-            assert!(room.begin("audio"));
-            room.update(&ChatReply {
-                parts: vec![DisplayPart {
-                    title: "音频转录".into(),
-                    text: "尚未完成的转录".into(),
-                    media: None,
-                }],
-                ..Default::default()
-            });
-            assert!(!room.parts_snapshot().is_empty());
-            if stopped {
-                assert!(room.stop());
-            }
-            room.finish(Err("Provider 生成失败".into()));
-            assert!(room.parts_snapshot().is_empty());
-            assert!(room.begin("next"));
-            assert!(!format!("{:?}", room.start_request().unwrap()).contains("尚未完成的转录"));
-        }
-    }
-
-    #[test]
-    fn streaming_tools_and_usage_update_before_completion_and_are_cleared_on_failure() {
-        let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
-        assert!(room.begin("hi"));
-        let usage = llmproxy_core::ir::usage::Usage {
-            input_tokens: Some(10),
-            ..Default::default()
-        };
-        room.update(&ChatReply {
-            parts: vec![DisplayPart {
-                title: "工具调用 · lookup".into(),
-                text: "{\"q\":".into(),
-                media: None,
-            }],
-            usage: Some(usage),
-            ..Default::default()
-        });
-        assert!(room.snapshot().2);
-        assert_eq!(room.parts_snapshot()["2"][0].text, "{\"q\":");
-        assert_eq!(room.usage_snapshot()["2"], "输入 10");
-        room.finish(Err("Provider 生成失败".into()));
-        assert!(!room.snapshot().2);
-        assert!(room.parts_snapshot().is_empty());
-        assert!(room.usage_snapshot().is_empty());
-    }
-
-    #[test]
-    fn usage_is_separate_from_history_and_preserves_zero() {
-        let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
-        assert!(room.begin("hi"));
-        let mut usage = llmproxy_core::ir::usage::Usage::default();
-        usage.cache.read_input_tokens = Some(0);
-        room.finish(Ok(ChatReply {
-            content: "hello".into(),
-            usage: Some(usage),
-            ..Default::default()
-        }));
-        assert_eq!(room.usage_snapshot()["2"], "缓存读取 0");
-        assert_eq!(room.snapshot().0[1].content, "hello");
-    }
-
-    #[test]
-    fn display_blocks_do_not_replace_text_history_or_usage() {
-        let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
-        assert!(room.begin("hi"));
-        room.finish(Ok(ChatReply {
-            content: "answer".into(),
-            parts: vec![DisplayPart {
-                title: "工具调用 · lookup".into(),
-                text: "private-argument".into(),
-                media: None,
-            }],
-            ..Default::default()
-        }));
-        assert_eq!(room.parts_snapshot()["2"][0].title, "工具调用 · lookup");
-        assert_eq!(room.snapshot().0[1].content, "answer");
-        assert!(room.usage_snapshot().is_empty());
-        assert!(room.begin("next"));
-        assert!(!format!("{:?}", room.start_request().unwrap()).contains("private-argument"));
-    }
-}
+mod tests;

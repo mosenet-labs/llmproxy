@@ -996,7 +996,8 @@ async fn exercise_http(database_url: &str) {
         .body(
             serde_json::to_vec(&serde_json::json!([
                 csrf,
-                format!("route:{}", saved_route.id)
+                format!("route:{}", saved_route.id),
+                "gemini"
             ]))
             .unwrap(),
         )

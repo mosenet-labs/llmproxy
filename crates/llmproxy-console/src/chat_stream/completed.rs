@@ -43,7 +43,9 @@ pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, Stri
         }
         .into();
     }
+    reply.history = super::history::Content::response(&ir);
     reply.usage = ir.usage;
+    reply.model = ir.model;
     if reply.content.is_empty()
         && reply.thinking.is_empty()
         && reply.summary.is_empty()
@@ -105,6 +107,11 @@ mod tests {
             assert_eq!(reply.parts[0].title, "工具调用 · lookup");
             assert!(reply.parts[0].text.contains("test"));
             assert!(!format!("{:?}", reply.parts).contains("private-signature"));
+            assert!(format!("{:?}", reply.history).contains("lookup"));
+            assert!(format!("{:?}", reply.history).contains("test"));
+            if protocol == Protocol::Gemini {
+                assert!(format!("{:?}", reply.history).contains("private-signature"));
+            }
         }
     }
 
@@ -121,6 +128,17 @@ mod tests {
         assert!(reply.parts[1].media.as_ref().unwrap().preview);
         assert_eq!(reply.parts[2].title, "工具调用 · lookup");
         assert_eq!(reply.parts[3].text, "after");
+        let parts = &reply.history.messages[0].parts;
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(
+            parts[1].kind,
+            llmproxy_core::ir::message::PartKind::Media(_)
+        ));
+        assert!(matches!(
+            parts[2].kind,
+            llmproxy_core::ir::message::PartKind::ToolCall(_)
+        ));
+        assert!(!format!("{:?}", reply.history).contains("discarded"));
     }
 
     #[test]

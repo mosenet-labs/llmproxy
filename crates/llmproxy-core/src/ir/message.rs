@@ -5,6 +5,9 @@ use serde_json::{Map, Value};
 
 use crate::protocol::Protocol;
 
+/// 网关工具续传引用的命名空间；引用属于原路由作用域，不能跨模型复用。
+pub const TOOL_CONTINUATION_ID_PREFIX: &str = "call_lp_";
+
 /// 跨协议可识别的消息发送方。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

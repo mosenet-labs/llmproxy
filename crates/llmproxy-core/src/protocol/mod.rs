@@ -52,6 +52,17 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    /// 将路由和页面使用的稳定协议标识解析为类型，不依赖枚举的序列化名称。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "openai_chat" => Some(Self::OpenAiChat),
+            "openai_responses" => Some(Self::OpenAiResponses),
+            "anthropic_messages" => Some(Self::AnthropicMessages),
+            "gemini" => Some(Self::Gemini),
+            _ => None,
+        }
+    }
+
     pub const fn upstream_path(self) -> &'static str {
         match self {
             Self::OpenAiChat => "/v1/chat/completions",

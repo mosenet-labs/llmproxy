@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) const PREFIX: &str = "call_lp_";
+pub(super) use llmproxy_core::ir::message::TOOL_CONTINUATION_ID_PREFIX as PREFIX;
 // 无数据库的同步单测沿用原内存期限；生产跨请求期限由存储层的 24 小时规则管理。
 const TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_CALLS: usize = 4096;

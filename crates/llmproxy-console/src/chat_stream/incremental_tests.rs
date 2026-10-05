@@ -70,6 +70,22 @@ fn tool_only_streams_display_args_and_usage_in_four_protocols() {
         assert_eq!(usage.total_tokens, Some(13));
         assert_eq!(usage.cache.read_input_tokens, Some(4));
         assert!(!format!("{:?}", reply.parts).contains("private"));
+        let call = reply
+            .history
+            .messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .find_map(|p| match &p.kind {
+                llmproxy_core::ir::message::PartKind::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(call.id.as_deref(), Some("a"));
+        assert_eq!(call.name, "lookup");
+        assert_eq!(call.arguments, json!({"q":1}));
+        if protocol == Protocol::Gemini {
+            assert!(format!("{:?}", reply.history).contains("private"));
+        }
     }
 }
 

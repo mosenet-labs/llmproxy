@@ -1,19 +1,20 @@
-//! 控制台聊天的 HTTP 边界：非流式读取整包，已有同协议流式路径逐事件读取。
+//! 控制台聊天的 HTTP 边界：非流式读取整体响应 IR，流式逐事件读取并汇总历史。
 mod audio;
 mod completed;
 mod display;
+pub(crate) mod history;
 mod incremental;
 #[cfg(test)]
 mod incremental_tests;
 mod media;
 mod request;
 pub(crate) use display::DisplayPart;
+use history::{Content, Conversation, Selection};
 use llmproxy_core::protocol::Protocol;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use request::{request_body, with_request_body};
 use reqwest::Client;
 use serde_json::Value;
-use topcoat_ant_design::ChatMessage;
 
 const MAX_REPLY_BYTES: usize = 256 * 1024;
 const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -34,6 +35,12 @@ pub(crate) struct ChatReply {
     pub usage: Option<llmproxy_core::ir::usage::Usage>,
     /// 工具、媒体和服务端执行内容；展示标签不进入下一轮文本历史。
     pub parts: Vec<DisplayPart>,
+    /// 正常结束后才提供可提交的 IR 历史，展示标签不参与生成。
+    pub history: Content,
+    /// 响应实际报告的模型，不覆盖当前会话选择。
+    pub model: Option<String>,
+    /// 本轮历史与协议转换的静态提示，不含参数或签名。
+    pub warnings: Vec<String>,
 }
 
 impl ChatReply {
@@ -55,15 +62,42 @@ fn error_message(value: &Value) -> String {
         .to_owned()
 }
 
-pub async fn chat_reply(
+pub(crate) async fn chat_reply(
     client: &Client,
     gateway_origin: &str,
-    protocol: Protocol,
+    selection: &Selection,
     alias: &str,
-    history: &[ChatMessage],
+    history: &Conversation,
     stream: bool,
     mut on_update: impl FnMut(&ChatReply),
 ) -> Result<ChatReply, String> {
+    let protocol = selection.protocol;
+    let converted = request_body(selection, alias, history, stream)?;
+    for warning in &converted.warnings {
+        tracing::warn!(
+            component = "console",
+            event_kind = "chat_history_conversion",
+            source_protocol = warning.source.as_str(),
+            target_protocol = warning.target.as_str(),
+            path = warning.path.as_str(),
+            reason = warning.reason.as_str(),
+            "chat history conversion warning"
+        );
+    }
+    let mut warnings: Vec<_> = converted
+        .warnings
+        .iter()
+        .map(|warning| warning.reason.clone())
+        .collect();
+    warnings.sort();
+    warnings.dedup();
+    if !warnings.is_empty() {
+        // 即使后续 HTTP 失败，已作出的历史兼容处理也应在这一轮可见。
+        on_update(&ChatReply {
+            warnings: warnings.clone(),
+            ..Default::default()
+        });
+    }
     let path = if protocol == Protocol::Gemini {
         let model = utf8_percent_encode(alias, MODEL_SEGMENT);
         let method = if stream {
@@ -83,7 +117,7 @@ pub async fn chat_reply(
             "application/json"
         },
     );
-    let response = with_request_body(builder, &request_body(protocol, alias, history, stream))
+    let response = with_request_body(builder, &converted.body)
         .send()
         .await
         .map_err(|error| format!("无法连接网关：{error}"))?;
@@ -125,7 +159,8 @@ pub async fn chat_reply(
             }
             bytes.extend_from_slice(&chunk);
         }
-        let reply = completed::decode(protocol, &bytes)?;
+        let mut reply = completed::decode(protocol, &bytes)?;
+        reply.warnings = warnings;
         on_update(&reply);
         return Ok(reply);
     }
@@ -134,6 +169,7 @@ pub async fn chat_reply(
     }
     let mut response = response;
     let mut reply = incremental::Reply::new(protocol);
+    reply.set_warnings(warnings);
     while let Some(chunk) = response.chunk().await.map_err(|_| "读取上游响应失败")? {
         reply.push(&chunk, &mut on_update)?;
     }
@@ -144,28 +180,21 @@ pub async fn chat_reply(
 
 #[cfg(test)]
 mod tests {
+    use super::history::{Content, Conversation, Selection};
     use super::{request_body, with_request_body};
+    use llmproxy_core::ir::message::Role;
     use llmproxy_core::protocol::Protocol;
     use serde_json::json;
-    use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
 
     #[test]
     fn request_bodies_match_each_protocol() {
-        let history = vec![
-            ChatMessage::new("1", ChatBubbleRole::User, ChatMessageStatus::Complete, "hi"),
-            ChatMessage::new(
-                "2",
-                ChatBubbleRole::Assistant,
-                ChatMessageStatus::Complete,
-                "你好",
-            ),
-            ChatMessage::new(
-                "3",
-                ChatBubbleRole::Assistant,
-                ChatMessageStatus::Sending,
-                "未完成的回复",
-            ),
-        ];
+        let mut history = Conversation::default();
+        let origin = Selection {
+            model_id: "1".into(),
+            protocol: Protocol::OpenAiChat,
+        };
+        history.append(&origin, Content::text(Role::User, "hi"));
+        history.append(&origin, Content::text(Role::Assistant, "你好"));
         let messages = json!([
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "你好"},
@@ -198,7 +227,13 @@ mod tests {
                 ]}),
             ),
         ] {
-            let body = request_body(protocol, "alias", &history, true);
+            let selection = Selection {
+                model_id: "1".into(),
+                protocol,
+            };
+            let body = request_body(&selection, "alias", &history, true)
+                .unwrap()
+                .body;
             assert_eq!(body.protocol(), protocol);
             // 检查实际 HTTP 请求正文，确保序列化时没有额外的枚举标签或默认字段。
             let request = with_request_body(client.post("http://localhost/test"), &body)
@@ -208,7 +243,9 @@ mod tests {
             let actual: serde_json::Value =
                 serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
             assert_eq!(actual, expected, "{protocol:?}");
-            let body = request_body(protocol, "alias", &history, false);
+            let body = request_body(&selection, "alias", &history, false)
+                .unwrap()
+                .body;
             let request = with_request_body(client.post("http://localhost/test"), &body)
                 .build()
                 .unwrap();
@@ -217,7 +254,7 @@ mod tests {
             if protocol == Protocol::Gemini {
                 assert!(actual.get("stream").is_none());
             } else {
-                assert_eq!(actual["stream"], false);
+                assert!(!actual["stream"].as_bool().unwrap_or_default());
             }
         }
     }
