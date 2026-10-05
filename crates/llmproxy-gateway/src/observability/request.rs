@@ -113,6 +113,14 @@ impl RequestTelemetry {
         }
     }
 
+    /// 异步正文转换和状态存储在每次轮询时进入原请求 span，跨 await 保持关联。
+    pub fn instrument<F: std::future::Future>(
+        &self,
+        future: F,
+    ) -> tracing::instrument::Instrumented<F> {
+        tracing::Instrument::instrument(future, self.span.clone().unwrap_or_else(Span::none))
+    }
+
     pub fn resolved(&mut self, elapsed: Duration, result: &pingora::Result<SocketAddr>) {
         self.dns_seconds = Some(elapsed.as_secs_f64());
         match result {

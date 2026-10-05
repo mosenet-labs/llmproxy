@@ -76,6 +76,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0015_route_provider_protocol.sql",
         include_str!("../../migrations/postgresql/0015_route_provider_protocol.sql"),
     ),
+    MigrationFile::new(
+        202610050001,
+        "0016_tool_continuations.sql",
+        include_str!("../../migrations/postgresql/0016_tool_continuations.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -303,5 +308,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610020001,
         "0045_route_provider_protocol.sql",
         include_str!("../../migrations/sqlite/0045_route_provider_protocol.sql"),
+    ),
+    MigrationFile::new(
+        202610050001,
+        "0046_tool_continuations.sql",
+        include_str!("../../migrations/sqlite/0046_tool_continuations.sql"),
     ),
 ]);

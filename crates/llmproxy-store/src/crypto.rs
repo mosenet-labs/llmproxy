@@ -23,6 +23,11 @@ impl KeyCipher {
     }
 
     pub fn encrypt(&self, secret: &str) -> StoreResult<String> {
+        self.encrypt_bound(secret, AAD)
+    }
+
+    /// 使用业务关联数据绑定密文，防止不同状态记录之间交换载荷。
+    pub(crate) fn encrypt_bound(&self, secret: &str, aad: &[u8]) -> StoreResult<String> {
         let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = self
             .0
@@ -30,7 +35,7 @@ impl KeyCipher {
                 &nonce,
                 Payload {
                     msg: secret.as_bytes(),
-                    aad: AAD,
+                    aad,
                 },
             )
             .map_err(|_| StoreError::Internal)?;
@@ -41,6 +46,11 @@ impl KeyCipher {
     }
 
     pub fn decrypt(&self, encrypted: &str) -> StoreResult<String> {
+        self.decrypt_bound(encrypted, AAD)
+    }
+
+    /// 只有记录标识和作用域与加密时一致，才能恢复状态正文。
+    pub(crate) fn decrypt_bound(&self, encrypted: &str, aad: &[u8]) -> StoreResult<String> {
         let encoded = encrypted.strip_prefix("v1:").ok_or(StoreError::Internal)?;
         let envelope = STANDARD.decode(encoded).map_err(|_| StoreError::Internal)?;
         if envelope.len() < 12 + 16 {
@@ -55,7 +65,7 @@ impl KeyCipher {
                 &nonce,
                 Payload {
                     msg: &envelope[12..],
-                    aad: AAD,
+                    aad,
                 },
             )
             .map_err(|_| StoreError::Internal)?;

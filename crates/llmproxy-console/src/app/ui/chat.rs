@@ -131,6 +131,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
     }) };
     let reset_csrf = state.csrf.clone();
     let model_csrf = state.csrf.clone();
+    let stop_csrf = state.csrf.clone();
     Ok(view! {
         <section class="chat-workspace flex h-[calc(100dvh-80px)] min-h-[560px] w-full overflow-hidden rounded-xl border border-border bg-white shadow-[0_12px_32px_-24px_rgba(16,24,40,.28)] max-[760px]:h-[calc(100dvh-180px)] max-[760px]:min-h-[650px] max-[760px]:flex-col" aria-label="模型聊天">
             <aside class="flex w-[232px] shrink-0 flex-col border-r border-[#e9edf2] bg-[#f9fafc] px-3 py-4 max-[760px]:w-full max-[760px]:border-r-0 max-[760px]:border-b max-[760px]:py-3" aria-label="聊天设置与历史会话">
@@ -190,6 +191,9 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                     for model in &models { <option value=(model.id.to_string())>(model.alias.as_str())</option> }
                                     for route in &routes { <option value=(format!("route:{}", route.id))>(format!("{} · 路由 ({})", route.name, protocol_label(route.protocol)))</option> }
                                 )
+                                <button type="button" class="ml-3 rounded-md border border-border px-3 py-1 text-[12px] text-secondary" :hidden=$(!busy.get()) aria-label="停止生成" @click=$(async |_event: Event| {
+                                    let _stopped = stop_chat(stop_csrf.clone(), session.get()).await;
+                                })>"停止生成"</button>
                             </div>
                         )</div>
                     </div>
@@ -253,6 +257,16 @@ pub async fn begin_chat(cx: &Cx, csrf: String, session_id: String, prompt: Strin
     Ok(session.begin(&prompt))
 }
 
+/// 停止当前对话请求，不把停止说明写进下一轮发送给模型的历史。
+#[procedure("/ui/_topcoat/runtime/procedures/stop-chat")]
+pub async fn stop_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool> {
+    crate::app::check_csrf(cx, &csrf)?;
+    Ok(app_context::<AppState>(cx)
+        .chat_sessions
+        .get(&session_id)
+        .is_some_and(|session| session.stop()))
+}
+
 #[procedure("/ui/_topcoat/runtime/procedures/send-chat")]
 pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: bool) -> Result<bool> {
     crate::app::check_csrf(cx, &csrf)?;
@@ -263,7 +277,8 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: boo
     let Some(history) = session.start_request() else {
         return Ok(false);
     };
-    let result = async {
+    let mut cancellation = session.cancellation();
+    let request = async {
         let protocol = selected_protocol(session.protocol())?;
         let (alias, protocols, available) = chat_target(&state.store, session.model_id()).await?;
         if !available || !protocols.contains(&protocol) {
@@ -279,8 +294,13 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: boo
             |reply| session.update(reply),
         )
         .await
-    }
-    .await;
+    };
+    // 停止时销毁未完成的 reqwest future，使网关观察到客户端断开并关闭上游。
+    let result = tokio::select! {
+        biased;
+        _ = cancellation.wait_for(|stopped| *stopped) => Err("已停止生成".to_owned()),
+        result = request => result,
+    };
     session.finish(result);
     Ok(true)
 }

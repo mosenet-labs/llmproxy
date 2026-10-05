@@ -267,7 +267,7 @@ async fn four_by_four_nonstream_http_matrix() {
 }
 
 #[tokio::test]
-async fn gemini_signed_tool_roundtrips_for_three_client_protocols() {
+async fn gemini_signed_tool_roundtrips_across_instances_and_restart() {
     use llmproxy_core::protocol::OptionalNullable as O;
     let database = Database::new().await;
     let (received, requests) = std::sync::mpsc::channel();
@@ -342,7 +342,8 @@ async fn gemini_signed_tool_roundtrips_for_three_client_protocols() {
             "upstream-model",
         )
         .await;
-    let gateway = Gateway::database(&database.url, MASTER_KEY);
+    let mut gateway = Gateway::database(&database.url, MASTER_KEY);
+    let replica = Gateway::database(&database.url, MASTER_KEY);
     for source in ALL.into_iter().filter(|source| *source != Protocol::Gemini) {
         let alias = alias(source, Protocol::Gemini);
         let initial = fixtures::tool_request(source, &alias);
@@ -374,6 +375,10 @@ async fn gemini_signed_tool_roundtrips_for_three_client_protocols() {
             .unwrap();
         assert!(call.id.as_ref().unwrap().starts_with("call_lp_"));
         let next = fixtures::tool_result_request(source, &alias, &initial, &ir, call).unwrap();
+        // 客户端收到调用后重启原实例，副本从共享数据库恢复，不依赖进程内缓存。
+        assert!(!gateway.logs().contains("private-gemini-signature"));
+        drop(gateway);
+        gateway = Gateway::database(&database.url, MASTER_KEY);
         let response = gateway.request(
             "POST",
             &path(source, &alias),
@@ -383,27 +388,68 @@ async fn gemini_signed_tool_roundtrips_for_three_client_protocols() {
         assert_eq!(response.status, 422);
         response.body();
         assert!(requests.try_recv().is_err());
-        let response = gateway.request(
+        // 已运行的副本和重启后的原实例都能重复处理原历史。
+        for active in [&replica, &gateway] {
+            let response = active.request(
+                "POST",
+                &path(source, &alias),
+                "Content-Type: application/json\r\nAuthorization: Bearer same-client\r\n",
+                &serde_json::to_vec(&next).unwrap(),
+            );
+            assert_eq!(response.status, 200);
+            let received = requests.recv_timeout(DEADLINE).unwrap();
+            let native: llmproxy_core::protocol::gemini::request::Request =
+                serde_json::from_slice(&received.body).unwrap();
+            assert!(
+                native
+                    .contents
+                    .iter()
+                    .flat_map(|message| &message.parts)
+                    .any(|part| part.thought_signature
+                        == O::Value("private-gemini-signature".into()))
+            );
+            let reply = fixtures::decode_response(source, &response.body()).unwrap();
+            assert!(
+                matches!(&reply.messages[0].parts[0].kind,PartKind::Text(text) if text == "OK")
+            );
+        }
+        // 数据库中的有效期是唯一依据，其他实例曾处理过也不能复活过期引用。
+        let mut admin = toasty::Db::builder().connect(&database.url).await.unwrap();
+        toasty::sql::statement("UPDATE tool_continuations SET expires_at = 0")
+            .exec(&mut admin)
+            .await
+            .unwrap();
+        let expired = replica.request(
             "POST",
             &path(source, &alias),
             "Content-Type: application/json\r\nAuthorization: Bearer same-client\r\n",
             &serde_json::to_vec(&next).unwrap(),
         );
-        assert_eq!(response.status, 200);
-        let received = requests.recv_timeout(DEADLINE).unwrap();
-        let native: llmproxy_core::protocol::gemini::request::Request =
-            serde_json::from_slice(&received.body).unwrap();
-        assert!(
-            native
-                .contents
-                .iter()
-                .flat_map(|message| &message.parts)
-                .any(|part| part.thought_signature == O::Value("private-gemini-signature".into()))
-        );
-        let reply = fixtures::decode_response(source, &response.body()).unwrap();
-        assert!(matches!(&reply.messages[0].parts[0].kind,PartKind::Text(text) if text == "OK"));
+        assert_eq!(expired.status, 422);
+        expired.body();
+        assert!(requests.try_recv().is_err());
     }
+    // 只破坏本次创建的隔离测试表，模拟 Provider 已生成调用后的存储故障。
+    let mut admin = toasty::Db::builder().connect(&database.url).await.unwrap();
+    toasty::sql::statement("DROP TABLE tool_continuations")
+        .exec(&mut admin)
+        .await
+        .unwrap();
+    let source = Protocol::OpenAiChat;
+    let alias = alias(source, Protocol::Gemini);
+    let failed = gateway.request(
+        "POST",
+        &path(source, &alias),
+        "Content-Type: application/json\r\n",
+        &serde_json::to_vec(&fixtures::tool_request(source, &alias)).unwrap(),
+    );
+    assert_eq!(failed.status, 503);
+    let body = String::from_utf8(failed.body()).unwrap();
+    assert!(!body.contains("call_lp_"));
+    assert!(!body.contains("private-gemini-signature"));
+    requests.recv_timeout(DEADLINE).unwrap();
     assert!(!gateway.logs().contains("private-gemini-signature"));
+    assert!(!replica.logs().contains("private-gemini-signature"));
 }
 
 #[tokio::test]

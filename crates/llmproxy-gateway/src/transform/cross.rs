@@ -2,8 +2,10 @@
 
 use bytes::Bytes;
 use llmproxy_core::{
-    adapter::protocol_codec::{ProtocolCodec, RequestTarget, ResponseTarget},
-    protocol::Protocol,
+    adapter::protocol_codec::{
+        Conversion, ConversionWarning, ProtocolCodec, RequestTarget, ResponseTarget,
+    },
+    protocol::{Protocol, Request},
 };
 use pingora::{Error, ErrorType, Result};
 
@@ -38,15 +40,7 @@ pub(super) fn convert(
                 target,
                 model,
             } => {
-                let body = codec::decode_request(*source, &bytes)?;
-                let request = source.decode_request(&body)?;
-                let mut converted = target.encode_request_for(
-                    &request,
-                    &RequestTarget {
-                        model,
-                        max_output_tokens: None,
-                    },
-                )?;
+                let mut converted = request(&bytes, *source, *target, model)?;
                 if let Some(state) = tool_state {
                     state.restore(&mut converted.body)?;
                 }
@@ -86,9 +80,7 @@ pub(super) fn convert(
                 (bytes, converted.warnings)
             }
         };
-        for warning in warnings {
-            tracing::warn!(component="gateway",event_kind="conversion",source=warning.source.as_str(),target=warning.target.as_str(),path=%warning.path,reason=%warning.reason,"protocol conversion dropped or weakened semantics");
-        }
+        warn(warnings);
         Ok(Bytes::from(bytes))
     })();
     result.map_err(|_| {
@@ -103,4 +95,64 @@ pub(super) fn convert(
             "protocol conversion failed",
         )
     })
+}
+
+/// 请求 struct → IR → 目标 struct 后才恢复签名，数据库操作早于正文发送。
+pub(super) async fn convert_request(
+    bytes: Bytes,
+    conversion: &CrossConversion,
+    tool_state: Option<&crate::tool_state::Context>,
+) -> Result<Bytes> {
+    let CrossConversion::Request {
+        source,
+        target,
+        model,
+    } = conversion
+    else {
+        unreachable!()
+    };
+    let mut converted = request(&bytes, *source, *target, model).map_err(request_error)?;
+    if let Some(state) = tool_state {
+        state.restore_persisted(&mut converted.body).await?;
+    }
+    let bytes =
+        codec::encode_request(&converted.body).map_err(|error| request_error(error.into()))?;
+    warn(converted.warnings);
+    Ok(bytes.into())
+}
+
+/// JSON 仅在 HTTP 边界解码；目标构造不读取来源 JSON 或来源副本。
+fn request(
+    bytes: &[u8],
+    source: Protocol,
+    target: Protocol,
+    model: &str,
+) -> std::result::Result<Conversion<Request>, llmproxy_core::adapter::Error> {
+    let body = codec::decode_request(source, bytes)?;
+    let request = source.decode_request(&body)?;
+    target.encode_request_for(
+        &request,
+        &RequestTarget {
+            model,
+            max_output_tokens: None,
+        },
+    )
+}
+
+/// 转换错误与存储错误分开处理，拒绝时不输出原始正文。
+fn request_error(_: llmproxy_core::adapter::Error) -> Box<Error> {
+    tracing::warn!(
+        component = "gateway",
+        event_kind = "conversion",
+        phase = "request",
+        "protocol conversion failed"
+    );
+    Error::explain(ErrorType::HTTPStatus(422), "protocol conversion failed")
+}
+
+/// 两种执行阶段使用一致的字段级诊断，不记录被丢弃字段的内容。
+fn warn(warnings: Vec<ConversionWarning>) {
+    for warning in warnings {
+        tracing::warn!(component="gateway",event_kind="conversion",source=warning.source.as_str(),target=warning.target.as_str(),path=%warning.path,reason=%warning.reason,"protocol conversion dropped or weakened semantics");
+    }
 }

@@ -58,12 +58,16 @@ pub struct RequestContext {
 }
 
 impl Gateway {
-    pub fn new(providers: ProviderSnapshots, console: llmproxy_console::Console) -> Self {
+    pub fn new(
+        providers: ProviderSnapshots,
+        console: llmproxy_console::Console,
+        store: llmproxy_store::ProviderStore,
+    ) -> Self {
         Self {
             providers,
             telemetry: GatewayTelemetry::new(),
             console,
-            tool_states: Arc::new(crate::tool_state::Cache::default()),
+            tool_states: Arc::new(crate::tool_state::Cache::database(store)),
         }
     }
 
@@ -447,7 +451,8 @@ impl ProxyHttp for Gateway {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         ctx.telemetry
-            .in_scope(|| ctx.request_body.push(body, end_of_stream))
+            .instrument(ctx.request_body.push(body, end_of_stream))
+            .await
     }
 
     async fn upstream_response_filter(

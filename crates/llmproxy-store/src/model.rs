@@ -141,6 +141,18 @@ pub(crate) struct StoreKey {
     pub encrypted_verifier: String,
 }
 
+/// 工具续接状态只保存密文，原始调用参数和签名不暴露给控制台。
+#[derive(toasty::Model)]
+#[table = "tool_continuations"]
+pub(crate) struct ToolContinuationRow {
+    #[key]
+    pub id: String,
+    pub scope: String,
+    pub encrypted_payload: String,
+    pub payload_bytes: i64,
+    pub expires_at: i64,
+}
+
 pub(crate) fn protocol(value: &str) -> StoreResult<Protocol> {
     match value {
         "openai_chat" => Ok(Protocol::OpenAiChat),

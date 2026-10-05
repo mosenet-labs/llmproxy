@@ -143,7 +143,7 @@ impl RequestBody {
     }
 
     /// 将路由阶段预读的前缀回放到正文过滤器，再处理当前分块。
-    pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
+    pub async fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
         if let Some(rewritten) = self.replay_prefix.take() {
             // 路由阶段读取的前缀在此回放，再与后续正文交给同一个缓冲状态。
             if body.as_ref().map(Bytes::len) != Some(self.original_prefix_len) {
@@ -154,6 +154,6 @@ impl RequestBody {
             }
             *body = Some(rewritten);
         }
-        self.body.push(body, end)
+        self.body.push_request(body, end).await
     }
 }

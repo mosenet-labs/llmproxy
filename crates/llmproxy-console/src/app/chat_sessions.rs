@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use topcoat_ant_design::{ChatBubbleRole, ChatMessage, ChatMessageStatus};
 
 use crate::chat_stream::ChatReply;
@@ -36,6 +36,7 @@ pub(crate) struct ChatSession {
     created: Instant,
     state: Mutex<ChatState>,
     changed: broadcast::Sender<()>,
+    cancelled: watch::Sender<bool>,
 }
 
 impl ChatSession {
@@ -47,6 +48,7 @@ impl ChatSession {
             created: Instant::now(),
             state: Mutex::new(ChatState::default()),
             changed: broadcast::channel(32).0,
+            cancelled: watch::channel(false).0,
         }
     }
 
@@ -64,6 +66,21 @@ impl ChatSession {
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<()> {
         self.changed.subscribe()
+    }
+
+    /// 保存停止标记，停止早于 HTTP 请求开始时也能被发送过程观察到。
+    pub(crate) fn cancellation(&self) -> watch::Receiver<bool> {
+        self.cancelled.subscribe()
+    }
+
+    /// 通知当前请求停止；发送过程释放 HTTP future 后统一结束这一轮。
+    pub(crate) fn stop(&self) -> bool {
+        let state = self.state.lock().expect("chat state mutex");
+        if !state.busy {
+            return false;
+        }
+        self.cancelled.send_replace(true);
+        true
     }
 
     pub(crate) fn snapshot(&self) -> (Vec<ChatMessage>, HashMap<String, String>, bool) {
@@ -95,6 +112,7 @@ impl ChatSession {
         }
         state.busy = true;
         state.request_started = false;
+        self.cancelled.send_replace(false);
         state.next_id += 1;
         let user_id = state.next_id.to_string();
         state.messages.push(ChatMessage::new(
@@ -143,6 +161,12 @@ impl ChatSession {
 
     pub(crate) fn finish(&self, result: std::result::Result<ChatReply, String>) {
         let mut state = self.state.lock().expect("chat state mutex");
+        let stopped = *self.cancelled.borrow();
+        let result = if stopped {
+            Err("已停止生成".to_owned())
+        } else {
+            result
+        };
         if let Some(message) = state.messages.last_mut() {
             match result {
                 Ok(reply) => {
@@ -160,7 +184,11 @@ impl ChatSession {
                 }
                 Err(error) => {
                     message.content = error;
-                    message.status = ChatMessageStatus::Failed;
+                    message.status = if stopped {
+                        ChatMessageStatus::Cancelled
+                    } else {
+                        ChatMessageStatus::Failed
+                    };
                 }
             }
         }
@@ -307,6 +335,30 @@ mod tests {
         assert_eq!(sessions.list(&first, &third).len(), 2);
         let other_page = sessions.create(None, "3", "anthropic_messages").unwrap();
         assert_eq!(sessions.list(&other_page, &other_page).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_before_request_is_remembered_and_next_turn_resets_it() {
+        let sessions = ChatSessions::default();
+        let id = sessions.create(None, "1", "openai_chat").unwrap();
+        let room = sessions.get(&id).unwrap();
+        assert!(!room.stop());
+        assert!(room.begin("first"));
+        assert!(room.stop());
+        assert!(room.start_request().is_some());
+        let mut cancellation = room.cancellation();
+        assert!(*cancellation.wait_for(|stopped| *stopped).await.unwrap());
+        assert!(!room.begin("too early"));
+        room.finish(Err("已停止生成".into()));
+        assert_eq!(room.snapshot().0[1].status, ChatMessageStatus::Cancelled);
+        assert!(!room.snapshot().2);
+        assert!(room.usage_snapshot().is_empty());
+        assert!(!room.stop());
+        assert!(room.begin("second"));
+        assert!(!*cancellation.borrow());
+        assert!(room.start_request().is_some());
+        assert!(room.stop());
+        assert!(*cancellation.wait_for(|stopped| *stopped).await.unwrap());
     }
 }
 

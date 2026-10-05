@@ -1,4 +1,6 @@
 //! 独立书写四协议线缆夹具，避免用被测转换器生成其自身的测试输入。
+#![allow(dead_code)] // 各验收二进制仅使用一部分公共夹具，未使用的部分仍由其他套件覆盖。
+
 use llmproxy_core::{
     adapter::protocol_codec::{ProtocolCodec, RequestTarget},
     ir,
@@ -22,6 +24,126 @@ pub fn request(protocol: Protocol, model: &str, prompt: &str) -> Value {
             json!({"contents":[{"role":"user","parts":[{"text":prompt}]}],"generationConfig":{"maxOutputTokens":128}})
         }
     }
+}
+
+/// 以简单但有效的 Schema 检查约束通过 IR 后仍进入目标协议字段。
+/// 参考：https://developers.openai.com/api/docs/guides/structured-outputs
+/// 参考：https://ai.google.dev/gemini-api/docs/generate-content/structured-output
+pub fn structured_request(protocol: Protocol, model: &str) -> Value {
+    let mut body = request(
+        protocol,
+        model,
+        "Return a JSON object with answer set to OK. No other fields.",
+    );
+    let schema = json!({"type":"object","properties":{"answer":{"type":"string","enum":["OK"]}},"required":["answer"],"additionalProperties":false});
+    match protocol {
+        Protocol::OpenAiChat => {
+            body["response_format"] = json!({"type":"json_schema","json_schema":{"name":"answer","schema":schema,"strict":true}})
+        }
+        Protocol::OpenAiResponses => {
+            body["text"] = json!({"format":{"type":"json_schema","name":"answer","schema":schema,"strict":true}})
+        }
+        Protocol::AnthropicMessages => {
+            body["output_config"] = json!({"format":{"type":"json_schema","schema":schema}})
+        }
+        Protocol::Gemini => {
+            body["generationConfig"]["responseMimeType"] = json!("application/json");
+            body["generationConfig"]["responseJsonSchema"] = schema;
+        }
+    }
+    body
+}
+
+/// 合成的公开测试样本，无用户文件；HTTP 与真实模型验收共用。
+#[derive(Clone, Copy, Debug)]
+pub enum MediaCase {
+    Image,
+    Pdf,
+    Audio,
+    Video,
+}
+
+impl MediaCase {
+    /// 只枚举来源协议有原生载体的输入，避免伪造并不存在的协议能力。
+    pub fn supported(self, protocol: Protocol) -> bool {
+        match self {
+            Self::Image | Self::Pdf => true,
+            Self::Audio => matches!(protocol, Protocol::OpenAiChat | Protocol::Gemini),
+            Self::Video => protocol == Protocol::Gemini,
+        }
+    }
+}
+
+/// 图片为纯蓝色 PNG，PDF 写有 HELLO，音频朗读 Hello，视频为纯蓝色画面。
+/// 参考：https://developers.openai.com/api/docs/guides/file-inputs
+/// 参考：https://developers.openai.com/api/docs/guides/audio-chat-completions
+/// 参考：https://ai.google.dev/gemini-api/docs/generate-content/audio
+pub fn media_request(protocol: Protocol, model: &str, case: MediaCase) -> Value {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    assert!(case.supported(protocol));
+    let (mime, bytes, prompt): (&str, &[u8], &str) = match case {
+        MediaCase::Image => (
+            "image/png",
+            include_bytes!("assets/blue.png"),
+            "What is the dominant color of this image? Reply with one color name.",
+        ),
+        MediaCase::Pdf => (
+            "application/pdf",
+            include_bytes!("assets/hello.pdf"),
+            "Read the word printed in this PDF. Reply with that word only.",
+        ),
+        MediaCase::Audio => (
+            "audio/wav",
+            include_bytes!("assets/hello.wav"),
+            "Transcribe the single word spoken in this audio. Reply with that word only.",
+        ),
+        MediaCase::Video => (
+            "video/mp4",
+            include_bytes!("assets/blue.mp4"),
+            "What is the dominant color of this video? Reply with one color name.",
+        ),
+    };
+    let data = STANDARD.encode(bytes);
+    let url = format!("data:{mime};base64,{data}");
+    let mut body = request(protocol, model, prompt);
+    match protocol {
+        Protocol::OpenAiChat => {
+            let media = match case {
+                MediaCase::Image => json!({"type":"image_url","image_url":{"url":url}}),
+                MediaCase::Pdf => {
+                    json!({"type":"file","file":{"file_data":url,"filename":"hello.pdf"}})
+                }
+                MediaCase::Audio => {
+                    json!({"type":"input_audio","input_audio":{"data":data,"format":"wav"}})
+                }
+                MediaCase::Video => unreachable!(),
+            };
+            body["messages"][0]["content"] = json!([{"type":"text","text":prompt},media]);
+        }
+        Protocol::OpenAiResponses => {
+            let media = match case {
+                MediaCase::Image => json!({"type":"input_image","image_url":url}),
+                MediaCase::Pdf => {
+                    json!({"type":"input_file","file_data":url,"filename":"hello.pdf"})
+                }
+                _ => unreachable!(),
+            };
+            body["input"][0]["content"] = json!([{"type":"input_text","text":prompt},media]);
+        }
+        Protocol::AnthropicMessages => {
+            let kind = if matches!(case, MediaCase::Image) {
+                "image"
+            } else {
+                "document"
+            };
+            body["messages"][0]["content"] = json!([{"type":"text","text":prompt},{"type":kind,"source":{"type":"base64","media_type":mime,"data":data}}]);
+        }
+        Protocol::Gemini => {
+            body["contents"][0]["parts"] =
+                json!([{"text":prompt},{"inlineData":{"mimeType":mime,"data":data}}])
+        }
+    }
+    body
 }
 
 /// 将模型输出作为下一轮历史，加入对应的客户端工具结果；仍经协议 struct 和 IR 编码。
@@ -83,7 +205,11 @@ pub fn tool_result_request(
 
 /// 四种客户端协议分别声明并强制调用同一函数，验证真实工具入口和参数转换。
 pub fn tool_request(protocol: Protocol, model: &str) -> Value {
-    let mut body = request(protocol, model, "Call lookup with q set to test.");
+    let mut body = request(
+        protocol,
+        model,
+        "Call lookup with q set to test. After receiving its result, reply with exactly OK.",
+    );
     let schema = json!({"type":"object","properties":{"q":{"type":"string"}},"required":["q"]});
     match protocol {
         Protocol::OpenAiChat => {

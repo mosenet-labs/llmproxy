@@ -1,4 +1,4 @@
-//! Gemini 工具回合的短期状态；只在 HTTP 接入层保存和恢复 Provider 片段。
+//! Gemini 工具回合状态；HTTP 接入层通过共享数据库保存和恢复 Provider 片段。
 //! 参考：https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
 
 mod cache;
@@ -51,9 +51,48 @@ impl Context {
             digest.update(value);
         }
         Self {
-            cache,
+            cache: cache.for_request(),
             scope: digest.finalize().into(),
         }
+    }
+
+    /// 类型化目标请求已构造完成后读取签名，全部验证成功才续期并发往 Provider。
+    pub async fn restore_persisted(&self, request: &mut Request) -> pingora::Result<()> {
+        let Request::Gemini(body) = request else {
+            return Ok(());
+        };
+        let ids: std::collections::HashSet<_> = body
+            .contents
+            .iter()
+            .flat_map(|message| &message.parts)
+            .flat_map(|part| {
+                [
+                    part.function_call
+                        .as_option()
+                        .and_then(|call| call.id.as_option()),
+                    part.function_response
+                        .as_option()
+                        .and_then(|result| result.id.as_option()),
+                ]
+            })
+            .flatten()
+            .filter(|id| id.starts_with(PREFIX))
+            .cloned()
+            .collect();
+        let ids: Vec<_> = ids.into_iter().collect();
+        database(self.cache.load(&ids, &self.scope), false).await?;
+        self.restore(request).map_err(|_| {
+            pingora::Error::explain(
+                pingora::ErrorType::HTTPStatus(422),
+                "invalid tool continuation",
+            )
+        })?;
+        database(self.cache.persist_touches(&self.scope), false).await
+    }
+
+    /// 响应转换结束后由父请求调用，保存完成前不发送客户端响应头。
+    pub async fn persist_response(&self) -> pingora::Result<()> {
+        database(self.cache.persist_created(), true).await
     }
 
     /// 把带签名调用投影成客户端引用；返回待提交状态，编码失败不占用缓存。
@@ -222,6 +261,26 @@ impl Context {
         self.cache.touch(restored.into_keys());
         Ok(())
     }
+}
+
+/// 数据库不可用与无效续接分别返回 503、422；容量不足在响应提交前返回 502。
+async fn database<T>(
+    operation: impl std::future::Future<Output = llmproxy_store::StoreResult<T>>,
+    response: bool,
+) -> pingora::Result<T> {
+    let (status, reason) =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), operation).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(llmproxy_store::StoreError::NotFound)) => (422, "missing_or_expired"),
+            Ok(Err(llmproxy_store::StoreError::Conflict(_))) if response => (502, "capacity"),
+            Ok(Err(_)) => (503, "storage"),
+            Err(_) => (504, "storage_timeout"),
+        };
+    let _ = failure(reason);
+    Err(pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(status),
+        "tool continuation state unavailable",
+    ))
 }
 
 /// 响应已完整编码后才发布引用；容量检查与提交位于同一个锁内。

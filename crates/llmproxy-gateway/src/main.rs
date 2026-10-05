@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         tracing::info!(component = "gateway", event_kind = "runtime", path = %path.display(), "sqlite database selected");
     }
 
-    let (providers, _refresh) = ProviderSnapshots::database(&settings.database)?;
+    let (providers, _refresh, store) = ProviderSnapshots::database(&settings.database)?;
     let _console_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -33,7 +33,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let mut server = Server::new(None)?;
     server.bootstrap();
-    let mut service = http_proxy_service(&server.configuration, Gateway::new(providers, console));
+    let mut service = http_proxy_service(
+        &server.configuration,
+        Gateway::new(providers, console, store),
+    );
     let listen = settings.listen.to_string();
     service.add_tcp(&listen);
     observability::listening(&listen);

@@ -76,12 +76,17 @@ pub(crate) fn encode(media: &Media, target: Protocol) -> Result<Raw> {
                 }
             }
             K::File => {
-                let S::Base64 { data, mime_type } = &media.source else {
+                let S::Base64 { mime_type, .. } = &media.source else {
                     return Err(error("Chat 文件需要内联数据或同 Provider 文件 ID"));
                 };
+                // Chat 内联文件入口只接受 PDF，并要求带 MIME 的 Data URL。
+                // 参考：https://developers.openai.com/api/docs/guides/file-inputs
+                if mime_type.as_deref() != Some("application/pdf") {
+                    return Err(error("Chat 文件输入只支持 PDF"));
+                }
                 c::UserPart::File {
                     file: c::FileInput {
-                        file_data: Some(data.clone()),
+                        file_data: Some(as_url(&media.source)?),
                         file_id: None,
                         filename: media.name.clone().or_else(|| {
                             (mime_type.as_deref() == Some("application/pdf"))

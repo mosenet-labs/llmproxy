@@ -21,6 +21,13 @@ pub use pricing::{
 };
 pub use store::ProviderStore;
 
+/// Gateway 内部使用的工具续接记录；载荷含签名，不实现 Debug 或 Serialize。
+pub struct ToolContinuation {
+    pub id: String,
+    pub scope: String,
+    pub payload: String,
+}
+
 pub type StoreResult<T> = Result<T, StoreError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

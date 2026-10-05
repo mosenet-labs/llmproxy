@@ -15,7 +15,7 @@ use crate::{
     database::Backend,
     model::{
         HolidayDateRow, ModelMapping, ModelPricePlan, ModelPriceRule, ModelRouteRow,
-        ModelRouteTargetRow, Provider, RouteBinding, StoreKey, protocol,
+        ModelRouteTargetRow, Provider, RouteBinding, StoreKey, ToolContinuationRow, protocol,
     },
     pricing::decimal_price,
 };
@@ -26,6 +26,7 @@ mod models;
 mod pricing;
 mod providers;
 mod routes;
+mod tool_continuations;
 
 use migrations::{MIGRATIONS, SQLITE_MIGRATIONS};
 use pricing::backfill_legacy_prices;
@@ -58,7 +59,8 @@ impl ProviderStore {
                 ModelRouteTargetRow,
                 ModelPricePlan,
                 ModelPriceRule,
-                HolidayDateRow
+                HolidayDateRow,
+                ToolContinuationRow
             ))
             .max_pool_size(10)
             .pool_wait_timeout(Some(Duration::from_secs(10)))

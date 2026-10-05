@@ -97,6 +97,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
     }
     assert!(store.list().await.unwrap().is_empty());
     assert!(store.load_active().await.unwrap().is_empty());
+    exercise_tool_continuations(&store, url, &key).await;
 
     // An empty migrated database is already bound to its first master key.
     let wrong_key = ProviderStore::connect(url, &STANDARD.encode([8; 32]))
@@ -519,4 +520,53 @@ async fn exercise_store(url: &str, sqlite: bool) {
         reopened.get(messages.id).await.unwrap().messages_auth,
         MessagesAuth::Bearer
     );
+}
+
+/// SQLite 和独立 PG schema 共用验收：跨连接、作用域、并发保存和错误主密钥。
+async fn exercise_tool_continuations(store: &ProviderStore, url: &str, key: &str) {
+    use llmproxy_store::ToolContinuation;
+    let scope = "a".repeat(64);
+    let make = |id: &str| ToolContinuation {
+        id: id.into(),
+        scope: scope.clone(),
+        payload: "private-signature-and-args".into(),
+    };
+    let first = [make("call_test_a")];
+    let second = [make("call_test_b")];
+    let (a, b) = tokio::join!(
+        store.save_tool_continuations(&first),
+        store.save_tool_continuations(&second)
+    );
+    a.unwrap();
+    b.unwrap();
+    let ids = vec!["call_test_a".into(), "call_test_b".into()];
+    let peer = ProviderStore::connect(url, key).await.unwrap();
+    let loaded = peer.load_tool_continuations(&ids, &scope).await.unwrap();
+    assert!(
+        loaded
+            .iter()
+            .all(|record| record.payload == "private-signature-and-args")
+    );
+    assert!(matches!(
+        peer.load_tool_continuations(&ids, &"b".repeat(64)).await,
+        Err(StoreError::NotFound)
+    ));
+    peer.touch_tool_continuations(&ids, &scope).await.unwrap();
+    let wrong_key = ProviderStore::connect(url, &STANDARD.encode([8; 32]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        wrong_key.load_tool_continuations(&ids, &scope).await,
+        Err(StoreError::Configuration(_))
+    ));
+    assert!(matches!(
+        wrong_key.touch_tool_continuations(&ids, &scope).await,
+        Err(StoreError::Configuration(_))
+    ));
+    assert!(matches!(
+        wrong_key
+            .save_tool_continuations(&[make("call_wrong_key")])
+            .await,
+        Err(StoreError::Configuration(_))
+    ));
 }

@@ -121,6 +121,13 @@ pub(super) async fn forward(
         return Err(error);
     }
     let (mut header, body) = captured?;
+    // 新工具引用必须先持久化，再提交真实响应头；断开时一起取消存储 future。
+    tokio::select! {
+        persisted = ctx.telemetry.instrument(ctx.response_body.persist_tool_state()) => persisted?,
+        closed = session.read_body_or_idle(true) => return Err(closed.err().unwrap_or_else(|| {
+            Error::explain(ErrorType::ConnectionClosed, "client closed during tool state commit")
+        }).into_down()),
+    }
     header.remove_header("transfer-encoding");
     header.remove_header("content-length");
     header.remove_header("etag");

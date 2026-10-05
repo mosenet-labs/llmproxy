@@ -112,16 +112,46 @@ impl BodyTransform {
 
     /// 缓冲 JSON 到正文结束，或逐个放行完整 SSE 事件；超限后原样透传。
     pub fn push(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
+        if let Some(complete) = self.collect(body, end)? {
+            *body = Some(self.process(complete)?);
+        }
+        Ok(())
+    }
+
+    /// 请求正文完成后异步恢复工具状态，类型化请求只解析和转换一次。
+    pub async fn push_request(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<()> {
+        if let Some(complete) = self.collect(body, end)? {
+            *body = Some(
+                if let Some(cross @ CrossConversion::Request { .. }) = &self.cross {
+                    cross::convert_request(complete, cross, self.tool_state.as_ref()).await?
+                } else {
+                    self.process(complete)?
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// 编码后的新工具引用先写入共享存储，父请求随后才提交客户端响应。
+    pub async fn persist_tool_state(&self) -> Result<()> {
+        if let Some(state) = &self.tool_state {
+            state.persist_response().await?;
+        }
+        Ok(())
+    }
+
+    /// 只管理正文边界，返回完整载荷；协议转换及数据库 I/O 由调用阶段负责。
+    fn collect(&mut self, body: &mut Option<Bytes>, end: bool) -> Result<Option<Bytes>> {
         if let Some((protocol, status)) = self.cross_error {
             *body = Some(if end {
                 error::body(protocol, status)
             } else {
                 Bytes::new()
             });
-            return Ok(());
+            return Ok(None);
         }
         if matches!(self.kind, BodyKind::Passthrough) {
-            return Ok(());
+            return Ok(None);
         }
         let chunk = body.take().unwrap_or_default();
         if self.pending.len().saturating_add(chunk.len()) > MAX_BUFFERED_BODY {
@@ -140,7 +170,7 @@ impl BodyTransform {
             self.kind = BodyKind::Passthrough;
             self.pending.extend_from_slice(&chunk);
             *body = Some(Bytes::from(std::mem::take(&mut self.pending)));
-            return Ok(());
+            return Ok(None);
         }
         self.pending.extend_from_slice(&chunk);
         let ready = match self.kind {
@@ -151,13 +181,18 @@ impl BodyTransform {
         let Some(ready) = ready else {
             // Pingora 的请求路径可能将 None 视为正文结束；空 Bytes 表示当前暂无输出。
             *body = Some(Bytes::new());
-            return Ok(());
+            return Ok(None);
         };
         // 发出完整事件，留下后续尚未完整的 SSE 事件。
         let remaining = self.pending.split_off(ready);
         let complete = std::mem::replace(&mut self.pending, remaining);
         let complete = Bytes::from(complete);
-        *body = Some(match self.kind {
+        Ok(Some(complete))
+    }
+
+    /// 同步响应转换只暂存新引用，持久化留给尚未发头的父请求。
+    fn process(&self, complete: Bytes) -> Result<Bytes> {
+        Ok(match self.kind {
             BodyKind::Json => {
                 if let Some(cross) = &self.cross {
                     cross::convert(complete, cross, self.tool_state.as_ref())?
@@ -170,8 +205,7 @@ impl BodyTransform {
                 complete
             }
             BodyKind::Passthrough => unreachable!(),
-        });
-        Ok(())
+        })
     }
 }
 

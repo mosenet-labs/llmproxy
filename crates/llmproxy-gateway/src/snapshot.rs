@@ -157,7 +157,9 @@ impl ProviderSnapshots {
             .unwrap_or_else(|error| error.into_inner()) = snapshot;
     }
 
-    pub fn database(config: &DatabaseConfig) -> Result<(Self, DatabaseRefresh), &'static str> {
+    pub fn database(
+        config: &DatabaseConfig,
+    ) -> Result<(Self, DatabaseRefresh, ProviderStore), &'static str> {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
@@ -192,6 +194,7 @@ impl ProviderSnapshots {
         })?;
         let snapshots = Self::new(initial);
         let background = snapshots.clone();
+        let gateway_store = store.clone();
         let (stop, mut stopping) = oneshot::channel();
         let thread = thread::Builder::new()
             .name("provider-snapshot-refresh".to_owned())
@@ -244,6 +247,7 @@ impl ProviderSnapshots {
                 stop: Some(stop),
                 thread: Some(thread),
             },
+            gateway_store,
         ))
     }
 }

@@ -230,6 +230,23 @@ async fn exercise_http(database_url: &str) {
         .unwrap();
     let csrf = hidden(&editor, "csrf");
     assert_eq!(csrf.len(), 64);
+    // 停止生成必须注册为实际 HTTP procedure，且仍受 CSRF 校验保护。
+    for (token, status) in [
+        ("invalid", StatusCode::FORBIDDEN),
+        (csrf.as_str(), StatusCode::OK),
+    ] {
+        let response = client
+            .post(format!("{base}/_topcoat/runtime/procedures/stop-chat"))
+            .header("content-type", "application/json")
+            .json(&serde_json::json!([token, "missing-session"]))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        if status == StatusCode::OK {
+            assert_eq!(response.json::<serde_json::Value>().await.unwrap(), false);
+        }
+    }
     assert!(editor.contains("type=\"password\""));
     assert!(editor.contains("name=\"upstream_url\""));
     for field in ["host", "port", "tls"] {
