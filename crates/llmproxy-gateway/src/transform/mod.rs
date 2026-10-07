@@ -5,6 +5,7 @@ use llmproxy_core::protocol::wire as codec;
 mod cross;
 mod error;
 pub use error::respond as respond_error;
+pub use error::respond_message as respond_error_message;
 mod model;
 mod request;
 #[cfg(test)]

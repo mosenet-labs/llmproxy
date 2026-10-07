@@ -87,20 +87,6 @@ impl Reply {
     }
     /// 将类型化事件投影到页面的有序内容；签名和私有资源不进入展示数据。
     fn raw(&mut self, raw: &stream::Event) -> Result<(), String> {
-        // 保留现有 Chat 兼容接口的可见推理扩展；开放叶子不经过整包 Value。
-        if let stream::Event::Chat(chunk) = raw {
-            for choice in &chunk.choices {
-                if choice.index == 0
-                    && let Some(text) = choice
-                        .delta
-                        .extra
-                        .get("reasoning_content")
-                        .and_then(serde_json::Value::as_str)
-                {
-                    self.reply.thinking.push_str(text);
-                }
-            }
-        }
         for event in self
             .decoder
             .push(raw)

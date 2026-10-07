@@ -250,3 +250,26 @@ mod usage_tests {
         assert!(!format!("{:?}", room.start_request().unwrap()).contains("private-argument"));
     }
 }
+
+#[test]
+fn thinking_choice_is_frozen_per_turn_and_survives_model_switch() {
+    use super::*;
+    use llmproxy_core::thinking::Choice;
+    let room = ChatSession::new("s".into(), "m".into(), "openai_chat".into());
+    assert!(room.set_thinking(&room.selection(), Choice::Enabled));
+    assert!(room.begin("first"));
+    assert!(!room.set_thinking(&room.selection(), Choice::Disabled));
+    let first = room.start_request().unwrap();
+    assert_eq!(first.thinking, Choice::Enabled);
+    room.finish(Err("test".into()));
+    assert!(room.select(Selection {
+        model_id: "new".into(),
+        protocol: Protocol::Gemini
+    }));
+    assert_eq!(room.thinking_choice(), Choice::Enabled);
+    assert!(room.set_thinking(&room.selection(), Choice::Disabled));
+    assert!(room.begin("next"));
+    assert_eq!(room.start_request().unwrap().thinking, Choice::Disabled);
+    assert!(room.model_snapshot()["2"].contains("思考开启"));
+    assert!(room.model_snapshot()["4"].contains("思考关闭"));
+}

@@ -77,6 +77,66 @@ fn chat_delivers_text_before_finish_and_usage_after_candidate_end() {
 }
 
 #[test]
+fn chat_reasoning_extension_enters_ir_and_rejects_malformed_or_late_text() {
+    use crate::ir::stream::Head;
+    let protocol = Protocol::OpenAiChat;
+    let mut decoder = protocol.stream_decoder(Limits::default());
+    let events = push(
+        &mut decoder,
+        protocol,
+        chat(json!([
+            {"index":0,"delta":{"reasoning_content":"分析"}},
+            {"index":1,"delta":{"reasoning_content":"另一个候选"}}
+        ])),
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::PartStart {
+                    head: Head::Reasoning,
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::TextDelta { text, .. } if text == "分析"))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic { .. }))
+    );
+    push(
+        &mut decoder,
+        protocol,
+        chat(json!([{"index":0,"delta":{"content":"回答"},"finish_reason":"stop"}])),
+    );
+    assert!(
+        decoder
+            .push(&raw(
+                protocol,
+                chat(json!([{"index":0,"delta":{"reasoning_content":"晚到的思考"}}]))
+            ))
+            .is_err()
+    );
+    let mut decoder = protocol.stream_decoder(Limits::default());
+    assert!(
+        decoder
+            .push(&raw(
+                protocol,
+                chat(json!([{"index":0,"delta":{"reasoning_content":{"private":"invalid"}}}]))
+            ))
+            .is_err()
+    );
+}
+
+#[test]
 fn chat_tools_keep_interleaved_names_and_partial_arguments() {
     let protocol = Protocol::OpenAiChat;
     let mut decoder = protocol.stream_decoder(Limits::default());

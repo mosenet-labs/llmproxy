@@ -29,6 +29,7 @@ fn provider() -> ProviderInput {
 
 fn mapping(provider_id: i64, alias: &str, price: Option<ModelPrice>) -> ModelMappingInput {
     ModelMappingInput {
+        thinking: Default::default(),
         alias: alias.into(),
         provider_id,
         upstream_model_id: "deepseek-flash".into(),

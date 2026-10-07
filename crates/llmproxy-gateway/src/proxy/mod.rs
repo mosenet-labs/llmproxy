@@ -5,6 +5,7 @@ use route::SelectedRoute;
 #[cfg(test)]
 mod request_tests;
 mod streaming;
+mod thinking;
 
 use std::{
     sync::Arc,
@@ -39,6 +40,8 @@ pub struct Gateway {
 }
 
 pub struct RequestContext {
+    thinking: llmproxy_core::thinking::Choice,
+    thinking_error: Option<&'static str>,
     telemetry: RequestTelemetry,
     protocol: Option<Protocol>,
     // 未选路时只保留入口协议供错误响应使用；选路结果作为整体移交子请求。
@@ -67,14 +70,34 @@ impl Gateway {
         &self,
         protocol: Protocol,
         alias: &str,
-    ) -> std::result::Result<(Arc<ResolvedProvider>, String), u16> {
+    ) -> std::result::Result<
+        (
+            Arc<ResolvedProvider>,
+            String,
+            llmproxy_core::thinking::Config,
+        ),
+        u16,
+    > {
         let model = self.providers.select(protocol, alias).ok_or(404u16)?;
         let provider = model.provider.as_ref().ok_or(503u16)?.clone();
-        Ok((provider, model.upstream_model_id.clone()))
+        Ok((
+            provider,
+            model.upstream_model_id.clone(),
+            model.thinking.clone(),
+        ))
     }
 
     /// 统一准备路由、转换模式和工具作用域，Pingora 阶段只负责读取及选择。
-    fn prepare_route(&self, session: &Session, ctx: &mut RequestContext, route: SelectedRoute) {
+    fn prepare_route(
+        &self,
+        session: &Session,
+        ctx: &mut RequestContext,
+        route: SelectedRoute,
+    ) -> Result<()> {
+        if let Err(message) = route.thinking.check(ctx.thinking) {
+            ctx.thinking_error = Some(message);
+            return Err(Error::explain(ErrorType::HTTPStatus(422), message));
+        }
         if route.provider.protocol == Protocol::Gemini && route.is_cross_protocol() {
             let context = crate::tool_state::Context::new(
                 self.tool_states.clone(),
@@ -91,7 +114,7 @@ impl Gateway {
             ctx.request_body.set_tool_state(context.clone());
             ctx.response_body.set_tool_state(context);
         }
-        if route.is_cross_protocol() {
+        if route.is_cross_protocol() || ctx.thinking != llmproxy_core::thinking::Choice::Default {
             ctx.request_body.set_cross_protocol(
                 route.protocol,
                 route.provider.protocol,
@@ -99,6 +122,7 @@ impl Gateway {
             );
         }
         ctx.route = Some(route);
+        Ok(())
     }
 }
 
@@ -108,6 +132,8 @@ impl ProxyHttp for Gateway {
 
     fn new_ctx(&self) -> Self::CTX {
         RequestContext {
+            thinking: Default::default(),
+            thinking_error: None,
             telemetry: RequestTelemetry::new(),
             protocol: None,
             route: None,
@@ -137,24 +163,39 @@ impl ProxyHttp for Gateway {
         let path = request.uri.path();
         let route = match_route(method, path);
         ctx.telemetry.begin(method, path);
+        match thinking::choice(request) {
+            Ok(choice) => ctx.thinking = choice,
+            Err(message) => {
+                session.set_keepalive(None);
+                let protocol = match &route {
+                    Route::Proxy(protocol) => Some(*protocol),
+                    Route::Gemini { .. } => Some(Protocol::Gemini),
+                    _ => None,
+                };
+                ctx.protocol = protocol;
+                crate::transform::respond_error_message(session, protocol, 400, message).await?;
+                return Ok(true);
+            }
+        }
 
         match route {
             Route::Gemini { alias, stream } => {
                 let protocol = Protocol::Gemini;
                 ctx.protocol = Some(protocol);
                 ctx.request_body.set_protocol(protocol);
-                let (provider, upstream_model_id) = match self.resolve_model_route(protocol, &alias)
-                {
-                    Ok(route) => route,
-                    Err(status) => {
-                        ctx.telemetry.selected(protocol, None);
-                        crate::transform::respond_error(session, ctx.protocol, status).await?;
-                        return Ok(true);
-                    }
-                };
+                let (provider, upstream_model_id, thinking) =
+                    match self.resolve_model_route(protocol, &alias) {
+                        Ok(route) => route,
+                        Err(status) => {
+                            ctx.telemetry.selected(protocol, None);
+                            crate::transform::respond_error(session, ctx.protocol, status).await?;
+                            return Ok(true);
+                        }
+                    };
                 ctx.telemetry.selected(protocol, Some(provider.authority()));
                 let content_encoding = session.get_header_bytes("content-encoding");
-                if provider.protocol != protocol
+                if (provider.protocol != protocol
+                    || ctx.thinking != llmproxy_core::thinking::Choice::Default)
                     && !content_encoding.is_empty()
                     && !content_encoding.eq_ignore_ascii_case(b"identity")
                 {
@@ -164,8 +205,15 @@ impl ProxyHttp for Gateway {
                 self.prepare_route(
                     session,
                     ctx,
-                    SelectedRoute::new(protocol, alias, provider, upstream_model_id, stream),
-                );
+                    SelectedRoute::new(
+                        protocol,
+                        alias,
+                        provider,
+                        upstream_model_id,
+                        stream,
+                        thinking,
+                    ),
+                )?;
                 buffered::forward(self, session, ctx).await
             }
             Route::Proxy(protocol) => {
@@ -188,16 +236,16 @@ impl ProxyHttp for Gateway {
                         return Ok(true);
                     }
                 };
-                let (provider, upstream_model_id) = match self.resolve_model_route(protocol, &alias)
-                {
-                    Ok(route) => route,
-                    Err(status) => {
-                        ctx.telemetry.selected(protocol, None);
-                        session.set_keepalive(None);
-                        crate::transform::respond_error(session, ctx.protocol, status).await?;
-                        return Ok(true);
-                    }
-                };
+                let (provider, upstream_model_id, thinking) =
+                    match self.resolve_model_route(protocol, &alias) {
+                        Ok(route) => route,
+                        Err(status) => {
+                            ctx.telemetry.selected(protocol, None);
+                            session.set_keepalive(None);
+                            crate::transform::respond_error(session, ctx.protocol, status).await?;
+                            return Ok(true);
+                        }
+                    };
                 ctx.request_body
                     .select_model(&upstream_model_id)
                     .map_err(|_| {
@@ -207,8 +255,15 @@ impl ProxyHttp for Gateway {
                 self.prepare_route(
                     session,
                     ctx,
-                    SelectedRoute::new(protocol, alias, provider, upstream_model_id, false),
-                );
+                    SelectedRoute::new(
+                        protocol,
+                        alias,
+                        provider,
+                        upstream_model_id,
+                        false,
+                        thinking,
+                    ),
+                )?;
                 buffered::forward(self, session, ctx).await
             }
             Route::Auto => {
@@ -526,6 +581,19 @@ impl ProxyHttp for Gateway {
         }
 
         let code = error_status(error);
+        if let Some(message) = ctx.thinking_error {
+            // 拒绝后连接不复用，响应头必须与 FailToProxy 的关闭决定一致。
+            session.set_keepalive(None);
+            if let Err(write_error) =
+                crate::transform::respond_error_message(session, ctx.protocol, code, message).await
+            {
+                ctx.telemetry.error_response_failed(&write_error);
+            }
+            return FailToProxy {
+                error_code: code,
+                can_reuse_downstream: false,
+            };
+        }
         if code != 0
             && let Err(write_error) =
                 crate::transform::respond_error(session, ctx.protocol, code).await

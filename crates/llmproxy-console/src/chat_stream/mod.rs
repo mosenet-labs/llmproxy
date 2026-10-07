@@ -62,6 +62,8 @@ fn error_message(value: &Value) -> String {
         .to_owned()
 }
 
+// HTTP 边界分别接收当前轮历史、模式和更新回调。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn chat_reply(
     client: &Client,
     gateway_origin: &str,
@@ -69,6 +71,7 @@ pub(crate) async fn chat_reply(
     alias: &str,
     history: &Conversation,
     stream: bool,
+    thinking: llmproxy_core::thinking::Choice,
     mut on_update: impl FnMut(&ChatReply),
 ) -> Result<ChatReply, String> {
     let protocol = selection.protocol;
@@ -117,10 +120,13 @@ pub(crate) async fn chat_reply(
             "application/json"
         },
     );
-    let response = with_request_body(builder, &converted.body)
-        .send()
-        .await
-        .map_err(|error| format!("无法连接网关：{error}"))?;
+    let response = with_request_body(
+        builder.header(llmproxy_core::thinking::HEADER, thinking.as_str()),
+        &converted.body,
+    )
+    .send()
+    .await
+    .map_err(|error| format!("无法连接网关：{error}"))?;
     let status = response.status();
     if !status.is_success() {
         let content_type = response

@@ -70,6 +70,7 @@ impl Database {
         let mapping = self
             .store
             .create_model(ModelMappingInput {
+                thinking: Default::default(),
                 alias: format!("internal-{}", target.as_str()),
                 provider_id: record.id,
                 upstream_model_id: model.into(),

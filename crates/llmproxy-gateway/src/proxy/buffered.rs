@@ -61,14 +61,16 @@ pub(super) async fn forward(
         .as_ref()
         .expect("request_filter selected route")
         .is_cross_protocol()
+        && ctx.thinking == llmproxy_core::thinking::Choice::Default
     {
         return Ok(false);
     }
     let input = ctx.request_body.buffered_input(session).await?;
-    let request = ctx
+    let mut request = ctx
         .request_body
         .decode_cross_request(&input, ctx.route.as_ref().unwrap().stream)?;
     ctx.route.as_mut().unwrap().stream = request.generation.stream;
+    super::thinking::apply(ctx, &mut request)?;
     // 签名恢复可能等待持久化存储，准备期间也监视客户端断开并取消该 future。
     tokio::select! {
         prepared = ctx.telemetry.instrument(ctx.request_body.prepare_cross_request(&request)) => prepared?,
@@ -142,7 +144,7 @@ pub(super) async fn forward(
             ctx.telemetry.response_headers(status);
         }
         if let Err(error) = &outcome {
-            ctx.stream_error = Some(transfer.failure(super::error_status(error)));
+            ctx.stream_error = transfer.failure(super::error_status(error));
         }
         outcome?;
         return Ok(true);

@@ -13,6 +13,7 @@ static RESPONSE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(super) struct SelectedRoute {
+    pub thinking: llmproxy_core::thinking::Config,
     pub protocol: Protocol,
     pub client_model: String,
     pub provider: Arc<ResolvedProvider>,
@@ -35,6 +36,7 @@ impl SelectedRoute {
         provider: Arc<ResolvedProvider>,
         upstream_model: String,
         stream: bool,
+        thinking: llmproxy_core::thinking::Config,
     ) -> Self {
         let response = (protocol != provider.protocol).then(|| {
             let now = SystemTime::now()
@@ -47,6 +49,7 @@ impl SelectedRoute {
             }
         });
         Self {
+            thinking,
             protocol,
             client_model,
             provider,

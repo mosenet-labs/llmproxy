@@ -107,6 +107,7 @@ impl TestDatabase {
                     .map_err(|_| "create test provider")?;
                 store
                     .create_model(ModelMappingInput {
+                        thinking: Default::default(),
                         alias: ALIASES[index].into(),
                         provider_id: record.id,
                         upstream_model_id: "mock".into(),

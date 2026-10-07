@@ -54,6 +54,10 @@ impl Decoder {
                     || delta.role.as_option().is_some()
                     || delta.tool_calls.as_option().is_some()
                     || delta.function_call.as_option().is_some()
+                    || delta
+                        .extra
+                        .get("reasoning_content")
+                        .is_some_and(|value| !value.is_null())
                     || choice.finish_reason.as_option().is_some()
                     || !delta.audio.as_option().is_some_and(|audio| {
                         audio.expires_at.as_option().is_some()
@@ -97,6 +101,25 @@ impl Decoder {
                         part: 1,
                     },
                     Head::Refusal,
+                    text,
+                )?;
+            }
+            if let Some(value) = delta
+                .extra
+                .get("reasoning_content")
+                .filter(|value| !value.is_null())
+            {
+                // 兼容扩展统一进入 IR，Console 与跨协议转换使用相同解码结果。
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| Error::Invalid("Chat 思考增量必须是文本".into()))?;
+                context.text(
+                    Key {
+                        candidate: index,
+                        item: 0,
+                        part: 2,
+                    },
+                    Head::Reasoning,
                     text,
                 )?;
             }

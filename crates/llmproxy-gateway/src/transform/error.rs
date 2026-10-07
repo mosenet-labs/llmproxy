@@ -41,6 +41,11 @@ pub(super) fn body(protocol: Protocol, status: u16) -> Bytes {
         429 => "Provider rate limit exceeded",
         _ => "Provider request failed",
     };
+    body_message(protocol, status, message)
+}
+
+/// 自定义说明只接受代码内固定文本，不暴露上游错误或用户正文。
+fn body_message(protocol: Protocol, status: u16, message: &'static str) -> Bytes {
     let bytes = match protocol {
         Protocol::OpenAiChat | Protocol::OpenAiResponses => serde_json::to_vec(&Envelope {
             error: ChatError {
@@ -97,7 +102,24 @@ pub async fn respond(session: &mut Session, protocol: Option<Protocol>, status: 
     let Some(protocol) = protocol else {
         return session.respond_error(status).await;
     };
-    let body = body(protocol, status);
+    write(session, status, body(protocol, status)).await
+}
+
+/// 思考校验等本地拒绝仍使用对应客户端的错误外壳。
+pub async fn respond_message(
+    session: &mut Session,
+    protocol: Option<Protocol>,
+    status: u16,
+    message: &'static str,
+) -> Result<()> {
+    let Some(protocol) = protocol else {
+        return session.respond_error(status).await;
+    };
+    write(session, status, body_message(protocol, status, message)).await
+}
+
+/// 响应头与正文共用同一个安全写入入口。
+async fn write(session: &mut Session, status: u16, body: Bytes) -> Result<()> {
     let mut header = ResponseHeader::build(status, Some(3))?;
     header.insert_header("content-type", "application/json")?;
     header.insert_header("content-length", body.len().to_string())?;

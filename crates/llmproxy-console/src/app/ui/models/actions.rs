@@ -2,7 +2,11 @@ use super::*;
 
 #[derive(Deserialize)]
 struct ModelForm {
-    csrf: String,
+    thinking_support: String,
+    thinking_mode: String,
+    thinking_effort: String,
+    thinking_budget: String,
+
     id: Option<String>,
     version: Option<String>,
     alias: String,
@@ -94,6 +98,7 @@ pub async fn save_models(
                 protocols.push(Protocol::Gemini);
             }
             mappings.push(ModelMappingInput {
+                thinking: Default::default(),
                 alias: if model.alias.trim().is_empty() {
                     format!("{}/{}", provider.name, model.model_id)
                 } else {
@@ -119,36 +124,12 @@ pub async fn save_models(
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/save-model")]
-pub async fn save_model(
-    cx: &Cx,
-    csrf: String,
-    id: String,
-    version: String,
-    alias: String,
-    provider_id: String,
-    upstream_model_id: String,
-    chat: bool,
-    responses: bool,
-    messages: bool,
-    gemini: bool,
-    input_price_per_million: String,
-    output_price_per_million: String,
-) -> Result<Outcome> {
-    let input = ModelForm {
-        csrf,
-        id: (!id.is_empty()).then_some(id),
-        version: (!version.is_empty()).then_some(version),
-        alias,
-        provider_id,
-        upstream_model_id,
-        chat,
-        responses,
-        messages,
-        gemini,
-        input_price_per_million,
-        output_price_per_million,
-    };
-    check_csrf(cx, &input.csrf)?;
+pub async fn save_model(cx: &Cx, csrf: String, model_json: String) -> Result<Outcome> {
+    check_csrf(cx, &csrf)?;
+    let mut input: ModelForm = serde_json::from_str(&model_json)
+        .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?;
+    input.id = input.id.filter(|id| !id.is_empty());
+    input.version = input.version.filter(|v| !v.is_empty());
     let store = &app_context::<AppState>(cx).store;
     let result: std::result::Result<String, StoreError> = async {
         let provider_id = input
@@ -175,6 +156,12 @@ pub async fn save_model(
             input.alias.clone()
         };
         let candidate = ModelMappingInput {
+            thinking: thinking::parse(
+                &input.thinking_support,
+                &input.thinking_mode,
+                &input.thinking_effort,
+                &input.thinking_budget,
+            )?,
             alias,
             provider_id,
             upstream_model_id: input.upstream_model_id.clone(),

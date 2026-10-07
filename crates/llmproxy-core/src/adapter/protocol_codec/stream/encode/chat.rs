@@ -103,7 +103,7 @@ impl Encoder {
             Event::PartStart {
                 head: Head::Reasoning,
                 ..
-            } => context.warn("reasoning", "Chat 标准分片没有思考正文载体，已丢弃"),
+            } => context.warn("reasoning", "思考正文写入兼容扩展 reasoning_content"),
             Event::TextDelta { key, text } => {
                 let delta = match &context.part(*key)?.head {
                     Head::Text => Delta {
@@ -114,7 +114,13 @@ impl Encoder {
                         refusal: O::Value(text.clone()),
                         ..empty_delta()
                     },
-                    Head::Reasoning => return Ok(()),
+                    // 与非流式 Chat 使用相同兼容字段，逐段交付可见思考而不混入回答正文。
+                    Head::Reasoning => Delta {
+                        extra: [("reasoning_content".into(), text.clone().into())]
+                            .into_iter()
+                            .collect(),
+                        ..empty_delta()
+                    },
                     _ => return Err(Error::Invalid("Chat 文本增量的块类型错误".into())),
                 };
                 choice(context, key.candidate, delta, O::Null);

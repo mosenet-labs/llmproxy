@@ -20,11 +20,13 @@ const SESSION_IDLE_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// 请求选择与 IR 历史在同一次锁内取得，异步发送不再读取可变会话选择。
 #[derive(Clone, Debug)]
 pub(crate) struct TurnRequest {
+    pub thinking: llmproxy_core::thinking::Choice,
     pub selection: Selection,
     pub history: Conversation,
 }
 
 struct TurnInfo {
+    thinking: llmproxy_core::thinking::Choice,
     selection: Selection,
     alias: String,
     reported_model: Option<String>,
@@ -44,13 +46,14 @@ impl TurnInfo {
             Protocol::AnthropicMessages => "Messages",
             Protocol::Gemini => "Gemini",
         };
-        if model.is_empty() {
+        let label = if model.is_empty() {
             protocol.into()
         } else if self.alias.is_empty() || model == self.alias {
             format!("{model} · {protocol}")
         } else {
             format!("{} · {protocol} · 返回模型 {model}", self.alias)
-        }
+        };
+        format!("{label} · {}", self.thinking.label())
     }
 }
 
@@ -60,6 +63,7 @@ pub(crate) struct ChatSessions {
 }
 
 struct ChatState {
+    thinking_choice: llmproxy_core::thinking::Choice,
     selection: Selection,
     history: Conversation,
     turns: HashMap<String, TurnInfo>,
@@ -87,6 +91,7 @@ impl ChatSession {
             scope,
             created: Instant::now(),
             state: Mutex::new(ChatState {
+                thinking_choice: Default::default(),
                 selection: Selection {
                     model_id,
                     protocol: Protocol::parse(&protocol).expect("validated chat protocol"),
@@ -165,6 +170,27 @@ impl ChatSession {
         }
     }
 
+    /// 偏好只影响下一轮；生成期间服务端也拒绝修改。
+    pub(crate) fn set_thinking(
+        &self,
+        selection: &Selection,
+        choice: llmproxy_core::thinking::Choice,
+    ) -> bool {
+        let mut state = self.state.lock().expect("chat state mutex");
+        if state.busy || &state.selection != selection {
+            return false;
+        }
+        state.thinking_choice = choice;
+        drop(state);
+        let _ = self.changed.send(());
+        true
+    }
+
+    /// 会话切换时回显偏好，不从历史标签推断。
+    pub(crate) fn thinking_choice(&self) -> llmproxy_core::thinking::Choice {
+        self.state.lock().expect("chat state mutex").thinking_choice
+    }
+
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<()> {
         self.changed.subscribe()
     }
@@ -233,9 +259,11 @@ impl ChatSession {
         state
             .history
             .append(&selection, Content::text(Role::User, prompt));
+        let thinking = state.thinking_choice;
         state.turns.insert(
             assistant_id.clone(),
             TurnInfo {
+                thinking,
                 selection,
                 alias: String::new(),
                 reported_model: None,
@@ -260,6 +288,7 @@ impl ChatSession {
         }
         state.request_started = true;
         Some(TurnRequest {
+            thinking: state.thinking_choice,
             selection: state.selection.clone(),
             history: state.history.clone(),
         })

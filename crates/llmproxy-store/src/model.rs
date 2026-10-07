@@ -45,6 +45,8 @@ pub(crate) struct RouteBinding {
 #[derive(toasty::Model)]
 #[table = "model_mappings"]
 pub(crate) struct ModelMapping {
+    /// 类型化思考配置的序列化文本；空值兼容旧模型。
+    pub thinking_json: Option<String>,
     #[key]
     #[auto]
     pub id: i64,
@@ -200,6 +202,21 @@ impl Provider {
 }
 
 impl ModelMapping {
+    /// 配置损坏时拒绝读取，不能回退为可关闭。
+    pub fn thinking(&self) -> StoreResult<llmproxy_core::thinking::Config> {
+        let config: llmproxy_core::thinking::Config = self
+            .thinking_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| StoreError::Internal)?
+            .unwrap_or_default();
+        config
+            .validate(&self.protocols())
+            .map_err(|_| StoreError::Internal)?;
+        Ok(config)
+    }
+
     pub fn protocols(&self) -> Vec<Protocol> {
         [
             (self.openai_chat, Protocol::OpenAiChat),

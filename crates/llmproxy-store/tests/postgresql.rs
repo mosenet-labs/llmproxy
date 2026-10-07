@@ -442,7 +442,15 @@ async fn exercise_store(url: &str, sqlite: bool) {
         Err(StoreError::Validation(_))
     ));
 
+    let thinking = llmproxy_core::thinking::Config {
+        support: llmproxy_core::thinking::Support::Switchable,
+        enabled: llmproxy_core::ir::request::controls::Reasoning {
+            effort: Some("medium".into()),
+            ..Default::default()
+        },
+    };
     let mapping_input = ModelMappingInput {
+        thinking: thinking.clone(),
         alias: "mixed/model-a".into(),
         provider_id: mixed.id,
         upstream_model_id: "model-a".into(),
@@ -463,7 +471,19 @@ async fn exercise_store(url: &str, sqlite: bool) {
         })
         .await
         .unwrap();
-    assert_eq!(store.load_model_routes().await.unwrap().len(), 2);
+    let loaded = store.load_model_routes().await.unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert!(loaded.iter().all(|r| r.thinking == thinking));
+    assert_eq!(
+        store.get_model(mapping.id).await.unwrap().thinking,
+        thinking
+    );
+    store.migrate().await.unwrap();
+    let reopened = ProviderStore::connect(url, &key).await.unwrap();
+    assert_eq!(
+        reopened.get_model(mapping.id).await.unwrap().thinking,
+        thinking
+    );
     let mut remove_mapped_protocol = input("Mixed interfaces", Protocol::OpenAiChat);
     remove_mapped_protocol.api_key.clear();
     assert!(matches!(
@@ -481,6 +501,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
             mapping.id,
             mapping.version,
             ModelMappingInput {
+                thinking: Default::default(),
                 alias: "mixed/model-b".into(),
                 ..mapping_input
             },
@@ -488,6 +509,15 @@ async fn exercise_store(url: &str, sqlite: bool) {
         .await
         .unwrap();
     assert_eq!(updated.alias, "mixed/model-b");
+    assert_eq!(updated.thinking, Default::default());
+    assert!(
+        store
+            .load_model_routes()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.thinking == Default::default())
+    );
     assert!(matches!(
         store.delete_model(mapping.id, mapping.version).await,
         Err(StoreError::Conflict(_))

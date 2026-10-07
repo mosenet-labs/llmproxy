@@ -218,6 +218,8 @@ pub struct ModelPrice {
 
 #[derive(Clone, Debug)]
 pub struct ModelMappingInput {
+    /// 实际 Provider／模型的思考能力与启用参数。
+    pub thinking: llmproxy_core::thinking::Config,
     pub alias: String,
     pub provider_id: i64,
     pub upstream_model_id: String,
@@ -227,6 +229,8 @@ pub struct ModelMappingInput {
 
 #[derive(Clone, Debug)]
 pub struct ModelMappingView {
+    /// 实际 Provider／模型的思考能力与启用参数。
+    pub thinking: llmproxy_core::thinking::Config,
     pub id: i64,
     pub alias: String,
     pub provider_id: i64,
@@ -272,6 +276,8 @@ pub struct ModelRouteView {
 
 /// Server-only model route. Credentials are never serialized to the browser.
 pub struct ModelRoute {
+    /// 实际 Provider／模型的思考能力与启用参数。
+    pub thinking: llmproxy_core::thinking::Config,
     pub alias: String,
     pub upstream_model_id: String,
     pub enabled: bool,

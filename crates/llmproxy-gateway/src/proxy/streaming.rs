@@ -7,7 +7,7 @@ use pingora_http::ResponseHeader;
 use tokio::sync::mpsc::Receiver;
 
 pub(super) struct Transfer {
-    stream: Stream,
+    stream: Option<Stream>,
     header: Option<Box<ResponseHeader>>,
     error: Option<Captured>,
     ended: bool,
@@ -19,12 +19,16 @@ impl Transfer {
     pub(super) fn new(ctx: &RequestContext) -> Result<Self> {
         let route = ctx.route.as_ref().expect("stream route selected");
         Ok(Self {
-            stream: Stream::new(
-                route.provider.protocol,
-                route.protocol,
-                &route.response_target(),
-                ctx.response_body.tool_context(),
-            )?,
+            stream: if route.is_cross_protocol() {
+                Some(Stream::new(
+                    route.provider.protocol,
+                    route.protocol,
+                    &route.response_target(),
+                    ctx.response_body.tool_context(),
+                )?)
+            } else {
+                None
+            },
             header: None,
             error: None,
             ended: false,
@@ -39,7 +43,9 @@ impl Transfer {
         rx: &mut Receiver<HttpTask>,
     ) -> Result<()> {
         let result = self.receive(session, rx).await;
-        self.stream.record_usage();
+        if let Some(stream) = &mut self.stream {
+            stream.record_usage();
+        }
         result
     }
     /// 顺序消费子请求任务；异常在最后有效帧之后交给父请求失败回调。
@@ -72,6 +78,9 @@ impl Transfer {
                         self.error = Some(capture);
                     } else {
                         self.header = Some(header);
+                        if self.stream.is_none() {
+                            self.write(session, Vec::new()).await?;
+                        }
                         if end {
                             self.finish(session).await?;
                         }
@@ -89,13 +98,18 @@ impl Transfer {
                         return Err(incomplete());
                     }
                     if let Some(body) = body {
-                        for byte in body {
-                            if let Some(frame) = self.stream.frame(byte)? {
-                                let output = tokio::select! {
-                                    output = self.stream.convert(&frame) => output?,
-                                    closed = session.read_body_or_idle(true) => return Err(closed.err().unwrap_or_else(incomplete).into_down()),
-                                };
-                                self.write(session, output).await?;
+                        if self.stream.is_none() {
+                            // 仅修改请求设置，同协议 SSE 保持原生字节与增量交付。
+                            self.write(session, vec![body]).await?;
+                        } else {
+                            for byte in body {
+                                if let Some(frame) = self.stream.as_mut().unwrap().frame(byte)? {
+                                    let output = tokio::select! {
+                                        output = self.stream.as_mut().unwrap().convert(&frame) => output?,
+                                        closed = session.read_body_or_idle(true) => return Err(closed.err().unwrap_or_else(incomplete).into_down()),
+                                    };
+                                    self.write(session, output).await?;
+                                }
                             }
                         }
                     }
@@ -128,7 +142,7 @@ impl Transfer {
     }
     /// 先提交待发头，再顺序 await 每帧，应用层没有无界输出队列。
     async fn write(&mut self, session: &mut Session, output: Vec<Bytes>) -> Result<()> {
-        if output.is_empty() {
+        if output.is_empty() && self.stream.is_some() {
             return Ok(());
         }
         if let Some(mut header) = self.header.take() {
@@ -151,7 +165,11 @@ impl Transfer {
     }
     /// HTTP 结束后再交付协议结束事件，不以合法帧之前的断开视为成功。
     async fn finish(&mut self, session: &mut Session) -> Result<()> {
-        let output = self.stream.finish().await?;
+        let output = if let Some(stream) = &mut self.stream {
+            stream.finish().await?
+        } else {
+            Vec::new()
+        };
         self.write(session, output).await?;
         if self.header.is_some() {
             return Err(incomplete());
@@ -161,8 +179,8 @@ impl Transfer {
         Ok(())
     }
     /// 返回安全且顺序正确的客户端流内错误事件，由 Gateway 最终失败回调发送。
-    pub(super) fn failure(&self, status: u16) -> Bytes {
-        self.stream.failure(status)
+    pub(super) fn failure(&self, status: u16) -> Option<Bytes> {
+        self.stream.as_ref().map(|stream| stream.failure(status))
     }
     /// 子请求被取消时仍能判定失败发生在响应正文阶段，不制造连接时间数据。
     pub(super) fn upstream_status(&self) -> Option<u16> {

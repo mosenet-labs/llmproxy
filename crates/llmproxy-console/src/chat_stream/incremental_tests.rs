@@ -93,8 +93,13 @@ fn tool_only_streams_display_args_and_usage_in_four_protocols() {
 fn partial_text_updates_immediately_and_truncation_does_not_complete() {
     let mut reply = Reply::new(Protocol::OpenAiChat);
     let mut text = String::new();
-    reply.push(&packet(json!({"id":"c","model":"m","created":1,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"你好","reasoning_content":"分析"}}]})),&mut |r|text=r.content.clone()).unwrap();
+    let mut thinking = String::new();
+    reply.push(&packet(json!({"id":"c","model":"m","created":1,"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"你好","reasoning_content":"分析"}}]})),&mut |r| { text=r.content.clone(); thinking=r.thinking.clone(); }).unwrap();
     assert_eq!(text, "你好");
+    assert_eq!(
+        thinking, "分析",
+        "通过统一 IR 展示一次，不能被兼容字段重复追加"
+    );
     assert!(reply.finish().is_err());
     let mut reply = Reply::new(Protocol::OpenAiChat);
     assert!(

@@ -153,6 +153,7 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
             .unwrap();
         store
             .create_model(ModelMappingInput {
+                thinking: Default::default(),
                 alias: "restart/chat-model".into(),
                 provider_id: provider.id,
                 upstream_model_id: "chat-model".into(),

@@ -81,6 +81,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0016_tool_continuations.sql",
         include_str!("../../migrations/postgresql/0016_tool_continuations.sql"),
     ),
+    MigrationFile::new(
+        202610060001,
+        "0017_model_thinking.sql",
+        include_str!("../../migrations/postgresql/0017_model_thinking.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -313,5 +318,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610050001,
         "0046_tool_continuations.sql",
         include_str!("../../migrations/sqlite/0046_tool_continuations.sql"),
+    ),
+    MigrationFile::new(
+        202610060001,
+        "0047_model_thinking.sql",
+        include_str!("../../migrations/sqlite/0047_model_thinking.sql"),
     ),
 ]);

@@ -49,6 +49,7 @@ pub struct ProviderSnapshot {
 }
 
 pub struct ResolvedModel {
+    pub thinking: llmproxy_core::thinking::Config,
     pub upstream_model_id: String,
     pub provider: Option<Arc<ResolvedProvider>>,
 }
@@ -78,6 +79,7 @@ impl ProviderSnapshot {
                     route.protocol,
                     route.alias,
                     ResolvedModel {
+                        thinking: route.thinking,
                         upstream_model_id: route.upstream_model_id,
                         provider: None,
                     },
@@ -107,6 +109,7 @@ impl ProviderSnapshot {
                 route.protocol,
                 route.alias,
                 ResolvedModel {
+                    thinking: route.thinking,
                     upstream_model_id: route.upstream_model_id,
                     provider: Some(Arc::new(ResolvedProvider {
                         protocol: provider.protocol,
@@ -298,6 +301,7 @@ mod tests {
                 Protocol::OpenAiChat,
                 "public/one".to_owned(),
                 ResolvedModel {
+                    thinking: Default::default(),
                     upstream_model_id: "one".to_owned(),
                     provider: Some(Arc::new(provider("old.example", "old-dummy-key"))),
                 },
@@ -312,6 +316,7 @@ mod tests {
                 Protocol::OpenAiChat,
                 "public/one".to_owned(),
                 ResolvedModel {
+                    thinking: Default::default(),
                     upstream_model_id: "two".to_owned(),
                     provider: Some(Arc::new(provider("new.example", "new-dummy-key"))),
                 },
@@ -345,6 +350,7 @@ mod tests {
                     Protocol::OpenAiChat,
                     "same".to_owned(),
                     ResolvedModel {
+                        thinking: Default::default(),
                         upstream_model_id: "one".to_owned(),
                         provider: Some(Arc::new(provider("first.example", "dummy")))
                     }
@@ -353,6 +359,7 @@ mod tests {
                     Protocol::OpenAiChat,
                     "same".to_owned(),
                     ResolvedModel {
+                        thinking: Default::default(),
                         upstream_model_id: "two".to_owned(),
                         provider: Some(Arc::new(provider("second.example", "dummy")))
                     }

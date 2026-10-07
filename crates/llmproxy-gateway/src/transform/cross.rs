@@ -186,6 +186,25 @@ fn encode_request(
     target: Protocol,
     model: &str,
 ) -> std::result::Result<Conversion<Request>, llmproxy_core::adapter::Error> {
+    if target == request.source_protocol() {
+        // 同协议只回写思考与路由模型，原生工具、音频及扩展字段保留在来源 struct。
+        let mut request = request.clone();
+        if target == Protocol::Gemini {
+            // Gemini 的模型和流式方法属于 URL，不能要求正文 struct 表达路径字段。
+            // 实际流式意图已经保存到 SelectedRoute，此副本只参与正文往返校验。
+            request.generation.stream = false;
+        } else {
+            request.model = Some(model.into());
+        }
+        return target.encode_request(
+            &request,
+            &RequestTarget {
+                model,
+                max_output_tokens: None,
+            },
+            llmproxy_core::adapter::protocol_codec::EncodeMode::Preserve,
+        );
+    }
     target.encode_request(
         request,
         &RequestTarget {

@@ -13,6 +13,7 @@ const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 
 /// 本次请求的目标协议、模型及流式模式在上游连接前已确定。
 pub(super) fn filter(request: &mut RequestHeader, ctx: &RequestContext) -> Result<()> {
+    request.remove_header(llmproxy_core::thinking::HEADER);
     let route = ctx.route.as_ref().expect("request_filter selected route");
     let client_protocol = route.protocol;
     let provider = &route.provider;
@@ -74,7 +75,7 @@ pub(super) fn filter(request: &mut RequestHeader, ctx: &RequestContext) -> Resul
     request.remove_header("x-api-key");
     request.remove_header("x-goog-api-key");
     request.insert_header("host", provider.authority())?;
-    if protocol != client_protocol {
+    if protocol != client_protocol || ctx.request_body.prepared_length().is_some() {
         request.remove_header("content-length");
         request.remove_header("transfer-encoding");
         request.remove_header("content-encoding");

@@ -115,7 +115,7 @@ async fn route_view(tx: &mut Transaction<'_>, row: &ModelRouteRow) -> StoreResul
         let mapping = find_mapping(&mut *tx, target.model_id).await?;
         let provider = find(&mut *tx, mapping.provider_id).await?;
         views.push(ModelRouteTargetView {
-            model: mapping_view(&mapping, &provider),
+            model: mapping_view(&mapping, &provider)?,
             enabled: target.enabled,
         });
     }

@@ -64,6 +64,7 @@ async fn chat_route_to_messages_provider_converts_request_and_response() {
     let provider = store.create(provider).await.unwrap();
     let model = store
         .create_model(ModelMappingInput {
+            thinking: Default::default(),
             alias: "internal/claude".into(),
             provider_id: provider.id,
             upstream_model_id: "claude-model".into(),
@@ -213,6 +214,7 @@ async fn chat_route_to_gemini_provider_places_model_in_url() {
     let provider = store.create(provider).await.unwrap();
     let model = store
         .create_model(ModelMappingInput {
+            thinking: Default::default(),
             alias: "internal/gemini".into(),
             provider_id: provider.id,
             upstream_model_id: "gemini-model".into(),
@@ -284,6 +286,7 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
     let record = store.create(provider.clone()).await.unwrap();
     store
         .create_model(ModelMappingInput {
+            thinking: Default::default(),
             alias: "public/mock".into(),
             provider_id: record.id,
             upstream_model_id: "upstream-model".into(),
@@ -451,6 +454,7 @@ async fn gemini_native_requests_rewrite_model_path_and_stream_without_buffering(
     let record = store.create(provider).await.unwrap();
     store
         .create_model(ModelMappingInput {
+            thinking: Default::default(),
             alias: "public/gemini".into(),
             provider_id: record.id,
             upstream_model_id: "gemini-test".into(),
@@ -615,6 +619,7 @@ async fn exercise_gateway(url: &str) {
         .unwrap();
     let mapping = store
         .create_model(ModelMappingInput {
+            thinking: Default::default(),
             alias: "public/model".into(),
             provider_id: old.id,
             upstream_model_id: "upstream-old".into(),
@@ -673,6 +678,7 @@ async fn exercise_gateway(url: &str) {
             mapping.id,
             mapping.version,
             ModelMappingInput {
+                thinking: Default::default(),
                 alias: "public/model".into(),
                 provider_id: new.id,
                 upstream_model_id: "upstream-new".into(),

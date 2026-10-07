@@ -560,14 +560,7 @@ fn reasoning_and_signatures_keep_their_semantics_without_forging_target_signatur
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(
-                texts,
-                if target == Protocol::OpenAiChat {
-                    vec!["answer"]
-                } else {
-                    vec!["plan", "answer"]
-                }
-            );
+            assert_eq!(texts, vec!["plan", "answer"]);
             let reasoning = events
                 .iter()
                 .filter(|event| {
@@ -582,10 +575,7 @@ fn reasoning_and_signatures_keep_their_semantics_without_forging_target_signatur
                 .count();
             assert_eq!(
                 reasoning,
-                usize::from(
-                    target != Protocol::OpenAiChat
-                        && !(target == Protocol::AnthropicMessages && source == Protocol::Gemini)
-                )
+                usize::from(!(target == Protocol::AnthropicMessages && source == Protocol::Gemini))
             );
             let signatures = events
                 .iter()

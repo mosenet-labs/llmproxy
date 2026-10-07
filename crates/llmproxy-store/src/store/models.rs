@@ -24,7 +24,7 @@ impl ProviderStore {
         let mut result = Vec::with_capacity(mappings.len());
         for mapping in mappings {
             let provider = find(&mut tx, mapping.provider_id).await?;
-            result.push(mapping_view(&mapping, &provider));
+            result.push(mapping_view(&mapping, &provider)?);
         }
         tx.commit().await?;
         Ok(result)
@@ -36,7 +36,7 @@ impl ProviderStore {
         self.bindings(&mut tx, false).await?;
         let mapping = find_mapping(&mut tx, id).await?;
         let provider = find(&mut tx, mapping.provider_id).await?;
-        let view = mapping_view(&mapping, &provider);
+        let view = mapping_view(&mapping, &provider)?;
         tx.commit().await?;
         Ok(view)
     }
@@ -53,6 +53,9 @@ impl ProviderStore {
         let upstream_model_id = input.upstream_model_id.clone();
         let catalog_price = input.reference_price.clone();
         let mapping = ModelMapping::create()
+            .thinking_json(Some(
+                serde_json::to_string(&input.thinking).map_err(|_| StoreError::Internal)?,
+            ))
             .alias(input.alias)
             .provider_id(input.provider_id)
             .upstream_model_id(input.upstream_model_id)
@@ -78,7 +81,7 @@ impl ProviderStore {
         if let Some(price) = &catalog_price {
             pricing::seed_catalog_price(&mut tx, provider.id, &upstream_model_id, price).await?;
         }
-        let view = mapping_view(&mapping, &provider);
+        let view = mapping_view(&mapping, &provider)?;
         tx.commit().await?;
         Ok(view)
     }
@@ -129,6 +132,9 @@ impl ProviderStore {
             let upstream_model_id = input.upstream_model_id.clone();
             let catalog_price = input.reference_price.clone();
             let mapping = ModelMapping::create()
+                .thinking_json(Some(
+                    serde_json::to_string(&input.thinking).map_err(|_| StoreError::Internal)?,
+                ))
                 .alias(input.alias)
                 .provider_id(provider_id)
                 .upstream_model_id(input.upstream_model_id)
@@ -155,7 +161,7 @@ impl ProviderStore {
                 pricing::seed_catalog_price(&mut tx, provider_id, &upstream_model_id, price)
                     .await?;
             }
-            saved.push(mapping_view(&mapping, &provider));
+            saved.push(mapping_view(&mapping, &provider)?);
         }
         tx.commit().await?;
         Ok(saved)
@@ -200,6 +206,9 @@ impl ProviderStore {
         }
         mapping
             .update()
+            .thinking_json(Some(
+                serde_json::to_string(&input.thinking).map_err(|_| StoreError::Internal)?,
+            ))
             .alias(input.alias)
             .provider_id(input.provider_id)
             .upstream_model_id(input.upstream_model_id)
@@ -222,7 +231,7 @@ impl ProviderStore {
             .updated_at(now()?)
             .exec(&mut tx)
             .await?;
-        let view = mapping_view(&mapping, &provider);
+        let view = mapping_view(&mapping, &provider)?;
         tx.commit().await?;
         Ok(view)
     }
@@ -290,6 +299,10 @@ impl ProviderStore {
                 None
             };
             routes.push(ModelRoute {
+                thinking: selected
+                    .map(|(_, mapping, _)| mapping.thinking())
+                    .transpose()?
+                    .unwrap_or_default(),
                 alias: route.name.clone(),
                 upstream_model_id: selected.map_or(String::new(), |(_, mapping, _)| {
                     mapping.upstream_model_id.clone()
@@ -321,6 +334,7 @@ impl ProviderStore {
                     None
                 };
                 routes.push(ModelRoute {
+                    thinking: mapping.thinking()?,
                     alias: mapping.alias.clone(),
                     upstream_model_id: mapping.upstream_model_id.clone(),
                     enabled: provider.enabled,
@@ -353,6 +367,7 @@ impl ProviderStore {
         };
         tx.commit().await?;
         Ok(ModelRoute {
+            thinking: mapping.thinking()?,
             alias: mapping.alias,
             upstream_model_id: mapping.upstream_model_id,
             enabled: provider.enabled,

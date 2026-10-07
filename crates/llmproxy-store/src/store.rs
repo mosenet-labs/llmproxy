@@ -262,8 +262,9 @@ async fn find_mapping(executor: &mut dyn Executor, id: i64) -> StoreResult<Model
         .ok_or(StoreError::NotFound)
 }
 
-fn mapping_view(mapping: &ModelMapping, provider: &Provider) -> ModelMappingView {
-    ModelMappingView {
+fn mapping_view(mapping: &ModelMapping, provider: &Provider) -> StoreResult<ModelMappingView> {
+    Ok(ModelMappingView {
+        thinking: mapping.thinking()?,
         id: mapping.id,
         alias: mapping.alias.clone(),
         provider_id: mapping.provider_id,
@@ -280,10 +281,14 @@ fn mapping_view(mapping: &ModelMapping, provider: &Provider) -> ModelMappingView
             }),
         provider_enabled: provider.enabled,
         version: mapping.version,
-    }
+    })
 }
 
 fn validate_mapping(mut input: ModelMappingInput) -> StoreResult<ModelMappingInput> {
+    input
+        .thinking
+        .validate(&input.protocols)
+        .map_err(|message| StoreError::Validation(message.into()))?;
     input.alias = input.alias.trim().to_owned();
     if input.alias.is_empty()
         || input.alias.len() > 200
@@ -623,6 +628,7 @@ mod tests {
             .unwrap();
         store
             .create_model(ModelMappingInput {
+                thinking: Default::default(),
                 alias: "gemini-model".into(),
                 provider_id: provider.id,
                 upstream_model_id: "gemini-test".into(),
@@ -682,6 +688,7 @@ mod tests {
         };
         let provider = store.create(provider_input.clone()).await.unwrap();
         let mapping = ModelMappingInput {
+            thinking: Default::default(),
             alias: "Primary/model".into(),
             provider_id: provider.id,
             upstream_model_id: "upstream-model".into(),
@@ -820,6 +827,7 @@ mod tests {
             Err(StoreError::Conflict(_))
         ));
         let batch = ["first", "second"].map(|id| ModelMappingInput {
+            thinking: Default::default(),
             alias: format!("Primary/{id}"),
             provider_id: provider.id,
             upstream_model_id: id.into(),
@@ -868,6 +876,7 @@ mod tests {
         let secondary = store.create(secondary_input).await.unwrap();
         let secondary_model = store
             .create_model(ModelMappingInput {
+                thinking: Default::default(),
                 alias: "Secondary/model".into(),
                 provider_id: secondary.id,
                 upstream_model_id: "backup-model".into(),

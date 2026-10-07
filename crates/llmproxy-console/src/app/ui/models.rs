@@ -34,6 +34,7 @@ use crate::app::{
 mod actions;
 mod editor;
 mod pricing;
+mod thinking;
 
 use actions::model_delete;
 pub(crate) use actions::{

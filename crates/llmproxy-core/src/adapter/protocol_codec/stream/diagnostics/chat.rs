@@ -17,7 +17,7 @@ pub(super) fn collect(body: &Chunk, notes: &mut Notes) {
         notes.extra(&choice.extra, &path);
         notes.field(&choice.logprobs, &format!("{path}.logprobs"));
         let path = format!("{path}.delta");
-        notes.extra(&choice.delta.extra, &path);
+        notes.object_extra(&choice.delta.extra, &["reasoning_content"], &path);
         if let Some(audio) = choice.delta.audio.as_option() {
             notes.extra(&audio.extra, &format!("{path}.audio"));
         }

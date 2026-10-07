@@ -3,7 +3,10 @@
 
 use std::{collections::HashMap, io};
 
-use llmproxy_core::protocol::Protocol;
+use llmproxy_core::{
+    protocol::Protocol,
+    thinking::{Choice, Config, Support},
+};
 use llmproxy_store::{ModelRouteView, ProviderStore};
 use topcoat::{
     Result,
@@ -48,7 +51,7 @@ fn route_available(route: &ModelRouteView) -> bool {
 async fn chat_target(
     store: &ProviderStore,
     selection: &str,
-) -> std::result::Result<(String, Vec<Protocol>, bool), String> {
+) -> std::result::Result<(String, Vec<Protocol>, bool, Support), String> {
     if let Some(id) = selection.strip_prefix("route:") {
         let id = id.parse::<i64>().map_err(|_| "请选择有效的模型路由")?;
         let route = store
@@ -59,11 +62,17 @@ async fn chat_target(
             .find(|route| route.id == id)
             .ok_or("模型路由已不存在")?;
         let available = route_available(&route);
-        Ok((route.name, vec![route.protocol], available))
+        let support = route_support(&route);
+        Ok((route.name, vec![route.protocol], available, support))
     } else {
         let id = selection.parse::<i64>().map_err(|_| "请选择有效的模型")?;
         let model = store.get_model(id).await.map_err(|_| "无法读取模型配置")?;
-        Ok((model.alias, model.protocols, model.provider_enabled))
+        Ok((
+            model.alias,
+            model.protocols,
+            model.provider_enabled,
+            model.thinking.support,
+        ))
     }
 }
 
@@ -158,6 +167,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                         </div>
                         <p class="mt-2 mb-0 pl-10 text-[11px] leading-[1.5] text-[#8a94a3]">"切换模型或协议会保留当前对话上下文"</p>
                         if !selection_error.get().is_empty() {<p role="alert" class="mt-2 mb-0 text-[12px] text-red-600">$(selection_error.get())</p>}
+                        chat_thinking_picker(model_id: $(model_id), session: $(session), refresh: $(refresh), busy: $(busy), selection_error: $(selection_error))
                         <label class="mt-3 flex items-center gap-2 text-[12px] text-secondary"><input type="checkbox" :checked=$(streaming.get()) :disabled=$(busy.get()) @change=$(|event: Event| { streaming.set(event.target.checked); })>"流式输出"</label>
                         <p class="mt-2 mb-0 text-[11px] text-secondary">"流式输出会逐步显示回复。"</p>
                     </div>
@@ -231,7 +241,7 @@ pub async fn new_chat(cx: &Cx, csrf: String, current_session: String) -> Result<
     let scope = current.scope().to_owned();
     let selection = current.selection();
     let protocol_kind = selection.protocol;
-    let (_, protocols, available) = chat_target(&state.store, &selection.model_id)
+    let (_, protocols, available, _) = chat_target(&state.store, &selection.model_id)
         .await
         .map_err(io::Error::other)?;
     if !available || !protocols.contains(&protocol_kind) {
@@ -266,7 +276,7 @@ pub async fn switch_chat(
         Ok(kind) => kind,
         Err(error) => return Ok(error),
     };
-    let (_, protocols, available) = match chat_target(&state.store, &model_id).await {
+    let (_, protocols, available, _) = match chat_target(&state.store, &model_id).await {
         Ok(target) => target,
         Err(error) => return Ok(error),
     };
@@ -293,7 +303,7 @@ pub async fn default_protocol(
     current: String,
 ) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
-    let Ok((_, protocols, available)) =
+    let Ok((_, protocols, available, _)) =
         chat_target(&app_context::<AppState>(cx).store, &model_id).await
     else {
         return Ok(String::new());
@@ -348,11 +358,17 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: boo
     let mut cancellation = session.cancellation();
     let request = async {
         let protocol = turn.selection.protocol;
-        let (alias, protocols, available) =
+        let (alias, protocols, available, support) =
             chat_target(&state.store, &turn.selection.model_id).await?;
         if !available || !protocols.contains(&protocol) {
             return Err("当前模型或协议已不可用".to_owned());
         }
+        Config {
+            support,
+            ..Default::default()
+        }
+        .check(turn.thinking)
+        .map_err(str::to_owned)?;
         session.request_model(&alias);
         chat_reply(
             &state.chat_client,
@@ -361,6 +377,7 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: boo
             &alias,
             &turn.history,
             streaming,
+            turn.thinking,
             |reply| session.update(reply),
         )
         .await
@@ -387,7 +404,7 @@ pub async fn chat_protocol_picker(
 ) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
     let csrf = state.csrf.clone();
-    let (_, protocols, _) = chat_target(&state.store, &model_id.get())
+    let (_, protocols, _, _) = chat_target(&state.store, &model_id.get())
         .await
         .map_err(io::Error::other)?;
     Ok(view! {
@@ -572,5 +589,119 @@ async fn chat_message_entry(
                 <p class="mt-3 mb-0 text-[11px] text-secondary" aria-label="本轮词元用量">(usage.as_str())</p>
             }
         )
+    })
+}
+
+/// 路由展示所有可用目标的能力交集，真正请求仍由 Gateway 按选中快照校验。
+fn route_support(route: &ModelRouteView) -> Support {
+    let supports: Vec<_> = route
+        .targets
+        .iter()
+        .filter(|t| {
+            t.enabled
+                && t.model.provider_enabled
+                && t.model.protocols.contains(&route.provider_protocol)
+        })
+        .map(|t| t.model.thinking.support)
+        .collect();
+    if supports.is_empty() || supports.contains(&Support::Unknown) {
+        Support::Unknown
+    } else if supports.contains(&Support::Unsupported) {
+        Support::Unsupported
+    } else if supports.contains(&Support::AlwaysOn) {
+        Support::AlwaysOn
+    } else {
+        Support::Switchable
+    }
+}
+
+/// 会话偏好由服务端保存，非法选择和生成中的修改都不会生效。
+#[procedure("/ui/_topcoat/runtime/procedures/set-chat-thinking")]
+pub async fn set_chat_thinking(
+    cx: &Cx,
+    csrf: String,
+    session_id: String,
+    choice: String,
+) -> Result<String> {
+    crate::app::check_csrf(cx, &csrf)?;
+    let state = app_context::<AppState>(cx);
+    let Some(session) = state.chat_sessions.get(&session_id) else {
+        return Ok("聊天会话已过期，请刷新页面".into());
+    };
+    let Some(choice) = Choice::parse(&choice) else {
+        return Ok("思考模式无效".into());
+    };
+    let selection = session.selection();
+    let (_, _, _, support) = chat_target(&state.store, &selection.model_id)
+        .await
+        .map_err(io::Error::other)?;
+    if let Err(message) = (Config {
+        support,
+        ..Default::default()
+    })
+    .check(choice)
+    {
+        return Ok(message.into());
+    }
+    if session.selection() != selection {
+        return Ok("模型选择已改变，请重试".into());
+    }
+    Ok(if session.set_thinking(&selection, choice) {
+        String::new()
+    } else {
+        "正在生成回复，请先停止或等待完成".into()
+    })
+}
+
+/// 能力与偏好分开显示，切换模型后保留不兼容偏好并明确提示，不能静默更改意图。
+#[shard("/ui/_topcoat/runtime/shards/chat-thinking-picker")]
+pub async fn chat_thinking_picker(
+    cx: &Cx,
+    model_id: Signal<String>,
+    session: Signal<String>,
+    refresh: Signal<usize>,
+    busy: Signal<bool>,
+    selection_error: Signal<String>,
+) -> Result<impl View> {
+    let _revision = refresh.get();
+    let state = app_context::<AppState>(cx);
+    let room = state
+        .chat_sessions
+        .get(&session.get())
+        .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
+    let current = room.thinking_choice();
+    let (_, _, _, support) = chat_target(&state.store, &model_id.get())
+        .await
+        .map_err(io::Error::other)?;
+    let warning = (Config {
+        support,
+        ..Default::default()
+    })
+    .check(current)
+    .err();
+    let choice = signal(cx, || current.as_str().to_owned());
+    let csrf = state.csrf.clone();
+    Ok(view! {
+        <div class="mt-3" data-thinking-support=(support.as_str())>
+            if support == Support::Unknown || support == Support::Unsupported { <p class="m-0 text-[11px] text-secondary">(support.label())</p> }
+            if support == Support::Switchable || support == Support::AlwaysOn || current != Choice::Default {
+                <label class="mb-1 block text-[12px] text-secondary" for="chat-thinking">"思考模式"</label>
+                select(attrs: attributes! { cx => id="chat-thinking" aria-label="思考模式" class="w-full" :value=$(choice.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
+                    busy.set(true);
+                    let next = event.target.value;
+                    let error = set_chat_thinking(csrf.clone(), session.get(), next.clone()).await;
+                    if error.is_empty() { choice.set(next); refresh.increment(); } else { choice.set(choice.get().clone()); }
+                    selection_error.set(error);
+                    busy.set(false);
+                }) },
+                    <option value="default">"默认"</option>
+                    <option value="enabled" disabled=(!matches!(support, Support::Switchable | Support::AlwaysOn))>"开启"</option>
+                    <option value="disabled" disabled=(support != Support::Switchable)>"关闭"</option>
+                )
+                if support == Support::AlwaysOn { <p class="mt-1 mb-0 text-[11px] text-secondary">"模型始终开启思考"</p> }
+                <p class="mt-1 mb-0 text-[11px] text-secondary">"开启时请求模型支持的可见思考或摘要。"</p>
+                if let Some(message) = warning { <p role="alert" class="mt-1 mb-0 text-[11px] text-red-600">(message)</p> }
+            }
+        </div>
     })
 }

@@ -19,11 +19,34 @@ struct Fixture {
 }
 
 fn answer(protocol: Protocol, request: &Request, socket: &mut TcpStream) {
+    if request.method == "GET" {
+        // 模型编辑页会查询目录；空目录仍允许回显已保存的模型 ID。
+        respond(
+            socket,
+            200,
+            "Content-Type: application/json\r\n",
+            br#"{"data":[],"models":[]}"#,
+        );
+        return;
+    }
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     let stream = body["stream"].as_bool().unwrap_or(false)
         || request.target.contains(":streamGenerateContent");
+    let thought = protocol == Protocol::Gemini
+        && body["generationConfig"]["thinkingConfig"]["includeThoughts"] == true;
     if stream {
         sse_headers(socket);
+        if body["native_stream_test"] == true {
+            chunk(
+                socket,
+                b"event: provider.native\ndata: {\"opaque\":true}\n\n",
+            )
+            .unwrap();
+        }
+        if thought {
+            let summary = json!({"responseId":"raw","modelVersion":"upstream-model","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"先检查条件，再计算结果。","thought":true}]}}]});
+            chunk(socket, format!("data: {summary}\n\n").as_bytes()).unwrap();
+        }
         let (start, end) = streaming::frames(protocol, false);
         for frame in start {
             if chunk(socket, &frame).is_err() {
@@ -39,11 +62,18 @@ fn answer(protocol: Protocol, request: &Request, socket: &mut TcpStream) {
         }
         finish_chunks(socket);
     } else {
+        let mut response = fixtures::response(protocol, false);
+        if thought {
+            response["candidates"][0]["content"]["parts"] = json!([
+                {"text":"先检查条件，再计算结果。","thought":true},
+                {"text":"OK"}
+            ]);
+        }
         respond(
             socket,
             200,
             "Content-Type: application/json\r\n",
-            &serde_json::to_vec(&fixtures::response(protocol, false)).unwrap(),
+            &serde_json::to_vec(&response).unwrap(),
         );
     }
 }
@@ -66,7 +96,9 @@ impl Fixture {
         }
         // 一个模型支持多个入口，覆盖仅切换协议以及保留当前协议的选择行为。
         let (mock, received) = Mock::http(|request, socket| {
-            let protocol = if request.target.starts_with("/v1beta/") {
+            let protocol = if request.method == "GET" {
+                Protocol::OpenAiChat
+            } else if request.target.starts_with("/v1beta/") {
                 Protocol::Gemini
             } else {
                 ALL.into_iter()
@@ -87,6 +119,7 @@ impl Fixture {
         database
             .store
             .create_model(ModelMappingInput {
+                thinking: Default::default(),
                 alias: "multi-protocol".into(),
                 provider_id: provider.id,
                 upstream_model_id: "upstream-model".into(),
@@ -96,6 +129,73 @@ impl Fixture {
             .await
             .unwrap();
         upstreams.push((mock, received));
+        // 能力由模型配置声明，客户端入口协议不决定启用参数。
+        for model in database.store.list_models().await.unwrap() {
+            database
+                .store
+                .update_model(
+                    model.id,
+                    model.version,
+                    ModelMappingInput {
+                        thinking: llmproxy_core::thinking::Config {
+                            support: llmproxy_core::thinking::Support::Switchable,
+                            enabled: llmproxy_core::ir::request::controls::Reasoning {
+                                effort: Some("medium".into()),
+                                ..Default::default()
+                            },
+                        },
+                        alias: model.alias,
+                        provider_id: model.provider_id,
+                        upstream_model_id: model.upstream_model_id,
+                        protocols: model.protocols,
+                        reference_price: model.reference_price,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let model = database
+            .store
+            .list_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.protocols == vec![Protocol::OpenAiChat])
+            .unwrap();
+        for (alias, support) in [
+            (
+                "z-thinking-always",
+                llmproxy_core::thinking::Support::AlwaysOn,
+            ),
+            (
+                "z-thinking-unknown",
+                llmproxy_core::thinking::Support::Unknown,
+            ),
+            (
+                "z-thinking-unsupported",
+                llmproxy_core::thinking::Support::Unsupported,
+            ),
+        ] {
+            database
+                .store
+                .create_model(ModelMappingInput {
+                    thinking: llmproxy_core::thinking::Config {
+                        support,
+                        enabled: if support == llmproxy_core::thinking::Support::AlwaysOn {
+                            model.thinking.enabled.clone()
+                        } else {
+                            Default::default()
+                        },
+                    },
+                    alias: alias.into(),
+                    provider_id: model.provider_id,
+                    upstream_model_id: model.upstream_model_id.clone(),
+                    protocols: model.protocols.clone(),
+                    reference_price: None,
+                })
+                .await
+                .unwrap();
+        }
         let gateway = Gateway::database(&database.url, MASTER_KEY);
         Self {
             gateway,
@@ -325,4 +425,259 @@ async fn browser_model_switching_fixture() {
     let fixture = Fixture::new().await;
     println!("MODEL_SWITCHING_BROWSER_URL={}/chat", fixture.base());
     tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+}
+
+/// HTTP 验收逐方向独立检查 Provider 字段，避免仅通过同一 Codec 自测。
+#[tokio::test]
+async fn thinking_switches_all_sixteen_directions_and_keeps_native_streaming() {
+    use llmproxy_core::thinking::{Choice, HEADER};
+    let fixture = Fixture::new().await;
+    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    for (index, target) in ALL.into_iter().enumerate() {
+        for source in ALL {
+            for choice in [Choice::Enabled, Choice::Disabled] {
+                let alias = nonstream::alias(source, target);
+                let mut body = fixtures::request(source, &alias, "hi");
+                match source {
+                    Protocol::OpenAiChat => body["reasoning_effort"] = json!("high"),
+                    Protocol::OpenAiResponses => body["reasoning"] = json!({"effort":"high"}),
+                    Protocol::AnthropicMessages => {
+                        body["thinking"] = json!({"type":"enabled","budget_tokens":1024});
+                        body["max_tokens"] = json!(2048);
+                        body["output_config"] = json!({"effort":"high"});
+                    }
+                    Protocol::Gemini => {
+                        body["generationConfig"]["thinkingConfig"] = json!({"thinkingLevel":"high"})
+                    }
+                }
+                let response = client
+                    .post(format!(
+                        "http://{}{}",
+                        fixture.gateway.address,
+                        nonstream::path(source, &alias)
+                    ))
+                    .header(HEADER, choice.as_str())
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(
+                    response.status().is_success(),
+                    "{source:?} → {target:?}: {}",
+                    response.text().await.unwrap()
+                );
+                let request = fixture.upstreams[index].1.recv_timeout(DEADLINE).unwrap();
+                assert!(
+                    !request
+                        .headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(HEADER))
+                );
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let enabled = choice == Choice::Enabled;
+                match target {
+                    Protocol::OpenAiChat => assert_eq!(
+                        body["reasoning_effort"],
+                        if enabled { "medium" } else { "none" }
+                    ),
+                    Protocol::OpenAiResponses => {
+                        assert_eq!(
+                            body["reasoning"]["effort"],
+                            if enabled { "medium" } else { "none" }
+                        );
+                        if enabled {
+                            assert_eq!(body["reasoning"]["summary"], "auto");
+                        }
+                    }
+                    Protocol::AnthropicMessages => {
+                        assert_eq!(
+                            body["thinking"]["type"],
+                            if enabled { "adaptive" } else { "disabled" }
+                        );
+                        if !enabled {
+                            assert!(body["output_config"]["effort"].is_null());
+                            assert!(body["thinking"]["budget_tokens"].is_null());
+                        }
+                    }
+                    Protocol::Gemini => {
+                        if enabled {
+                            assert_eq!(
+                                body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+                                true
+                            );
+                            assert_eq!(
+                                body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                                "medium"
+                            );
+                        } else {
+                            assert_eq!(
+                                body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+                                0
+                            );
+                            assert!(
+                                body["generationConfig"]["thinkingConfig"]["thinkingLevel"]
+                                    .is_null()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // 同协议启用设置仍在 Provider 完成前交付首块，原生扩展事件逐字节保留。
+        let alias = nonstream::alias(target, target);
+        let mut body = fixtures::request(target, &alias, "native stream");
+        body["native_stream_test"] = json!(true);
+        let path = if target == Protocol::Gemini {
+            format!("/v1beta/models/{alias}:streamGenerateContent?alt=sse")
+        } else {
+            body["stream"] = json!(true);
+            target.upstream_path().into()
+        };
+        let mut response = client
+            .post(format!("http://{}{}", fixture.gateway.address, path))
+            .header(HEADER, "enabled")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let first = tokio::time::timeout(Duration::from_millis(350), response.chunk())
+            .await
+            .expect("同协议流式首块应在 Provider 结束前到达")
+            .unwrap()
+            .unwrap();
+        let mut received = first.to_vec();
+        while let Some(chunk) = response.chunk().await.unwrap() {
+            received.extend_from_slice(&chunk);
+        }
+        assert!(
+            String::from_utf8(received)
+                .unwrap()
+                .contains("event: provider.native\ndata: {\"opaque\":true}")
+        );
+        let request = fixture.upstreams[index].1.recv_timeout(DEADLINE).unwrap();
+        assert!(
+            !request
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(HEADER))
+        );
+    }
+    for (alias, choice) in [
+        ("z-thinking-always", "disabled"),
+        ("z-thinking-unknown", "enabled"),
+        ("z-thinking-unsupported", "enabled"),
+    ] {
+        let response = client
+            .post(format!(
+                "http://{}/v1/chat/completions",
+                fixture.gateway.address
+            ))
+            .header(HEADER, choice)
+            .json(&fixtures::request(Protocol::OpenAiChat, alias, "rejected"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 422);
+        assert!(response.text().await.unwrap().contains("思考"));
+    }
+    for headers in [vec!["invalid"], vec!["enabled", "disabled"]] {
+        let mut builder = client.post(format!(
+            "http://{}/v1/chat/completions",
+            fixture.gateway.address
+        ));
+        for value in headers {
+            builder = builder.header(HEADER, value);
+        }
+        let response = builder
+            .json(&fixtures::request(
+                Protocol::OpenAiChat,
+                "z-thinking-always",
+                "rejected",
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 400);
+    }
+    assert!(
+        fixture.upstreams[0].1.try_recv().is_err(),
+        "拒绝请求不能发送到 Provider"
+    );
+}
+
+/// 请求开关经实际目标写入 includeThoughts，四种客户端都应收到摘要且不重复正文。
+#[tokio::test]
+async fn enabled_gemini_summaries_reach_all_clients_in_both_modes() {
+    use llmproxy_core::{
+        adapter::protocol_codec::ProtocolCodec,
+        ir::response::{Item, Status},
+        protocol::wire,
+        thinking::HEADER,
+    };
+    let fixture = Fixture::new().await;
+    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let summary = "先检查条件，再计算结果。";
+    for source in ALL {
+        for stream in [false, true] {
+            let alias = nonstream::alias(source, Protocol::Gemini);
+            let mut body = fixtures::request(source, &alias, "summary");
+            body["stream"] = json!(stream);
+            let path = if stream {
+                streaming::path(source, &alias)
+            } else {
+                nonstream::path(source, &alias)
+            };
+            let response = client
+                .post(format!("http://{}{}", fixture.gateway.address, path))
+                .header(HEADER, "enabled")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "{source:?}, stream={stream}"
+            );
+            let bytes = response.bytes().await.unwrap();
+            let text = if stream {
+                let mut observed = streaming::Observed::new(source);
+                observed.push(source, &bytes);
+                observed.finish(source);
+                assert_eq!(observed.decoder.state().ended(), Some(Status::Completed));
+                observed.text
+            } else {
+                let raw = wire::decode_response(source, &bytes).unwrap();
+                let ir = source.decode_response(&raw).unwrap();
+                let mut text = String::new();
+                for message in &ir.messages {
+                    for part in &message.parts {
+                        match &part.kind {
+                            PartKind::Text(value) => text.push_str(value),
+                            PartKind::Reasoning(value) => text.push_str(value.as_str().unwrap()),
+                            _ => {}
+                        }
+                    }
+                }
+                for item in &ir.items {
+                    if let Item::Reasoning(value) = item {
+                        text.push_str(value);
+                    }
+                }
+                text
+            };
+            assert_eq!(
+                text.matches(summary).count(),
+                1,
+                "{source:?}, stream={stream}: {text}"
+            );
+            assert!(text.contains(if stream { "你好" } else { "OK" }));
+            let captured = fixture.upstreams[3].1.recv_timeout(DEADLINE).unwrap();
+            let body: Value = serde_json::from_slice(&captured.body).unwrap();
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+                true
+            );
+        }
+    }
 }

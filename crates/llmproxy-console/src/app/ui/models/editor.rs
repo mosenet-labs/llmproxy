@@ -1,6 +1,11 @@
 use super::*;
 
 pub(super) struct Editor {
+    thinking_support: Signal<String>,
+    thinking_mode: Signal<String>,
+    thinking_effort: Signal<String>,
+    thinking_budget: Signal<String>,
+
     open: Signal<bool>,
     busy: Signal<bool>,
     error: Signal<String>,
@@ -47,6 +52,10 @@ pub(super) struct Editor {
 impl Editor {
     pub(super) fn new(cx: &Cx) -> Self {
         Self {
+            thinking_support: signal(cx, || "unknown".to_owned()),
+            thinking_mode: signal(cx, String::new),
+            thinking_effort: signal(cx, String::new),
+            thinking_budget: signal(cx, String::new),
             open: signal(cx, || false),
             busy: signal(cx, || false),
             error: signal(cx, String::new),
@@ -126,6 +135,11 @@ pub(super) fn editor_trigger(
             )
         };
     let Editor {
+        thinking_support,
+        thinking_mode,
+        thinking_effort,
+        thinking_budget,
+
         open,
         error,
         id: selected_id,
@@ -207,7 +221,22 @@ pub(super) fn editor_trigger(
         .map_or("", |price| price.output_per_million.as_str())
         .to_owned();
     let initial_price_summary = price_label(plan, false);
+    let initial_thinking = model
+        .map(|model| model.thinking.clone())
+        .unwrap_or_default();
+    let initial_support = initial_thinking.support.as_str().to_owned();
+    let initial_mode = initial_thinking.enabled.mode.unwrap_or_default();
+    let initial_effort = initial_thinking.enabled.effort.unwrap_or_default();
+    let initial_budget = initial_thinking
+        .enabled
+        .budget
+        .map(|n| n.to_string())
+        .unwrap_or_default();
     attributes! { cx => aria-haspopup="dialog" aria-controls="model-dialog" @click=$(|_event: Event| {
+        thinking_support.set(initial_support.to_owned());
+        thinking_mode.set(initial_mode.to_owned());
+        thinking_effort.set(initial_effort.to_owned());
+        thinking_budget.set(initial_budget.to_owned());
         selected_id.set(id.to_owned());
         selected_version.set(version.to_owned());
         selected_alias.set(alias.to_owned());
@@ -259,6 +288,11 @@ async fn provider_search(
 ) -> Result<impl View> {
     let _ = cx;
     let Editor {
+        thinking_support,
+        thinking_mode,
+        thinking_effort,
+        thinking_budget,
+
         id: editing_id,
         provider_id,
         provider_name,
@@ -325,6 +359,8 @@ async fn provider_search(
                     let confirm_title = format!("切换到「{}」？未保存的模型会清空。", provider.name);
                     let option_class = "block w-full rounded-md border-0! bg-transparent! px-3 py-2 text-left text-sm leading-5 text-heading shadow-none! hover:bg-primary-soft! focus:bg-primary-soft! focus:outline-none aria-selected:text-primary data-[filtered]:hidden";
                     let choose = attributes! { cx => @click=$(async |_event: Event| {
+                            thinking_support.set("unknown".to_owned());
+                            thinking_mode.set("".to_owned()); thinking_effort.set("".to_owned()); thinking_budget.set("".to_owned());
                             provider_id.set(option_id.to_owned());
                             provider_name.set(option_name.to_owned());
                             provider_query.set(option_name.to_owned());
@@ -636,6 +672,11 @@ pub(super) async fn model_editor(
     refresh: &Signal<f64>,
 ) -> Result<impl View> {
     let Editor {
+        thinking_support,
+        thinking_mode,
+        thinking_effort,
+        thinking_budget,
+
         open,
         busy,
         error,
@@ -713,7 +754,7 @@ pub(super) async fn model_editor(
                 error.set("".to_owned());
                 // Topcoat renders each draft row with signals; its runtime
                 // cannot collect a dynamic form list without FormData.
-                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(${csrf}, ${id}.get(), ${version}.get(), ${alias}.get(), ${provider_id}.get(), ${model_id}.get(), ${chat}.get(), ${responses}.get(), ${messages}.get(), ${gemini}.get(), ${input_price_per_million}.get(), ${output_price_per_million}.get()) : (() => { const form = new FormData(document.getElementById('model-editor-form')); const rows = form.getAll('model_id').map((model_id, index) => ({model_id, alias: form.get('alias-' + index) || '', chat: form.has('chat-' + index), responses: form.has('responses-' + index), messages: form.has('messages-' + index), gemini: form.has('gemini-' + index), input_price_per_million: form.get('input-price-' + index), output_price_per_million: form.get('output-price-' + index)})); return ${save_models}.call(${csrf}, ${provider_id}.get(), cx.hydrate(JSON.stringify(rows))); })()).catch(() => ${unavailable})", unavailable.clone());
+                let result = raw!("await Promise.resolve(${id}.get().dehydrate() ? ${save_model}.call(${csrf}, cx.hydrate(JSON.stringify({id: ${id}.get().dehydrate(), version: ${version}.get().dehydrate(), alias: ${alias}.get().dehydrate(), provider_id: ${provider_id}.get().dehydrate(), upstream_model_id: ${model_id}.get().dehydrate(), chat: ${chat}.get().dehydrate(), responses: ${responses}.get().dehydrate(), messages: ${messages}.get().dehydrate(), gemini: ${gemini}.get().dehydrate(), input_price_per_million: ${input_price_per_million}.get().dehydrate(), output_price_per_million: ${output_price_per_million}.get().dehydrate(), thinking_support: ${thinking_support}.get().dehydrate(), thinking_mode: ${thinking_mode}.get().dehydrate(), thinking_effort: ${thinking_effort}.get().dehydrate(), thinking_budget: ${thinking_budget}.get().dehydrate()}))) : (() => { const form = new FormData(document.getElementById('model-editor-form')); const rows = form.getAll('model_id').map((model_id, index) => ({model_id, alias: form.get('alias-' + index) || '', chat: form.has('chat-' + index), responses: form.has('responses-' + index), messages: form.has('messages-' + index), gemini: form.has('gemini-' + index), input_price_per_million: form.get('input-price-' + index), output_price_per_million: form.get('output-price-' + index)})); return ${save_models}.call(${csrf}, ${provider_id}.get(), cx.hydrate(JSON.stringify(rows))); })()).catch(() => ${unavailable})", unavailable.clone());
                 busy.set(false);
                 if result.is_ok() { open.set(false); success.set(result.unwrap()); refresh.increment(); }
                 else { error.set(result.unwrap_err()); }
@@ -733,6 +774,8 @@ pub(super) async fn model_editor(
                         <div class="mt-6">form_field(config: FormFieldConfig::new("model-id", "上游模型 ID").required(),
                             <input id="model-id" list="model-candidates" autocomplete="off" :value=$(model_id.get()) @input=$(|event: Event| {
                                 if model_id.get() != event.target.value {
+                                    thinking_support.set("unknown".to_owned());
+                                    thinking_mode.set("".to_owned()); thinking_effort.set("".to_owned()); thinking_budget.set("".to_owned());
                                     input_price_per_million.set("".to_owned());
                                     output_price_per_million.set("".to_owned());
                                 }
@@ -757,6 +800,7 @@ pub(super) async fn model_editor(
                             <input id="model-alias" :value=$(alias.get()) @input=$(|event: Event| { alias.set(event.target.value); alias_edited.set(true); }) placeholder="Provider名称/模型ID" maxlength="200">
                         )</div>
                         <p class="mt-2 mb-0 text-xs text-[#cf1322] empty:hidden" role="alert">$({ let _alias = alias.get(); let _model_id = model_id.get(); raw!("(() => { const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); if (!current) return ''; const ownId = String(${id}.get()); return JSON.parse(${existing_models_json}.dehydrate()).some((record) => record[0] !== ownId && record[3] === current) ? '模型标识「' + current + '」已存在，请修改后再保存' : ''; })()", String::new()) })</p>
+                        thinking::editor(support: thinking_support.clone(), mode: thinking_mode.clone(), effort: thinking_effort.clone(), budget: thinking_budget.clone())
                         <h3 class="mt-6 mb-3 text-sm font-semibold">"选择可用协议（至少一个）"</h3>
                         <div class="flex flex-wrap gap-4 text-sm text-heading">
                             <label class="flex items-center gap-2" :hidden=$(!supports_chat.get())><input type="checkbox" :checked=$(chat.get()) @change=$(|event: Event| chat.set(event.target.checked))>"Chat"</label>

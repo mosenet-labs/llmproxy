@@ -884,20 +884,12 @@ async fn exercise_http(database_url: &str) {
         .unwrap();
     assert_eq!(draft.status(), StatusCode::OK);
     assert!(draft.text().await.unwrap().contains("manual-model"));
-    let model_form = serde_json::json!([
-        csrf,
-        "",
-        "",
-        "",
-        provider.id.to_string(),
-        "mock-model",
-        true,
-        true,
-        false,
-        false,
-        "0.15",
-        "0.60"
-    ]);
+    let model_form = serde_json::json!([csrf, serde_json::json!({
+        "id":null, "version":null, "alias":"", "provider_id":provider.id.to_string(), "upstream_model_id":"mock-model",
+        "chat":true,"responses":true,"messages":false,"gemini":false,
+        "input_price_per_million":"0.15","output_price_per_million":"0.60",
+        "thinking_support":"switchable","thinking_mode":"","thinking_effort":"medium","thinking_budget":""
+    }).to_string()]);
     let response = client
         .post(format!("{base}/_topcoat/runtime/procedures/save-model"))
         .header("content-type", "application/json")

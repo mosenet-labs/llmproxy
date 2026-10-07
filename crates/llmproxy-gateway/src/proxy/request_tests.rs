@@ -19,6 +19,8 @@ const ALL: [Protocol; 4] = [
 
 fn context(source: Protocol, target: Protocol, stream: bool) -> RequestContext {
     RequestContext {
+        thinking: Default::default(),
+        thinking_error: None,
         telemetry: RequestTelemetry::new(),
         protocol: Some(source),
         route: Some(SelectedRoute::new(
@@ -39,6 +41,7 @@ fn context(source: Protocol, target: Protocol, stream: bool) -> RequestContext {
             }),
             "models/a/b ?".into(),
             stream,
+            Default::default(),
         )),
         console: false,
         stream_error: None,
