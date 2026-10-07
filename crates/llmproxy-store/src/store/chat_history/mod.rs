@@ -39,6 +39,7 @@ fn conversation(cipher: &KeyCipher, row: ChatConversationRow) -> StoreResult<Con
         selection: parse(&row.selection_json)?,
         thinking: Choice::parse(&row.thinking).ok_or(StoreError::Internal)?,
         active_turn: row.active_turn,
+        archived: row.archived,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -91,6 +92,7 @@ impl ProviderStore {
             .selection_json(json(selection)?)
             .thinking("default")
             .active_turn(None::<String>)
+            .archived(false)
             .created_at(timestamp)
             .updated_at(timestamp)
             .exec(&mut tx)
@@ -98,9 +100,26 @@ impl ProviderStore {
         tx.commit().await?;
         conversation(&self.cipher, row)
     }
-    /// 分页读取工作区历史；排序使用 ID 补充相同时间的稳定顺序。
+    /// 分页读取未归档历史，页面初始化不会自动进入归档会话。
     pub async fn list_chat_conversations(
         &self,
+        offset: usize,
+        limit: usize,
+    ) -> StoreResult<Vec<Conversation>> {
+        self.chat_conversations(false, offset, limit).await
+    }
+    /// 归档使用相同分页与解密规则，不删除内容和用量。
+    pub async fn list_archived_chat_conversations(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> StoreResult<Vec<Conversation>> {
+        self.chat_conversations(true, offset, limit).await
+    }
+    /// 两类历史共用查询；排序使用 ID 补充相同时间的稳定顺序。
+    async fn chat_conversations(
+        &self,
+        archived: bool,
         offset: usize,
         limit: usize,
     ) -> StoreResult<Vec<Conversation>> {
@@ -113,6 +132,7 @@ impl ProviderStore {
                     .owner()
                     .eq(chat_history::OWNER),
             )
+            .filter(ChatConversationRow::fields().archived().eq(archived))
             .order_by(ChatConversationRow::fields().updated_at().desc())
             .order_by(ChatConversationRow::fields().id().desc())
             .limit(limit.min(100))
@@ -156,6 +176,9 @@ impl ProviderStore {
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
         let mut row = self.chat_row(&mut tx, key).await?;
+        if row.archived {
+            return Err(StoreError::Conflict("会话已归档，请恢复后继续".into()));
+        }
         if row.active_turn.is_some() {
             return Err(StoreError::Conflict(
                 "正在生成回复，请先停止或等待完成".into(),
@@ -185,6 +208,9 @@ impl ProviderStore {
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
         let mut room = self.chat_row(&mut tx, &input.conversation_id).await?;
+        if room.archived {
+            return Err(StoreError::Conflict("会话已归档，请恢复后继续".into()));
+        }
         if let Some(existing) = ChatTurnRow::filter_by_id(&input.id)
             .first()
             .exec(&mut tx)
@@ -496,6 +522,32 @@ impl ProviderStore {
                 .await?;
             }
         }
+        Ok(())
+    }
+    /// 归档／恢复只更新会话状态，行锁确保不能与生成开始同时成功。
+    pub async fn set_chat_archived(&self, key: &str, archived: bool) -> StoreResult<()> {
+        let _writer = if self.backend.is_sqlite() {
+            Some(self.chat_writes.lock().await)
+        } else {
+            None
+        };
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
+        self.verify_tool_key(&mut tx).await?;
+        let mut room = self.chat_row(&mut tx, key).await?;
+        if room.active_turn.is_some() {
+            return Err(StoreError::Conflict(
+                "正在生成回复，请先停止或等待完成".into(),
+            ));
+        }
+        if room.archived != archived {
+            room.update()
+                .archived(archived)
+                .updated_at(now()?)
+                .exec(&mut tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
     /// 删除空闲会话及其轮次；配置记录和其他会话不受影响。

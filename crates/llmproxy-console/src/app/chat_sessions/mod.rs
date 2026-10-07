@@ -13,7 +13,10 @@ use crate::chat_stream::{
     ChatReply, DisplayPart,
     history::{Content, Conversation, Selection},
 };
-use llmproxy_core::{ir::message::Role, protocol::Protocol};
+use llmproxy_core::{
+    ir::{message::Role, usage::Usage},
+    protocol::Protocol,
+};
 
 const SESSION_IDLE_LIMIT: Duration = Duration::from_secs(60 * 60);
 
@@ -33,9 +36,43 @@ struct TurnInfo {
     selection: Selection,
     alias: String,
     reported_model: Option<String>,
+    /// 生成时保存累计快照，结束后由来源记录覆盖，不能从展示文案反向解析。
+    usage: Option<Usage>,
     warnings: Vec<String>,
 }
 impl TurnInfo {
+    /// 简略行只显示模型与输入、输出、缓存读取；未报告保留为破折号。
+    fn compact_label(&self) -> String {
+        let model = self
+            .actual
+            .as_ref()
+            .and_then(|actual| actual.reported_model.as_deref())
+            .filter(|model| !model.is_empty())
+            .or(self
+                .reported_model
+                .as_deref()
+                .filter(|model| !model.is_empty()))
+            .or(self
+                .actual
+                .as_ref()
+                .map(|actual| actual.upstream_model.as_str())
+                .filter(|model| !model.is_empty()))
+            .unwrap_or(if self.alias.is_empty() {
+                "模型待确认"
+            } else {
+                &self.alias
+            });
+        let count =
+            |value: Option<u64>| value.map_or_else(|| "—".into(), |value| value.to_string());
+        let usage = self.usage.as_ref();
+        format!(
+            "{model} · in {} · out {} · cache {}",
+            count(usage.and_then(|usage| usage.input_tokens)),
+            count(usage.and_then(|usage| usage.output_tokens)),
+            count(usage.and_then(|usage| usage.cache.read_input_tokens))
+        )
+    }
+
     /// 本轮实际模型、入口协议与路由别名保持独立。
     fn label(&self) -> String {
         let model = self
@@ -169,6 +206,17 @@ impl ChatSession {
             .collect()
     }
 
+    /// 收起状态读取类型化统计，与展开后的完整标签使用同一轮次快照。
+    pub(crate) fn compact_snapshot(&self) -> HashMap<String, String> {
+        self.state
+            .lock()
+            .expect("chat state mutex")
+            .turns
+            .iter()
+            .map(|(id, turn)| (id.clone(), turn.compact_label()))
+            .collect()
+    }
+
     /// 兼容提示与展示、发送历史分别保存。
     pub(crate) fn warning_snapshot(&self) -> HashMap<String, String> {
         self.state
@@ -292,6 +340,7 @@ impl ChatSession {
                 selection,
                 alias: String::new(),
                 reported_model: None,
+                usage: None,
                 warnings: Vec::new(),
             },
         );
@@ -333,6 +382,9 @@ impl ChatSession {
             let id = message.id.clone();
             if let Some(turn) = state.turns.get_mut(&id) {
                 turn.warnings.clone_from(&reply.warnings);
+                if reply.usage.is_some() {
+                    turn.usage.clone_from(&reply.usage);
+                }
             }
             // 工具参数、媒体和累计用量与文字一起逐帧更新，纯工具回复也能在生成中展示。
             if !reply.parts.is_empty() {
@@ -428,6 +480,11 @@ impl ChatSession {
         if let Some(id) = id {
             if let Some(turn) = state.turns.get_mut(&id) {
                 turn.actual = record.actual.clone();
+                turn.usage = if record.call_finished || !record.call_started {
+                    record.usage.clone()
+                } else {
+                    None
+                };
             }
             if record.call_finished || !record.call_started {
                 let mut label = record
@@ -473,6 +530,7 @@ impl ChatSession {
                     let id = message.id.clone();
                     if let Some(turn) = state.turns.get_mut(&id) {
                         turn.reported_model = reply.model;
+                        turn.usage = reply.usage;
                         turn.warnings = reply.warnings;
                         let selection = turn.selection.clone();
                         state.history.append(&selection, history);
@@ -500,6 +558,7 @@ impl ChatSession {
                     let id = warning_id;
                     if let Some(turn) = state.turns.get_mut(&id) {
                         turn.warnings.push(error);
+                        turn.usage = None;
                     }
                     // 未完成的工具和累计快照不能作为完整回复或最终用量保留。
                     state.parts.remove(&id);
@@ -590,6 +649,15 @@ impl ChatSessions {
         Some(session.clone())
     }
 
+    /// 首屏恢复订阅时也考虑后台会话，当前查看的会话可能已经空闲。
+    pub(crate) fn any_generating(&self) -> bool {
+        self.entries
+            .lock()
+            .expect("chat sessions mutex")
+            .values()
+            .any(|(_, room)| room.snapshot().2)
+    }
+
     /// 加载空闲历史，签名仍保留在结构化 IR 中。
     pub(crate) fn restore(
         &self,
@@ -658,6 +726,7 @@ impl ChatSessions {
                         selection: turn.selection.clone(),
                         alias: turn.alias.clone(),
                         reported_model: reply.model,
+                        usage: None,
                         warnings,
                     },
                 );

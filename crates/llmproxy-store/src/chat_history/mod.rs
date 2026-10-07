@@ -83,6 +83,8 @@ pub struct Conversation {
     pub thinking: Choice,
     /// 正在生成的轮次标识；数据库据此阻止并发生成。
     pub active_turn: Option<String>,
+    /// 归档后仍可查阅，恢复后才允许继续对话。
+    pub archived: bool,
     /// 会话创建时间，Unix 秒。
     pub created_at: i64,
     /// 最后一次选择或轮次变更时间，Unix 秒。

@@ -100,6 +100,7 @@ pub async fn exercise(store: &ProviderStore, url: &str, master_key: &str) {
         Err(StoreError::Conflict(_))
     ));
     assert!(store.delete_chat_conversation(&room).await.is_err());
+    assert!(store.set_chat_archived(&room, true).await.is_err());
     assert!(
         store
             .select_chat(&room, &selection, Choice::Default)
@@ -258,6 +259,7 @@ pub async fn exercise(store: &ProviderStore, url: &str, master_key: &str) {
     .unwrap();
     assert!(wrong.list_chat_conversations(0, 10).await.is_err());
     assert!(wrong.chat_turns(&room).await.is_err());
+    assert!(wrong.set_chat_archived(&room, true).await.is_err());
     assert!(
         wrong
             .create_chat_conversation(&key(3), &selection)
@@ -282,6 +284,69 @@ pub async fn exercise(store: &ProviderStore, url: &str, master_key: &str) {
         .unwrap();
     assert_eq!(store.list_chat_conversations(0, 1).await.unwrap().len(), 1);
     assert_eq!(store.list_chat_conversations(1, 1).await.unwrap().len(), 1);
+    // 归档只改变列表分组；跨连接读取仍保留正文、模型、用量和选择。
+    let before = store.get_chat_conversation(&room).await.unwrap();
+    assert!(!before.archived);
+    store.set_chat_archived(&room, true).await.unwrap();
+    store.set_chat_archived(&room, true).await.unwrap();
+    let archived = reopened.get_chat_conversation(&room).await.unwrap();
+    assert!(archived.archived);
+    assert_eq!(archived.title, before.title);
+    assert_eq!(archived.selection, before.selection);
+    assert_eq!(
+        reopened.chat_turn(&first.id).await.unwrap().usage,
+        Some(usage)
+    );
+    assert_eq!(
+        store.list_chat_conversations(0, 10).await.unwrap()[0].id,
+        room2
+    );
+    assert_eq!(
+        store.list_archived_chat_conversations(0, 1).await.unwrap()[0].id,
+        room
+    );
+    assert!(
+        store
+            .list_archived_chat_conversations(1, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .begin_chat_turn(input(&room, 15, Protocol::OpenAiChat))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .select_chat(&room, &selection, Choice::Default)
+            .await
+            .is_err()
+    );
+    reopened.set_chat_archived(&room, false).await.unwrap();
+    assert_eq!(store.list_chat_conversations(0, 10).await.unwrap().len(), 2);
+    assert!(
+        store
+            .list_archived_chat_conversations(0, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // 归档与另一页开始生成竞争，同一会话只能有一项成功。
+    let (archive, begin) = tokio::join!(
+        store.set_chat_archived(&room, true),
+        reopened.begin_chat_turn(input(&room, 16, Protocol::OpenAiChat)),
+    );
+    assert_ne!(archive.is_ok(), begin.is_ok());
+    if let Ok(turn) = begin {
+        store
+            .finish_chat_turn(&turn.id, completion(Status::Completed))
+            .await
+            .unwrap();
+        store.set_chat_archived(&room, true).await.unwrap();
+    }
+    // 归档历史仍可删除，其他会话保持不变。
     store.delete_chat_conversation(&room).await.unwrap();
     assert!(store.chat_turn(&first.id).await.is_err());
     assert_eq!(store.list_chat_conversations(0, 10).await.unwrap().len(), 1);

@@ -55,11 +55,19 @@
   color: #1557a8;
 }
 
-/* 设置默认收起，保留原生键盘操作与焦点；用量入口固定在正文滚动区之外。 */
-.chat-settings > summary { list-style: none; }
-.chat-settings > summary::-webkit-details-marker { display: none; }
-.chat-settings > summary:focus-visible { outline: 2px solid #a7c7f3; outline-offset: 4px; }
+/* 归档记录用更深的灰色区分，保持标题和模型信息清晰可读。 */
+.chat-session-item[data-archived="true"] { background: #e2e8f0; color: #344054; }
+.chat-session-item[data-archived="true"] .chat-session-model { color: #526176; }
+.chat-session-item[data-archived="true"]:hover { background: #d6dee9; }
+.chat-session-item[data-archived="true"][data-active="true"] { background: #cbd5e1; color: #24364d; }
+.chat-archive-confirm { position-area: bottom span-right; position-try-fallbacks: flip-block, flip-inline; }
+
+/* 设置和每轮详情默认收起，保留原生键盘操作与焦点；用量入口固定在正文滚动区之外。 */
+.chat-settings > summary, .chat-turn-details > summary { list-style: none; }
+.chat-settings > summary::-webkit-details-marker, .chat-turn-details > summary::-webkit-details-marker { display: none; }
+.chat-settings > summary:focus-visible, .chat-turn-details > summary:focus-visible { outline: 2px solid #a7c7f3; outline-offset: 4px; }
 .chat-settings[open] .chat-settings-caret { transform: rotate(90deg); }
+.chat-turn-details[open] .chat-turn-caret { transform: rotate(90deg); }
 .chat-usage-trigger { border: 0; background: transparent; }
 
 /* 窄屏标题栏位于侧栏下方，浮层固定到视口以避免被工作区裁切。 */

@@ -256,6 +256,7 @@ async fn saved_turn(
         let turns = fixture.database.store.chat_turns(id).await.unwrap();
         if let Some(turn) = turns.get(sequence - 1)
             && turn.call_finished
+            && turn.status != llmproxy_store::chat_history::Status::Generating
         {
             return turn.clone();
         }
@@ -424,6 +425,37 @@ async fn history_records_source_usage_in_all_directions_and_survives_restart() {
     let decoded = fixtures::decode_request(Protocol::Gemini, &captured.body);
     assert_eq!(decoded.messages.len(), 65);
     saved_turn(&fixture, &id, 33).await;
+    // 归档允许查看历史，但不能绕过页面继续发送或开始新轮次。
+    procedure(
+        &client,
+        &base,
+        "change-chat-history",
+        json!([csrf, "", id, "archive"]),
+    )
+    .await;
+    assert_eq!(
+        procedure(&client, &base, "open-chat", json!([csrf, id])).await,
+        ""
+    );
+    assert_eq!(
+        procedure(&client, &base, "begin-chat", json!([csrf, id, "archived"])).await,
+        false
+    );
+    assert_eq!(
+        procedure(&client, &base, "send-chat", json!([csrf, id, true])).await,
+        false
+    );
+    assert_eq!(
+        fixture.database.store.chat_turns(&id).await.unwrap().len(),
+        33
+    );
+    procedure(
+        &client,
+        &base,
+        "change-chat-history",
+        json!([csrf, "", id, "restore"]),
+    )
+    .await;
     // 删除配置后历史不受级联影响；没有可用模型时仍可浏览和删除会话。
     for route in fixture.database.store.list_routes().await.unwrap() {
         fixture
@@ -468,8 +500,58 @@ async fn history_records_source_usage_in_all_directions_and_survives_restart() {
     assert!(page.contains("history-0"));
     assert!(page.contains("upstream-model"));
     assert!(page.contains("模型配置已失效"));
-    let next = procedure(&client, &base, "delete-chat", json!([csrf, id])).await;
-    assert_ne!(next.as_str().unwrap(), id);
+    // 行菜单使用统一入口；配置失效后仍可归档、恢复和删除历史。
+    let archived = procedure(
+        &client,
+        &base,
+        "change-chat-history",
+        json!([csrf, id, id, "archive"]),
+    )
+    .await;
+    let replacement = archived["ok"]["v"]["v"][0].as_str().unwrap().to_owned();
+    assert_ne!(replacement, id);
+    assert!(
+        fixture
+            .database
+            .store
+            .get_chat_conversation(&id)
+            .await
+            .unwrap()
+            .archived
+    );
+    assert_eq!(
+        fixture.database.store.chat_turns(&id).await.unwrap().len(),
+        33
+    );
+    let restored = procedure(
+        &client,
+        &base,
+        "change-chat-history",
+        json!([csrf, replacement, id, "restore"]),
+    )
+    .await;
+    assert!(restored["ok"]["v"].is_null());
+    assert!(
+        !fixture
+            .database
+            .store
+            .get_chat_conversation(&id)
+            .await
+            .unwrap()
+            .archived
+    );
+    assert_eq!(
+        procedure(&client, &base, "open-chat", json!([csrf, id])).await,
+        ""
+    );
+    let next = procedure(
+        &client,
+        &base,
+        "change-chat-history",
+        json!([csrf, id, id, "delete"]),
+    )
+    .await;
+    assert_eq!(next["ok"]["v"]["v"][0].as_str().unwrap(), replacement);
     assert!(
         fixture
             .database
@@ -711,6 +793,7 @@ async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_tur
             procedure(&client, &base, "send-chat", json!([csrf, id, stream])).await,
             true
         );
+        saved_turn(&fixture, id, turn + 1).await;
         expected.push(prompt);
         let captured = fixture.upstreams[target_index]
             .1
@@ -764,7 +847,7 @@ async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_tur
         .await,
         "gemini"
     );
-    for protocol in ALL {
+    for (offset, protocol) in ALL.into_iter().enumerate() {
         assert_eq!(
             procedure(
                 &client,
@@ -784,6 +867,7 @@ async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_tur
             procedure(&client, &base, "send-chat", json!([csrf, id, false])).await,
             true
         );
+        saved_turn(&fixture, id, 9 + offset).await;
         expected.push(prompt);
         let captured = fixture.upstreams[4].1.recv_timeout(DEADLINE).unwrap();
         let decoded = fixtures::decode_request(protocol, &captured.body);
@@ -831,9 +915,195 @@ async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_tur
 }
 
 #[tokio::test]
+async fn history_generates_multiple_conversations_without_holding_http_requests() {
+    use llmproxy_store::chat_history::Status;
+    let fixture = Fixture::with_pause(Duration::from_secs(3)).await;
+    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let base = fixture.base();
+    let editor = client
+        .get(format!("{base}/providers/form"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = attribute(editor.split_once("name=\"csrf\"").unwrap().1, "value");
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let first = attribute(&page, "data-chat-session").to_owned();
+    let source = fixture
+        .database
+        .store
+        .get_chat_conversation(&first)
+        .await
+        .unwrap()
+        .selection
+        .protocol;
+    let index = ALL.iter().position(|protocol| *protocol == source).unwrap();
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, first, "conversation-a"])
+        )
+        .await,
+        true
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            procedure(&client, &base, "send-chat", json!([csrf, first, true]))
+        )
+        .await
+        .expect("提交不能等待流式回复完成"),
+        true
+    );
+    // 当前会话生成中也能新建，并保持两个会话各自的生成互斥。
+    let second = procedure(&client, &base, "new-chat", json!([csrf, first]))
+        .await
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, second, "conversation-b"])
+        )
+        .await,
+        true
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            procedure(&client, &base, "send-chat", json!([csrf, second, true]))
+        )
+        .await
+        .expect("第二个会话应独立提交"),
+        true
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            fixture.database.store.chat_turns(id).await.unwrap()[0].status,
+            Status::Generating
+        );
+        assert_eq!(
+            procedure(&client, &base, "open-chat", json!([csrf, id])).await,
+            ""
+        );
+        assert_eq!(
+            procedure(&client, &base, "begin-chat", json!([csrf, id, "duplicate"])).await,
+            false
+        );
+        assert_eq!(
+            procedure(&client, &base, "send-chat", json!([csrf, id, true])).await,
+            false
+        );
+        assert!(
+            fixture
+                .database
+                .store
+                .set_chat_archived(id, true)
+                .await
+                .is_err()
+        );
+        assert!(
+            fixture
+                .database
+                .store
+                .delete_chat_conversation(id)
+                .await
+                .is_err()
+        );
+    }
+    // HTTP 页面刷新只读取快照，不重发 Provider 请求，也不等待两个后台任务结束。
+    let active = tokio::time::timeout(Duration::from_millis(500), async {
+        client
+            .get(format!("{base}/chat"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(active.contains("停止生成"));
+    assert!(active.contains("conversation-a"));
+    assert!(active.contains("conversation-b"));
+    let mut prompts = Vec::new();
+    for _ in 0..2 {
+        let request = fixture.upstreams[index].1.recv_timeout(DEADLINE).unwrap();
+        let decoded = fixtures::decode_request(source, &request.body);
+        assert_eq!(decoded.messages.len(), 1, "两会话不能混用历史");
+        prompts.push(decoded.messages[0].parts[0].kind.clone());
+    }
+    assert_eq!(
+        procedure(&client, &base, "stop-chat", json!([csrf, first])).await,
+        true
+    );
+    let cancelled = saved_turn(&fixture, &first, 1).await;
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert_eq!(
+        fixture.database.store.chat_turns(&second).await.unwrap()[0].status,
+        Status::Generating
+    );
+    // 更新时间以秒记录，固定最高 ID 让同秒的空闲首屏排序也保持确定。
+    let idle_id = "ffffffffffffffffffffffffffffffff";
+    let selection = fixture
+        .database
+        .store
+        .get_chat_conversation(&first)
+        .await
+        .unwrap()
+        .selection;
+    fixture
+        .database
+        .store
+        .create_chat_conversation(idle_id, &selection)
+        .await
+        .unwrap();
+    let idle_page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(attribute(&idle_page, "data-chat-session"), idle_id);
+    assert_eq!(
+        attribute(&idle_page, "data-chat-resume"),
+        "true",
+        "空闲首屏也要恢复后台会话的订阅"
+    );
+    // 提交请求已经结束，第二个会话仍在无人订阅时完成保存及最终来源用量。
+    let completed = saved_turn(&fixture, &second, 1).await;
+    assert_eq!(completed.status, Status::Completed);
+    assert_eq!(completed.reply.as_ref().unwrap().content, "你好");
+    assert_eq!(completed.usage.as_ref().unwrap().output_tokens, Some(3));
+    assert!(prompts.contains(&PartKind::Text("conversation-a".into())));
+    assert!(prompts.contains(&PartKind::Text("conversation-b".into())));
+    assert!(
+        fixture.upstreams[index].1.try_recv().is_err(),
+        "重复提交或刷新不能重复调用 Provider"
+    );
+}
+
+#[tokio::test]
 #[ignore = "手动浏览器验收：隔离数据库与模拟 Provider，最多等待 15 分钟"]
 async fn browser_model_switching_fixture() {
-    let fixture = Fixture::with_pause(Duration::from_secs(8)).await;
+    let fixture = Fixture::with_pause(Duration::from_secs(20)).await;
     println!("MODEL_SWITCHING_BROWSER_URL={}/chat", fixture.base());
     tokio::time::sleep(Duration::from_secs(15 * 60)).await;
 }

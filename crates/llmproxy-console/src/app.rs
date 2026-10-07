@@ -22,7 +22,7 @@ pub struct AppState {
     pub history_auth: String,
     pub port: u16,
     pub telemetry: crate::observability::ConsoleTelemetry,
-    pub chat_sessions: chat_sessions::ChatSessions,
+    pub chat_sessions: std::sync::Arc<chat_sessions::ChatSessions>,
     pub chat_client: reqwest::Client,
     pub gateway_origin: String,
 }

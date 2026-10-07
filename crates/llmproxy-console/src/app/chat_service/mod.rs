@@ -10,6 +10,9 @@ use llmproxy_store::{
 };
 use std::{io, sync::Arc};
 
+pub(crate) mod generation;
+pub(crate) mod target;
+
 /// 随机业务标识不随进程重启复用，独立于遥测自增 ID。
 pub(crate) fn new_id() -> io::Result<String> {
     let mut bytes = [0u8; 16];
@@ -20,6 +23,13 @@ pub(crate) fn new_id() -> io::Result<String> {
 pub(crate) struct ChatService<'a> {
     pub store: &'a ProviderStore,
     pub sessions: &'a ChatSessions,
+}
+/// 历史行操作；归档与删除只有在作用于当前会话时才切换工作区。
+#[derive(Clone, Copy)]
+pub(crate) enum HistoryAction {
+    Archive,
+    Restore,
+    Delete,
 }
 impl ChatService<'_> {
     /// 新会话立即落库，稳定工作区归属允许刷新后查回。
@@ -192,6 +202,28 @@ impl ChatService<'_> {
         self.store.delete_chat_conversation(id).await?;
         self.sessions.remove(id);
         Ok(())
+    }
+    /// 操作任意历史；离开当前会话时选择最近的未归档记录，必要时新建。
+    pub async fn change_history(
+        &self,
+        current: &str,
+        target: &str,
+        action: HistoryAction,
+    ) -> topcoat::Result<Option<(String, Selection)>> {
+        let fallback = if current == target && !matches!(action, HistoryAction::Restore) {
+            Some(self.load(current).await?.selection())
+        } else {
+            None
+        };
+        match action {
+            HistoryAction::Delete => self.delete(target).await?,
+            HistoryAction::Archive => self.store.set_chat_archived(target, true).await?,
+            HistoryAction::Restore => self.store.set_chat_archived(target, false).await?,
+        }
+        match fallback {
+            Some(selection) => self.initial(selection).await.map(Some),
+            None => Ok(None),
+        }
     }
 }
 

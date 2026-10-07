@@ -241,6 +241,8 @@ pub(crate) struct ChatConversationRow {
     pub selection_json: String,
     pub thinking: String,
     pub active_turn: Option<String>,
+    /// 归档保留内容与统计，仅从默认历史列表隐藏。
+    pub archived: bool,
     pub created_at: i64,
     pub updated_at: i64,
     #[version]

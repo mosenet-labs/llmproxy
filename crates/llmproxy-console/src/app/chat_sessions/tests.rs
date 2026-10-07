@@ -227,6 +227,7 @@ mod usage_tests {
             ..Default::default()
         }));
         assert_eq!(room.usage_snapshot()["2"], "缓存读取 0");
+        assert!(room.compact_snapshot()["2"].ends_with("in — · out — · cache 0"));
         assert_eq!(room.snapshot().0[1].content, "hello");
     }
 

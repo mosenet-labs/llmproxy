@@ -51,7 +51,7 @@ impl Console {
             csrf,
             port: listen.port(),
             telemetry: observability::ConsoleTelemetry::new(),
-            chat_sessions: app::chat_sessions::ChatSessions::default(),
+            chat_sessions: std::sync::Arc::new(app::chat_sessions::ChatSessions::default()),
             chat_client: reqwest::Client::builder().no_proxy().build()?,
             gateway_origin: format!(
                 "http://{}",
@@ -75,13 +75,14 @@ impl Console {
             .route(app::ui::chat::chat_protocol_picker)
             .route(app::ui::chat::chat_thinking_picker)
             .route(app::ui::chat::chat_session_list)
+            .route(app::ui::chat::chat_session_activity)
             .route(app::ui::chat::begin_chat)
             .route(app::ui::chat::send_chat)
             .route(app::ui::chat::chat_stop_button)
             .route(app::ui::chat::stop_chat)
             .route(app::ui::chat::new_chat)
             .route(app::ui::chat::open_chat)
-            .route(app::ui::chat::delete_chat)
+            .route(app::ui::chat::change_chat_history)
             .route(app::ui::chat::retry_chat_save)
             .route(app::ui::chat::switch_chat)
             .route(app::ui::chat::set_chat_thinking)
