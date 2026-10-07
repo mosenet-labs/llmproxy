@@ -32,6 +32,7 @@ pub(super) fn convert(
     bytes: Bytes,
     conversion: &CrossConversion,
     tool_state: Option<&crate::tool_state::Context>,
+    history: Option<&crate::history::Sink>,
 ) -> Result<Bytes> {
     let response = matches!(conversion, CrossConversion::Response { .. });
     let result = (|| -> std::result::Result<Bytes, llmproxy_core::adapter::Error> {
@@ -56,6 +57,9 @@ pub(super) fn convert(
             } => {
                 let body = codec::decode_response(*source, &bytes)?;
                 let mut response = source.decode_response(&body)?;
+                if let Some(history) = history {
+                    history.response(&response);
+                }
                 if let Some(usage) = &response.usage {
                     crate::observability::response_usage(*source, *target, usage);
                 }

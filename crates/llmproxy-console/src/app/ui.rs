@@ -55,6 +55,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                 head_assets()
                 <link rel="stylesheet" href="/ui/assets/console.css">
                 topcoat::runtime::script()
+                if chat_page { <script type="module" src="/ui/assets/chat-resume.js"></script> }
             </head>
             <body>
                 <div class="grid min-h-screen grid-cols-[216px_minmax(0,1fr)] max-[900px]:grid-cols-[176px_minmax(0,1fr)] max-[640px]:block">

@@ -19,6 +19,7 @@ const ALL: [Protocol; 4] = [
 
 fn context(source: Protocol, target: Protocol, stream: bool) -> RequestContext {
     RequestContext {
+        history: None,
         thinking: Default::default(),
         thinking_error: None,
         telemetry: RequestTelemetry::new(),
@@ -27,6 +28,8 @@ fn context(source: Protocol, target: Protocol, stream: bool) -> RequestContext {
             source,
             "alias".into(),
             Arc::new(ResolvedProvider {
+                id: 0,
+                name: "fixture".into(),
                 protocol: target,
                 upstream_path: target.upstream_path().into(),
                 host: "provider.test".into(),

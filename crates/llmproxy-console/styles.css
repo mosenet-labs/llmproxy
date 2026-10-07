@@ -55,6 +55,18 @@
   color: #1557a8;
 }
 
+/* 设置默认收起，保留原生键盘操作与焦点；用量入口固定在正文滚动区之外。 */
+.chat-settings > summary { list-style: none; }
+.chat-settings > summary::-webkit-details-marker { display: none; }
+.chat-settings > summary:focus-visible { outline: 2px solid #a7c7f3; outline-offset: 4px; }
+.chat-settings[open] .chat-settings-caret { transform: rotate(90deg); }
+.chat-usage-trigger { border: 0; background: transparent; }
+
+/* 窄屏标题栏位于侧栏下方，浮层固定到视口以避免被工作区裁切。 */
+@media (max-width: 640px) {
+  #chat-usage-panel { position: fixed; top: 16px; right: 16px; margin-top: 0; }
+}
+
 .chat-workspace .gr-chat-avatar { display: none; }
 .chat-workspace .gr-chat-bubble { gap: 0; }
 .chat-workspace .gr-chat-role { color: #8994a4; }

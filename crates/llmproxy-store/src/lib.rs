@@ -1,5 +1,6 @@
 //! Provider management persistence. Public views never contain stored credentials.
 
+pub mod chat_history;
 mod crypto;
 mod database;
 mod holiday;
@@ -111,6 +112,7 @@ pub struct ProviderView {
 /// Gateway-only configuration. This type intentionally has no Debug or Serialize.
 #[derive(Clone)]
 pub struct ActiveProvider {
+    pub name: String,
     pub id: i64,
     pub protocol: Protocol,
     pub upstream_path: String,

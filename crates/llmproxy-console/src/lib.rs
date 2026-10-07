@@ -19,6 +19,7 @@ pub use topcoat::router::{Body, request::Request, response::Response};
 pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 pub struct Console {
+    history_auth: String,
     router: Router,
 }
 
@@ -29,11 +30,22 @@ impl Console {
         listen: SocketAddr,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let store = ProviderStore::connect(database_url, master_key).await?;
+        Self::from_store(store, listen).await
+    }
+
+    /// 与 Gateway 共用连接池及历史写锁；只在单个本地服务启动时恢复遗留记录。
+    pub async fn from_store(
+        store: ProviderStore,
+        listen: SocketAddr,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         store.list().await?;
+        store.recover_chat_history().await?;
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|_| io::Error::other("无法生成安全随机令牌"))?;
         let csrf = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let history_auth = app::chat_service::new_id()?;
         let state = app::AppState {
+            history_auth: history_auth.clone(),
             store,
             prober: llmproxy_probe::ModelProber::new()?,
             csrf,
@@ -59,13 +71,18 @@ impl Console {
             .layer(app::protect)
             .layer(observability::request_layer())
             .route(app::ui::chat::chat_history)
+            .route(app::ui::chat::chat_usage)
             .route(app::ui::chat::chat_protocol_picker)
             .route(app::ui::chat::chat_thinking_picker)
             .route(app::ui::chat::chat_session_list)
             .route(app::ui::chat::begin_chat)
             .route(app::ui::chat::send_chat)
+            .route(app::ui::chat::chat_stop_button)
             .route(app::ui::chat::stop_chat)
             .route(app::ui::chat::new_chat)
+            .route(app::ui::chat::open_chat)
+            .route(app::ui::chat::delete_chat)
+            .route(app::ui::chat::retry_chat_save)
             .route(app::ui::chat::switch_chat)
             .route(app::ui::chat::set_chat_thinking)
             .route(app::ui::chat::default_protocol)
@@ -101,6 +118,7 @@ impl Console {
             .route(assets::component_css)
             .route(assets::console_css)
             .route(assets::runtime_js)
+            .route(assets::chat_resume_js)
             .runtime()
             .topcoat_ant_design()
             .assets(assets::config().map_err(|_| io::Error::other("无法加载控制台静态资源"))?);
@@ -114,8 +132,20 @@ impl Console {
                 write!(writer, "/ui{}", topcoat::font::FontRoute::new(font).path())
             }));
         Ok(Self {
+            history_auth,
             router: builder.build(),
         })
+    }
+
+    /// 内部历史请求须通过服务端令牌认证，不使用浏览器 CSRF 令牌。
+    pub fn accepts_history_auth(&self, supplied: &[u8]) -> bool {
+        let expected = self.history_auth.as_bytes();
+        expected.len() == supplied.len()
+            && expected
+                .iter()
+                .zip(supplied)
+                .fold(0, |acc, (a, b)| acc | (a ^ b))
+                == 0
     }
 
     pub async fn handle(&self, mut request: Request) -> Response {

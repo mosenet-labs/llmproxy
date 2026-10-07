@@ -43,6 +43,20 @@ pub async fn runtime_js() -> Result<Response> {
     )
 }
 
+/// 首屏事件绑定完成后恢复生成中的 HTTP shard；不重新调用 Provider。
+#[route(GET "/ui/assets/chat-resume.js")]
+pub async fn chat_resume_js() -> Result<Response> {
+    asset(
+        "text/javascript; charset=utf-8",
+        r#"const resume = () => requestAnimationFrame(() => {
+    const room = document.querySelector('.chat-workspace[data-chat-resume="true"]');
+    if (room) room.dispatchEvent(new Event('chatresume'));
+});
+if (document.readyState === 'complete') resume();
+else window.addEventListener('load', resume, { once: true });"#,
+    )
+}
+
 fn asset(content_type: &'static str, body: &'static str) -> Result<Response> {
     Ok(Response::builder()
         .header("content-type", content_type)

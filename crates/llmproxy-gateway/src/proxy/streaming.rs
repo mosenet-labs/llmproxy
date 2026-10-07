@@ -18,7 +18,7 @@ impl Transfer {
     /// 在上下文移交子请求前固定目标外壳、来源协议和签名作用域。
     pub(super) fn new(ctx: &RequestContext) -> Result<Self> {
         let route = ctx.route.as_ref().expect("stream route selected");
-        Ok(Self {
+        let mut transfer = Self {
             stream: if route.is_cross_protocol() {
                 Some(Stream::new(
                     route.provider.protocol,
@@ -34,7 +34,13 @@ impl Transfer {
             ended: false,
             upstream_status: None,
             write_timeout: std::time::Duration::from_millis(route.provider.write_timeout_ms),
-        })
+        };
+        if let Some(stream) = &mut transfer.stream
+            && let Some(history) = &ctx.history
+        {
+            stream.set_history(history.sink.clone());
+        }
+        Ok(transfer)
     }
     /// 收到完整帧就转换发送，正文后续尚未就绪时监视真实客户端关闭。
     pub(super) async fn run(

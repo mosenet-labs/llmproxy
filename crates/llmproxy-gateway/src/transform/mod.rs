@@ -54,6 +54,7 @@ impl Default for Operation {
 
 #[derive(Default)]
 pub struct BodyTransform {
+    history: Option<crate::history::Sink>,
     kind: BodyKind,
     operation: Operation,
     tool_state: Option<crate::tool_state::Context>,
@@ -67,11 +68,18 @@ impl BodyTransform {
     pub fn new(kind: BodyKind) -> Self {
         Self {
             kind,
+            history: None,
             operation: Operation::default(),
             tool_state: None,
             pending: Vec::new(),
             observer: None,
         }
+    }
+
+    /// 历史只观察来源计数，正文交付方式保持独立。
+    /// 绑定来源统计观察器，跨协议编码前读取完整用量。
+    pub(crate) fn set_history(&mut self, sink: crate::history::Sink) {
+        self.history = Some(sink);
     }
 
     /// 为 JSON 正文指定来源协议及请求或响应方向。
@@ -81,6 +89,9 @@ impl BodyTransform {
             self.observer = (matches!(phase, MessagePhase::Response)
                 && matches!(self.kind, BodyKind::Sse))
             .then(|| stream::Observer::new(protocol));
+            if let Some(observer) = &mut self.observer {
+                observer.set_history(self.history.clone());
+            }
         }
     }
 
@@ -223,15 +234,24 @@ impl BodyTransform {
     /// 同步响应转换只暂存新引用，持久化留给尚未发头的父请求。
     fn process(&self, complete: Bytes) -> Result<Bytes> {
         match &self.operation {
-            Operation::Convert(cross) => cross::convert(complete, cross, self.tool_state.as_ref()),
-            Operation::Observe(codec) => Ok(process_json(complete, *codec)),
+            Operation::Convert(cross) => cross::convert(
+                complete,
+                cross,
+                self.tool_state.as_ref(),
+                self.history.as_ref(),
+            ),
+            Operation::Observe(codec) => Ok(process_json(complete, *codec, self.history.as_ref())),
             Operation::Error { .. } => unreachable!("错误状态已在正文收集阶段处理"),
         }
     }
 }
 
 /// 完整 JSON 只投影和观察 IR；未编辑时直接保留原始字节输出。
-fn process_json(bytes: Bytes, codec: Option<(Protocol, MessagePhase)>) -> Bytes {
+fn process_json(
+    bytes: Bytes,
+    codec: Option<(Protocol, MessagePhase)>,
+    history: Option<&crate::history::Sink>,
+) -> Bytes {
     let Some((protocol, phase)) = codec else {
         return bytes;
     };
@@ -245,6 +265,9 @@ fn process_json(bytes: Bytes, codec: Option<(Protocol, MessagePhase)>) -> Bytes 
             MessagePhase::Response => {
                 let body = codec::decode_response(protocol, &bytes)?;
                 let ir = protocol.decode_response(&body)?;
+                if let Some(history) = history {
+                    history.response(&ir);
+                }
                 if let Some(usage) = &ir.usage {
                     crate::observability::response_usage(protocol, protocol, usage);
                 }

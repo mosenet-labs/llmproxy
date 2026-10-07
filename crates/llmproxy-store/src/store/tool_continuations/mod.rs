@@ -135,7 +135,7 @@ impl ProviderStore {
     }
 
     /// 防止使用错误主密钥续期或写入；不在错误消息中暴露密文和载荷。
-    async fn verify_tool_key(&self, tx: &mut Transaction<'_>) -> StoreResult<()> {
+    pub(super) async fn verify_tool_key(&self, tx: &mut Transaction<'_>) -> StoreResult<()> {
         let key = StoreKey::filter_by_id(1_i64)
             .first()
             .exec(tx)

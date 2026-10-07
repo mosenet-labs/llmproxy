@@ -5,6 +5,7 @@ use topcoat::{
     router::{Body, Next, error::forbidden, layer, request::headers, response::Response},
 };
 
+pub(crate) mod chat_service;
 pub(crate) mod chat_sessions;
 pub(crate) mod holiday_notice;
 pub(crate) mod model_catalog;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub store: ProviderStore,
     pub prober: llmproxy_probe::ModelProber,
     pub csrf: String,
+    pub history_auth: String,
     pub port: u16,
     pub telemetry: crate::observability::ConsoleTelemetry,
     pub chat_sessions: chat_sessions::ChatSessions,

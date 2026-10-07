@@ -1,5 +1,6 @@
 mod config;
 mod console;
+mod history;
 mod observability;
 mod proxy;
 mod snapshot;
@@ -25,9 +26,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let console = _console_runtime.block_on(llmproxy_console::Console::connect(
-        settings.database.url(),
-        settings.database.master_key(),
+    let console = _console_runtime.block_on(llmproxy_console::Console::from_store(
+        store.clone(),
         settings.listen,
     ))?;
 

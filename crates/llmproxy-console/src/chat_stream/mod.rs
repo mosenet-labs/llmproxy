@@ -9,7 +9,7 @@ mod incremental_tests;
 mod media;
 mod request;
 pub(crate) use display::DisplayPart;
-use history::{Content, Conversation, Selection};
+use history::{Conversation, Selection};
 use llmproxy_core::protocol::Protocol;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use request::{request_body, with_request_body};
@@ -23,35 +23,7 @@ const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
-#[derive(Debug, Default)]
-pub(crate) struct ChatReply {
-    /// 显示给用户的回答正文。
-    pub content: String,
-    /// 可见思考内容。
-    pub thinking: String,
-    /// 可见思考的摘要。
-    pub summary: String,
-    /// 经 IR 统一口径的本轮统计，缺失计数不补零。
-    pub usage: Option<llmproxy_core::ir::usage::Usage>,
-    /// 工具、媒体和服务端执行内容；展示标签不进入下一轮文本历史。
-    pub parts: Vec<DisplayPart>,
-    /// 正常结束后才提供可提交的 IR 历史，展示标签不参与生成。
-    pub history: Content,
-    /// 响应实际报告的模型，不覆盖当前会话选择。
-    pub model: Option<String>,
-    /// 本轮历史与协议转换的静态提示，不含参数或签名。
-    pub warnings: Vec<String>,
-}
-
-impl ChatReply {
-    pub fn visible_thinking(&self) -> &str {
-        if self.thinking.is_empty() {
-            &self.summary
-        } else {
-            &self.thinking
-        }
-    }
-}
+pub(crate) use llmproxy_core::conversation::Reply as ChatReply;
 
 fn error_message(value: &Value) -> String {
     value
@@ -72,6 +44,7 @@ pub(crate) async fn chat_reply(
     history: &Conversation,
     stream: bool,
     thinking: llmproxy_core::thinking::Choice,
+    history_request: Option<(&str, &str)>,
     mut on_update: impl FnMut(&ChatReply),
 ) -> Result<ChatReply, String> {
     let protocol = selection.protocol;
@@ -120,6 +93,13 @@ pub(crate) async fn chat_reply(
             "application/json"
         },
     );
+    let builder = if let Some((key, auth)) = history_request {
+        builder
+            .header(llmproxy_store::chat_history::REQUEST_HEADER, key)
+            .header(llmproxy_store::chat_history::AUTH_HEADER, auth)
+    } else {
+        builder
+    };
     let response = with_request_body(
         builder.header(llmproxy_core::thinking::HEADER, thinking.as_str()),
         &converted.body,

@@ -1,5 +1,6 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,12 +15,14 @@ use crate::{
     crypto::KeyCipher,
     database::Backend,
     model::{
-        HolidayDateRow, ModelMapping, ModelPricePlan, ModelPriceRule, ModelRouteRow,
-        ModelRouteTargetRow, Provider, RouteBinding, StoreKey, ToolContinuationRow, protocol,
+        ChatConversationRow, ChatTurnRow, HolidayDateRow, ModelMapping, ModelPricePlan,
+        ModelPriceRule, ModelRouteRow, ModelRouteTargetRow, Provider, RouteBinding, StoreKey,
+        ToolContinuationRow, protocol,
     },
     pricing::decimal_price,
 };
 
+mod chat_history;
 mod holidays;
 mod migrations;
 mod models;
@@ -42,6 +45,9 @@ pub struct ProviderStore {
     db: Db,
     cipher: KeyCipher,
     backend: Backend,
+    // SQLite 的同步锁等待不能阻塞持锁事务所在的 async 执行线程。
+    chat_writes: Arc<tokio::sync::Mutex<()>>,
+    pending_chat_usage: Arc<std::sync::Mutex<HashMap<String, chat_history::PendingUsage>>>,
 }
 
 impl ProviderStore {
@@ -53,6 +59,7 @@ impl ProviderStore {
         upstream_path: String,
     ) -> StoreResult<ActiveProvider> {
         Ok(ActiveProvider {
+            name: provider.name.clone(),
             id: provider.id,
             protocol,
             upstream_path,
@@ -84,7 +91,9 @@ impl ProviderStore {
                 ModelPricePlan,
                 ModelPriceRule,
                 HolidayDateRow,
-                ToolContinuationRow
+                ToolContinuationRow,
+                ChatConversationRow,
+                ChatTurnRow
             ))
             .max_pool_size(10)
             .pool_wait_timeout(Some(Duration::from_secs(10)))
@@ -102,6 +111,8 @@ impl ProviderStore {
             db,
             cipher,
             backend,
+            chat_writes: Arc::default(),
+            pending_chat_usage: Arc::default(),
         })
     }
 

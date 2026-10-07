@@ -10,29 +10,8 @@ use llmproxy_core::ir::{
     response::{Item, Response},
     server_output::{Kind, ServerOutput},
 };
-use serde::{Deserialize, Serialize};
 
-/// 文本正文之外的独立展示块，不保存签名或原始协议扩展。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct DisplayPart {
-    /// 空标题表示普通正文，非空标题表示工具或附件说明。
-    pub title: String,
-    /// 可见正文或格式化后的工具参数/结果。
-    pub text: String,
-    /// 已筛选的媒体载体。
-    pub media: Option<DisplayMedia>,
-}
-
-/// 已筛选的可展示媒体地址；缺失格式时仅提供下载。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct DisplayMedia {
-    /// 用于选择图片、音频、视频或下载控件。
-    pub kind: MediaKind,
-    /// 可公开访问的地址或经过类型筛选的内联数据。
-    pub uri: String,
-    /// 是否具备明确且可被浏览器预览的 MIME 类型。
-    pub preview: bool,
-}
+pub(crate) use llmproxy_core::conversation::{DisplayMedia, DisplayPart};
 
 /// 只读取序号最小的候选，保持该候选内部输出项和片段的顺序。
 pub(super) fn read(ir: &Response, reply: &mut ChatReply) {

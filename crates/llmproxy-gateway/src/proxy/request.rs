@@ -14,6 +14,8 @@ const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 /// 本次请求的目标协议、模型及流式模式在上游连接前已确定。
 pub(super) fn filter(request: &mut RequestHeader, ctx: &RequestContext) -> Result<()> {
     request.remove_header(llmproxy_core::thinking::HEADER);
+    request.remove_header(llmproxy_store::chat_history::REQUEST_HEADER);
+    request.remove_header(llmproxy_store::chat_history::AUTH_HEADER);
     let route = ctx.route.as_ref().expect("request_filter selected route");
     let client_protocol = route.protocol;
     let provider = &route.provider;

@@ -3,7 +3,11 @@ use super::*;
 use crate::chat_stream::request::request_body;
 use llmproxy_core::{
     adapter::protocol_codec::ProtocolCodec,
-    ir::message::{Part, PartKind, ToolCall, ToolResult},
+    ir::{
+        message::{Part, PartKind, Role, ToolCall, ToolResult},
+        request::{Item, Message},
+    },
+    protocol::Protocol,
 };
 use serde_json::json;
 

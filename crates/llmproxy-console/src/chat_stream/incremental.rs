@@ -77,6 +77,7 @@ impl Reply {
         {
             return Err("上游未返回可显示的内容".into());
         }
+        self.reply.status = self.decoder.state().ended();
         self.reply.history = self.history.finish();
         self.reply.model = self
             .decoder

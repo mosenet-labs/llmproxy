@@ -71,6 +71,9 @@ pub(super) async fn forward(
         .decode_cross_request(&input, ctx.route.as_ref().unwrap().stream)?;
     ctx.route.as_mut().unwrap().stream = request.generation.stream;
     super::thinking::apply(ctx, &mut request)?;
+    if let Some(history) = &ctx.history {
+        history.sink.reasoning(&request.generation.reasoning);
+    }
     // 签名恢复可能等待持久化存储，准备期间也监视客户端断开并取消该 future。
     tokio::select! {
         prepared = ctx.telemetry.instrument(ctx.request_body.prepare_cross_request(&request)) => prepared?,
@@ -95,6 +98,7 @@ pub(super) async fn forward(
     let span = ctx.telemetry.in_scope(tracing::Span::current);
     let telemetry = ctx.telemetry.cancellation_snapshot();
     let route = ctx.route.clone();
+    let history = ctx.history.clone();
     let shared = Exchange(Arc::new(Mutex::new(Some(std::mem::replace(
         ctx,
         gateway.new_ctx(),
@@ -102,6 +106,7 @@ pub(super) async fn forward(
     ctx.protocol = protocol;
     ctx.telemetry = telemetry;
     ctx.route = route;
+    ctx.history = history;
     let (request, handle) = spawner.create_subrequest(
         session.as_downstream(),
         Ctx::builder()

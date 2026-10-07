@@ -229,3 +229,50 @@ impl ModelMapping {
         .collect()
     }
 }
+
+/// 会话与轮次独立建表，模型配置删除不级联删除历史。
+#[derive(toasty::Model)]
+#[table = "chat_conversations"]
+pub(crate) struct ChatConversationRow {
+    #[key]
+    pub id: String,
+    pub owner: String,
+    pub title: String,
+    pub selection_json: String,
+    pub thinking: String,
+    pub active_turn: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[version]
+    pub version: u64,
+}
+#[derive(toasty::Model)]
+#[table = "chat_turns"]
+pub(crate) struct ChatTurnRow {
+    #[key]
+    pub id: String,
+    pub conversation_id: String,
+    pub sequence: i64,
+    pub selection_json: String,
+    pub alias: String,
+    pub thinking: String,
+    pub encrypted_prompt: String,
+    pub encrypted_reply: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub actual_json: Option<String>,
+    pub usage_json: Option<String>,
+    pub usage_state: String,
+    pub gateway_started: bool,
+    pub gateway_finished: bool,
+    pub provider_id: Option<i64>,
+    pub upstream_model: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+}

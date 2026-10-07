@@ -86,6 +86,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0017_model_thinking.sql",
         include_str!("../../migrations/postgresql/0017_model_thinking.sql"),
     ),
+    MigrationFile::new(
+        202610070001,
+        "0018_chat_history.sql",
+        include_str!("../../migrations/postgresql/0018_chat_history.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -323,5 +328,20 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610060001,
         "0047_model_thinking.sql",
         include_str!("../../migrations/sqlite/0047_model_thinking.sql"),
+    ),
+    MigrationFile::new(
+        202610070001,
+        "0048_chat_conversations.sql",
+        include_str!("../../migrations/sqlite/0048_chat_conversations.sql"),
+    ),
+    MigrationFile::new(
+        202610070002,
+        "0049_chat_conversations_owner_time_idx.sql",
+        include_str!("../../migrations/sqlite/0049_chat_conversations_owner_time_idx.sql"),
+    ),
+    MigrationFile::new(
+        202610070003,
+        "0050_chat_turns.sql",
+        include_str!("../../migrations/sqlite/0050_chat_turns.sql"),
     ),
 ]);

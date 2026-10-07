@@ -33,6 +33,7 @@ use crate::{
 };
 
 pub struct Gateway {
+    history_store: llmproxy_store::ProviderStore,
     providers: ProviderSnapshots,
     telemetry: GatewayTelemetry,
     console: llmproxy_console::Console,
@@ -40,6 +41,7 @@ pub struct Gateway {
 }
 
 pub struct RequestContext {
+    history: Option<crate::history::Tracker>,
     thinking: llmproxy_core::thinking::Choice,
     thinking_error: Option<&'static str>,
     telemetry: RequestTelemetry,
@@ -59,6 +61,7 @@ impl Gateway {
         store: llmproxy_store::ProviderStore,
     ) -> Self {
         Self {
+            history_store: store.clone(),
             providers,
             telemetry: GatewayTelemetry::new(),
             console,
@@ -88,7 +91,7 @@ impl Gateway {
     }
 
     /// 统一准备路由、转换模式和工具作用域，Pingora 阶段只负责读取及选择。
-    fn prepare_route(
+    async fn prepare_route(
         &self,
         session: &Session,
         ctx: &mut RequestContext,
@@ -121,6 +124,23 @@ impl Gateway {
                 &route.upstream_model,
             );
         }
+        if let Some(history) = &ctx.history {
+            history
+                .start(
+                    &route.client_model,
+                    route.protocol,
+                    llmproxy_store::chat_history::ActualCall {
+                        provider_id: route.provider.id,
+                        provider_name: route.provider.name.clone(),
+                        upstream_model: route.upstream_model.clone(),
+                        protocol: route.provider.protocol,
+                        reasoning: None,
+                        reported_model: None,
+                    },
+                )
+                .await?;
+            ctx.response_body.set_history(history.sink.clone());
+        }
         ctx.route = Some(route);
         Ok(())
     }
@@ -132,6 +152,7 @@ impl ProxyHttp for Gateway {
 
     fn new_ctx(&self) -> Self::CTX {
         RequestContext {
+            history: None,
             thinking: Default::default(),
             thinking_error: None,
             telemetry: RequestTelemetry::new(),
@@ -157,6 +178,19 @@ impl ProxyHttp for Gateway {
             ctx.console = true;
             crate::console::serve(&self.console, session).await?;
             return Ok(true);
+        }
+        if self.console.accepts_history_auth(
+            session.get_header_bytes(llmproxy_store::chat_history::AUTH_HEADER),
+        ) && let Some(key) = session
+            .req_header()
+            .headers
+            .get(llmproxy_store::chat_history::REQUEST_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            ctx.history = Some(crate::history::Tracker::new(
+                key.into(),
+                self.history_store.clone(),
+            ));
         }
         let request = session.req_header();
         let method = request.method.as_str();
@@ -213,7 +247,8 @@ impl ProxyHttp for Gateway {
                         stream,
                         thinking,
                     ),
-                )?;
+                )
+                .await?;
                 buffered::forward(self, session, ctx).await
             }
             Route::Proxy(protocol) => {
@@ -263,7 +298,8 @@ impl ProxyHttp for Gateway {
                         false,
                         thinking,
                     ),
-                )?;
+                )
+                .await?;
                 buffered::forward(self, session, ctx).await
             }
             Route::Auto => {
@@ -450,7 +486,7 @@ impl ProxyHttp for Gateway {
         }
         ctx.telemetry.in_scope(|| {
             ctx.response_body
-                .set_codec(client_protocol, MessagePhase::Response)
+                .set_codec(provider_protocol, MessagePhase::Response)
         });
         // This is a copy of the upstream header, before downstream framing is
         // selected. The upstream reader keeps its original framing information.
@@ -628,6 +664,15 @@ impl ProxyHttp for Gateway {
         let status = session
             .response_written()
             .map(|header| header.status.as_u16());
+        if let Some(history) = &ctx.history
+            && history.finish().await.is_err()
+        {
+            tracing::error!(
+                component = "gateway",
+                event_kind = "history_save",
+                "来源用量保存失败"
+            );
+        }
         self.telemetry.finish(&mut ctx.telemetry, status, error);
     }
 }

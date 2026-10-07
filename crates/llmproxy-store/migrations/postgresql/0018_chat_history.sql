@@ -1,0 +1,40 @@
+CREATE TABLE chat_conversations (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    title TEXT NOT NULL,
+    selection_json TEXT NOT NULL,
+    thinking TEXT NOT NULL,
+    active_turn TEXT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    version BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX chat_conversations_owner_time_idx ON chat_conversations(owner, updated_at DESC, id);
+CREATE TABLE chat_turns (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+    sequence BIGINT NOT NULL,
+    selection_json TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    thinking TEXT NOT NULL,
+    encrypted_prompt TEXT NOT NULL,
+    encrypted_reply TEXT,
+    status TEXT NOT NULL,
+    error TEXT,
+    actual_json TEXT,
+    usage_json TEXT,
+    usage_state TEXT NOT NULL,
+    gateway_started BOOLEAN NOT NULL,
+    gateway_finished BOOLEAN NOT NULL,
+    provider_id BIGINT,
+    upstream_model TEXT,
+    input_tokens BIGINT,
+    output_tokens BIGINT,
+    total_tokens BIGINT,
+    cache_read_tokens BIGINT,
+    cache_write_tokens BIGINT,
+    reasoning_tokens BIGINT,
+    started_at BIGINT NOT NULL,
+    ended_at BIGINT,
+    UNIQUE(conversation_id, sequence)
+);

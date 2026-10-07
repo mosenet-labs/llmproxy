@@ -20,7 +20,10 @@ pub(super) fn decode(protocol: Protocol, bytes: &[u8]) -> Result<ChatReply, Stri
         Status::Unknown => return Err("Provider 返回了未知生成状态".into()),
         Status::Completed | Status::Incomplete => {}
     }
-    let mut reply = ChatReply::default();
+    let mut reply = ChatReply {
+        status: Some(ir.status),
+        ..Default::default()
+    };
     super::display::read(&ir, &mut reply);
     if let Response::Chat(body) = &body
         && let Some(audio) = body

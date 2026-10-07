@@ -1,3 +1,4 @@
+mod history;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -98,6 +99,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
     assert!(store.list().await.unwrap().is_empty());
     assert!(store.load_active().await.unwrap().is_empty());
     exercise_tool_continuations(&store, url, &key).await;
+    history::exercise(&store, url, &key).await;
 
     // An empty migrated database is already bound to its first master key.
     let wrong_key = ProviderStore::connect(url, &STANDARD.encode([8; 32]))

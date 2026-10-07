@@ -9,6 +9,7 @@ use llmproxy_core::{
 };
 
 pub(in crate::transform) struct Observer {
+    history: Option<crate::history::Sink>,
     protocol: Protocol,
     framing: sse::Decoder,
     decoder: Decoder,
@@ -20,6 +21,7 @@ impl Observer {
     /// 独立观察状态只用于统计，生命周期校验失败不会影响同协议透传。
     pub(in crate::transform) fn new(protocol: Protocol) -> Self {
         Self {
+            history: None,
             protocol,
             framing: sse::Decoder::new(super::super::MAX_BUFFERED_BODY),
             decoder: protocol.stream_decoder(Limits::default()),
@@ -28,10 +30,17 @@ impl Observer {
             span: tracing::Span::current(),
         }
     }
+    /// 将来源累计用量写入本轮共享采集器，正文回调不写数据库。
+    pub(crate) fn set_history(&mut self, sink: Option<crate::history::Sink>) {
+        self.history = sink;
+    }
     /// 逐帧读取来源计数；无法识别的流停止观察，仍保留此前已报告的用量。
     pub(in crate::transform) fn push(&mut self, bytes: &[u8], end: bool) {
         if self.active && self.read(bytes, end).is_err() {
             self.active = false;
+        }
+        if let Some(history) = &self.history {
+            history.stream(self.decoder.state(), self.active);
         }
         if end {
             self.record();

@@ -18,7 +18,7 @@ struct Fixture {
     upstreams: Vec<(Mock, Receiver<Request>)>,
 }
 
-fn answer(protocol: Protocol, request: &Request, socket: &mut TcpStream) {
+fn answer(protocol: Protocol, request: &Request, socket: &mut TcpStream, pause: Duration) {
     if request.method == "GET" {
         // 模型编辑页会查询目录；空目录仍允许回显已保存的模型 ID。
         respond(
@@ -47,14 +47,17 @@ fn answer(protocol: Protocol, request: &Request, socket: &mut TcpStream) {
             let summary = json!({"responseId":"raw","modelVersion":"upstream-model","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"先检查条件，再计算结果。","thought":true}]}}]});
             chunk(socket, format!("data: {summary}\n\n").as_bytes()).unwrap();
         }
-        let (start, end) = streaming::frames(protocol, false);
+        let (mut start, end) = streaming::frames(protocol, false);
+        if protocol == Protocol::AnthropicMessages {
+            start[0]=b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"raw\",\"type\":\"message\",\"model\":\"upstream-model\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":6,\"cache_read_input_tokens\":4,\"cache_creation_input_tokens\":2,\"cache_creation\":{\"ephemeral_5m_input_tokens\":1,\"ephemeral_1h_input_tokens\":1},\"output_tokens\":0}}}\n\n".to_vec();
+        }
         for frame in start {
             if chunk(socket, &frame).is_err() {
                 return;
             }
         }
         // 留出页面观察生成中控件及停止的时间。
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(pause);
         for frame in end {
             if chunk(socket, &frame).is_err() {
                 return;
@@ -63,6 +66,11 @@ fn answer(protocol: Protocol, request: &Request, socket: &mut TcpStream) {
         finish_chunks(socket);
     } else {
         let mut response = fixtures::response(protocol, false);
+        if protocol == Protocol::AnthropicMessages {
+            response["usage"]["cache_creation_input_tokens"] = json!(2);
+            response["usage"]["cache_creation"] =
+                json!({"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":1});
+        }
         if thought {
             response["candidates"][0]["content"]["parts"] = json!([
                 {"text":"先检查条件，再计算结果。","thought":true},
@@ -80,14 +88,21 @@ fn answer(protocol: Protocol, request: &Request, socket: &mut TcpStream) {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_pause(Duration::from_millis(500)).await
+    }
+    async fn with_pause(pause: Duration) -> Self {
         let database = Database::new().await;
         let mut upstreams = Vec::new();
         for protocol in ALL {
             let (mock, received) =
-                Mock::http(move |request, socket| answer(protocol, request, socket));
+                Mock::http(move |request, socket| answer(protocol, request, socket, pause));
             database
                 .add_provider(
-                    streaming::provider(protocol, mock.address.port(), 2000),
+                    streaming::provider(
+                        protocol,
+                        mock.address.port(),
+                        2000.max(pause.as_millis() as u64 + 1000),
+                    ),
                     protocol,
                     "upstream-model",
                 )
@@ -95,7 +110,7 @@ impl Fixture {
             upstreams.push((mock, received));
         }
         // 一个模型支持多个入口，覆盖仅切换协议以及保留当前协议的选择行为。
-        let (mock, received) = Mock::http(|request, socket| {
+        let (mock, received) = Mock::http(move |request, socket| {
             let protocol = if request.method == "GET" {
                 Protocol::OpenAiChat
             } else if request.target.starts_with("/v1beta/") {
@@ -105,7 +120,7 @@ impl Fixture {
                     .find(|p| request.target == p.upstream_path())
                     .unwrap()
             };
-            answer(protocol, request, socket);
+            answer(protocol, request, socket, pause);
         });
         let mut provider = streaming::provider(Protocol::OpenAiChat, mock.address.port(), 2000);
         provider.name = "multi-protocol".into();
@@ -228,6 +243,402 @@ fn attribute<'a>(html: &'a str, name: &str) -> &'a str {
         .split('"')
         .next()
         .unwrap()
+}
+
+/// 等待 Gateway 异步收尾，统计与正文两个保存事务可以先后完成。
+async fn saved_turn(
+    fixture: &Fixture,
+    id: &str,
+    sequence: usize,
+) -> llmproxy_store::chat_history::Turn {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let turns = fixture.database.store.chat_turns(id).await.unwrap();
+        if let Some(turn) = turns.get(sequence - 1)
+            && turn.call_finished
+        {
+            return turn.clone();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "来源统计未保存");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// 四同协议与十二跨方向在两种模式都从来源记录统计，目标编码不能丢失缓存写入。
+#[tokio::test]
+async fn history_records_source_usage_in_all_directions_and_survives_restart() {
+    let mut fixture = Fixture::new().await;
+    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let mut base = fixture.base();
+    let editor = client
+        .get(format!("{base}/providers/form"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let mut csrf = attribute(editor.split_once("name=\"csrf\"").unwrap().1, "value").to_owned();
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let id = attribute(&page, "data-chat-session").to_owned();
+    let routes = fixture.database.store.list_routes().await.unwrap();
+    let mut sequence = 0;
+    for stream in [false, true] {
+        for source in ALL {
+            for (target_index, target) in ALL.into_iter().enumerate() {
+                let route = routes
+                    .iter()
+                    .find(|r| r.protocol == source && r.provider_protocol == target)
+                    .unwrap();
+                assert_eq!(
+                    procedure(
+                        &client,
+                        &base,
+                        "switch-chat",
+                        json!([csrf, id, format!("route:{}", route.id), source.as_str()])
+                    )
+                    .await,
+                    ""
+                );
+                assert_eq!(
+                    procedure(
+                        &client,
+                        &base,
+                        "begin-chat",
+                        json!([csrf, id, format!("history-{sequence}")])
+                    )
+                    .await,
+                    true
+                );
+                assert_eq!(
+                    procedure(&client, &base, "send-chat", json!([csrf, id, stream])).await,
+                    true
+                );
+                sequence += 1;
+                let turn = saved_turn(&fixture, &id, sequence).await;
+                assert_eq!(
+                    turn.status,
+                    llmproxy_store::chat_history::Status::Completed,
+                    "{source:?}->{target:?} stream={stream}"
+                );
+                assert_eq!(
+                    turn.usage_state,
+                    llmproxy_store::chat_history::UsageState::Final
+                );
+                let a = turn.actual.unwrap();
+                assert_eq!(a.protocol, target);
+                assert_eq!(a.provider_name, target.as_str());
+                assert_eq!(a.upstream_model, "upstream-model");
+                assert_eq!(a.reported_model.as_deref(), Some("upstream-model"));
+                let usage = turn.usage.unwrap();
+                assert_eq!(
+                    usage.input_tokens,
+                    Some(if target == Protocol::AnthropicMessages {
+                        12
+                    } else {
+                        10
+                    })
+                );
+                if target == Protocol::AnthropicMessages {
+                    assert_eq!(usage.cache.write_input_tokens, Some(2));
+                    assert_eq!(usage.cache.write_short_input_tokens, Some(1));
+                    assert_eq!(usage.cache.write_long_input_tokens, Some(1));
+                }
+                assert_eq!(usage.output_tokens, Some(3));
+                assert_eq!(usage.cache.read_input_tokens, Some(4));
+                let request = fixture.upstreams[target_index]
+                    .1
+                    .recv_timeout(DEADLINE)
+                    .unwrap();
+                assert!(!request.headers.iter().any(|(key, _)| {
+                    key.eq_ignore_ascii_case(llmproxy_store::chat_history::AUTH_HEADER)
+                }));
+                assert!(!request.headers.iter().any(|(key, _)| {
+                    key.eq_ignore_ascii_case(llmproxy_store::chat_history::REQUEST_HEADER)
+                }));
+            }
+        }
+    }
+    let turns = fixture.database.store.chat_turns(&id).await.unwrap();
+    let sum = llmproxy_store::chat_history::Summary::from_turns(&turns);
+    assert_eq!(sum.totals.input.total, Some(336));
+    assert_eq!(sum.totals.output.total, Some(96));
+    assert_eq!(sum.models.len(), 4);
+    assert!((sum.totals.hit_rate().unwrap() - 128.0 / 336.0 * 100.0).abs() < 0.001);
+    // 替换进程时旧 Gateway 已退出；新 Console 从同一数据库恢复 IR。
+    let Fixture {
+        gateway,
+        database,
+        upstreams,
+    } = fixture;
+    drop(gateway);
+    fixture = Fixture {
+        gateway: Gateway::database(&database.url, MASTER_KEY),
+        database,
+        upstreams,
+    };
+    base = fixture.base();
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(attribute(&page, "data-chat-session"), id);
+    assert!(page.contains("history-0"));
+    assert!(page.contains("会话累计用量"));
+    assert!(page.contains("输入 336"));
+    let editor = client
+        .get(format!("{base}/providers/form"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    csrf = attribute(editor.split_once("name=\"csrf\"").unwrap().1, "value").into();
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, id, "after-restart"])
+        )
+        .await,
+        true
+    );
+    assert_eq!(
+        procedure(&client, &base, "send-chat", json!([csrf, id, false])).await,
+        true
+    );
+    let captured = fixture.upstreams[3].1.recv_timeout(DEADLINE).unwrap();
+    let decoded = fixtures::decode_request(Protocol::Gemini, &captured.body);
+    assert_eq!(decoded.messages.len(), 65);
+    saved_turn(&fixture, &id, 33).await;
+    // 删除配置后历史不受级联影响；没有可用模型时仍可浏览和删除会话。
+    for route in fixture.database.store.list_routes().await.unwrap() {
+        fixture
+            .database
+            .store
+            .delete_route(route.id, route.version)
+            .await
+            .unwrap();
+    }
+    for model in fixture.database.store.list_models().await.unwrap() {
+        fixture
+            .database
+            .store
+            .delete_model(model.id, model.version)
+            .await
+            .unwrap();
+    }
+    for provider in fixture.database.store.list().await.unwrap() {
+        fixture
+            .database
+            .store
+            .set_enabled(provider.id, provider.version, false)
+            .await
+            .unwrap();
+        let current = fixture.database.store.get(provider.id).await.unwrap();
+        fixture
+            .database
+            .store
+            .delete(current.id, current.version)
+            .await
+            .unwrap();
+    }
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("暂无可聊天的模型"));
+    assert!(page.contains("history-0"));
+    assert!(page.contains("upstream-model"));
+    assert!(page.contains("模型配置已失效"));
+    let next = procedure(&client, &base, "delete-chat", json!([csrf, id])).await;
+    assert_ne!(next.as_str().unwrap(), id);
+    assert!(
+        fixture
+            .database
+            .store
+            .get_chat_conversation(&id)
+            .await
+            .is_err()
+    );
+}
+
+/// 停止跨协议 SSE 保留来源已报告消耗；伪造专用头不能认领轮次。
+#[tokio::test]
+async fn history_keeps_partial_usage_on_stop_and_rejects_forged_association() {
+    let mut fixture = Fixture::with_pause(Duration::from_secs(2)).await;
+    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let base = fixture.base();
+    let editor = client
+        .get(format!("{base}/providers/form"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = attribute(editor.split_once("name=\"csrf\"").unwrap().1, "value").to_owned();
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let id = attribute(&page, "data-chat-session").to_owned();
+    let routes = fixture.database.store.list_routes().await.unwrap();
+    let route = routes
+        .iter()
+        .find(|r| {
+            r.protocol == Protocol::OpenAiChat && r.provider_protocol == Protocol::AnthropicMessages
+        })
+        .unwrap();
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "switch-chat",
+            json!([csrf, id, format!("route:{}", route.id), "openai_chat"])
+        )
+        .await,
+        ""
+    );
+    assert_eq!(
+        procedure(&client, &base, "begin-chat", json!([csrf, id, "stop-test"])).await,
+        true
+    );
+    let record = fixture
+        .database
+        .store
+        .chat_turns(&id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let response = client
+        .post(format!(
+            "http://{}{}",
+            fixture.gateway.address,
+            Protocol::OpenAiChat.upstream_path()
+        ))
+        .header(llmproxy_store::chat_history::AUTH_HEADER, "forged")
+        .header(llmproxy_store::chat_history::REQUEST_HEADER, &record.id)
+        .json(&fixtures::request(
+            Protocol::OpenAiChat,
+            &route.name,
+            "forged",
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    response.bytes().await.unwrap();
+    fixture.upstreams[2].1.recv_timeout(DEADLINE).unwrap();
+    assert!(
+        !fixture
+            .database
+            .store
+            .chat_turn(&record.id)
+            .await
+            .unwrap()
+            .call_started
+    );
+    let send_client = client.clone();
+    let send_base = base.clone();
+    let send_args = json!([csrf, id, true]);
+    let sending =
+        tokio::spawn(
+            async move { procedure(&send_client, &send_base, "send-chat", send_args).await },
+        );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if fixture.upstreams[2].1.try_recv().is_ok() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let active_page = tokio::time::timeout(Duration::from_millis(500), async {
+        client
+            .get(format!("{base}/chat"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("生成中的 HTTP 首屏不得等待整轮结束");
+    assert!(active_page.contains("停止生成"));
+    assert!(active_page.contains("你好"));
+    assert_eq!(
+        procedure(&client, &base, "stop-chat", json!([csrf, id])).await,
+        true
+    );
+    assert_eq!(sending.await.unwrap(), true);
+    let turn = saved_turn(&fixture, &id, 1).await;
+    assert_eq!(turn.status, llmproxy_store::chat_history::Status::Cancelled);
+    assert_eq!(
+        turn.usage_state,
+        llmproxy_store::chat_history::UsageState::Partial
+    );
+    assert_eq!(turn.usage.as_ref().unwrap().input_tokens, Some(12));
+    assert_eq!(turn.usage.as_ref().unwrap().output_tokens, Some(0));
+    assert_eq!(turn.reply.as_ref().unwrap().content, "你好");
+    assert!(turn.reply.as_ref().unwrap().history.items.is_empty());
+    assert_eq!(
+        procedure(&client, &base, "begin-chat", json!([csrf, id, "abandoned"])).await,
+        true
+    );
+    let Fixture {
+        gateway,
+        database,
+        upstreams,
+    } = fixture;
+    drop(gateway);
+    fixture = Fixture {
+        gateway: Gateway::database(&database.url, MASTER_KEY),
+        database,
+        upstreams,
+    };
+    let records = fixture.database.store.chat_turns(&id).await.unwrap();
+    assert_eq!(
+        records[1].status,
+        llmproxy_store::chat_history::Status::Interrupted
+    );
+    assert!(records[1].usage.is_none());
+    assert_eq!(records[0].usage.as_ref().unwrap().input_tokens, Some(12));
+    let page = client
+        .get(format!("{}/chat", fixture.base()))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("半") || page.contains("你好"));
+    assert!(page.contains("部分用量"));
+    assert!(page.contains("服务重启，生成已中断"));
 }
 
 #[tokio::test]
@@ -398,7 +809,7 @@ async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_tur
     );
     assert_eq!(
         procedure(&client, &base, "send-chat", json!([csrf, id, true])).await,
-        true
+        false
     );
     let new = procedure(&client, &base, "new-chat", json!([csrf, id])).await;
     assert_ne!(new.as_str().unwrap(), id);
@@ -422,7 +833,7 @@ async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_tur
 #[tokio::test]
 #[ignore = "手动浏览器验收：隔离数据库与模拟 Provider，最多等待 15 分钟"]
 async fn browser_model_switching_fixture() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::with_pause(Duration::from_secs(8)).await;
     println!("MODEL_SWITCHING_BROWSER_URL={}/chat", fixture.base());
     tokio::time::sleep(Duration::from_secs(15 * 60)).await;
 }

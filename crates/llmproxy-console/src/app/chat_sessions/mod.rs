@@ -1,7 +1,7 @@
+#[cfg(test)]
+use std::{cmp::Reverse, io};
 use std::{
-    cmp::Reverse,
     collections::HashMap,
-    io,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -20,12 +20,15 @@ const SESSION_IDLE_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// 请求选择与 IR 历史在同一次锁内取得，异步发送不再读取可变会话选择。
 #[derive(Clone, Debug)]
 pub(crate) struct TurnRequest {
+    pub record_id: Option<String>,
     pub thinking: llmproxy_core::thinking::Choice,
     pub selection: Selection,
     pub history: Conversation,
 }
 
 struct TurnInfo {
+    record_id: Option<String>,
+    actual: Option<llmproxy_store::chat_history::ActualCall>,
     thinking: llmproxy_core::thinking::Choice,
     selection: Selection,
     alias: String,
@@ -36,8 +39,10 @@ impl TurnInfo {
     /// 本轮实际模型、入口协议与路由别名保持独立。
     fn label(&self) -> String {
         let model = self
-            .reported_model
-            .as_deref()
+            .actual
+            .as_ref()
+            .and_then(|actual| actual.reported_model.as_deref())
+            .or(self.reported_model.as_deref())
             .filter(|model| !model.is_empty())
             .unwrap_or(&self.alias);
         let protocol = match self.selection.protocol {
@@ -53,6 +58,16 @@ impl TurnInfo {
         } else {
             format!("{} · {protocol} · 返回模型 {model}", self.alias)
         };
+        let label = if let Some(actual) = &self.actual {
+            format!(
+                "{} / {} · 上游 {} · {label}",
+                actual.provider_name,
+                actual.upstream_model,
+                actual.protocol.as_str()
+            )
+        } else {
+            label
+        };
         format!("{label} · {}", self.thinking.label())
     }
 }
@@ -63,6 +78,9 @@ pub(crate) struct ChatSessions {
 }
 
 struct ChatState {
+    pending_save: Option<(String, llmproxy_store::chat_history::Completion)>,
+    latest_reply: ChatReply,
+    save_error: String,
     thinking_choice: llmproxy_core::thinking::Choice,
     selection: Selection,
     history: Conversation,
@@ -78,7 +96,9 @@ struct ChatState {
 }
 
 pub(crate) struct ChatSession {
+    #[cfg(test)]
     scope: String,
+    #[cfg(test)]
     created: Instant,
     state: Mutex<ChatState>,
     changed: broadcast::Sender<()>,
@@ -86,11 +106,16 @@ pub(crate) struct ChatSession {
 }
 
 impl ChatSession {
-    fn new(scope: String, model_id: String, protocol: String) -> Self {
+    fn new(_scope: String, model_id: String, protocol: String) -> Self {
         Self {
-            scope,
+            #[cfg(test)]
+            scope: _scope,
+            #[cfg(test)]
             created: Instant::now(),
             state: Mutex::new(ChatState {
+                pending_save: None,
+                latest_reply: Default::default(),
+                save_error: String::new(),
                 thinking_choice: Default::default(),
                 selection: Selection {
                     model_id,
@@ -110,10 +135,6 @@ impl ChatSession {
             changed: broadcast::channel(32).0,
             cancelled: watch::channel(false).0,
         }
-    }
-
-    pub(crate) fn scope(&self) -> &str {
-        &self.scope
     }
 
     /// 原会话内改变下一轮选择，服务端也禁止在生成期间切换。
@@ -242,6 +263,8 @@ impl ChatSession {
                 title
             };
         }
+        state.latest_reply = Default::default();
+        state.save_error.clear();
         state.busy = true;
         state.request_started = false;
         self.cancelled.send_replace(false);
@@ -263,6 +286,8 @@ impl ChatSession {
         state.turns.insert(
             assistant_id.clone(),
             TurnInfo {
+                record_id: None,
+                actual: None,
                 thinking,
                 selection,
                 alias: String::new(),
@@ -288,6 +313,11 @@ impl ChatSession {
         }
         state.request_started = true;
         Some(TurnRequest {
+            record_id: state
+                .messages
+                .last()
+                .and_then(|m| state.turns.get(&m.id))
+                .and_then(|t| t.record_id.clone()),
             thinking: state.thinking_choice,
             selection: state.selection.clone(),
             history: state.history.clone(),
@@ -296,6 +326,7 @@ impl ChatSession {
 
     pub(crate) fn update(&self, reply: &ChatReply) {
         let mut state = self.state.lock().expect("chat state mutex");
+        state.latest_reply = reply.clone();
         if let Some(message) = state.messages.last_mut() {
             message.content = reply.content.clone();
             message.status = ChatMessageStatus::Streaming;
@@ -320,6 +351,109 @@ impl ChatSession {
         let _ = self.changed.send(());
     }
 
+    /// 关联已落库轮次，展示消息序号与业务请求标识分别保存。
+    pub(crate) fn attach_record(&self, key: &str) {
+        let mut state = self.state.lock().expect("chat state mutex");
+        if let Some(id) = state.messages.last().map(|m| m.id.clone())
+            && let Some(turn) = state.turns.get_mut(&id)
+        {
+            turn.record_id = Some(key.into());
+        }
+    }
+    /// 提交前取得最近展示快照，停止后仍可保留已收到文字。
+    pub(crate) fn record_snapshot(&self) -> (Option<String>, ChatReply) {
+        let state = self.state.lock().expect("chat state mutex");
+        let key = state
+            .messages
+            .last()
+            .and_then(|m| state.turns.get(&m.id))
+            .and_then(|t| t.record_id.clone());
+        (key, state.latest_reply.clone())
+    }
+    /// 已提交输入但 HTTP 尚未启动时，停止可直接保存取消终态。
+    pub(crate) fn request_active(&self) -> bool {
+        self.state.lock().expect("chat state mutex").request_started
+    }
+    /// 停止状态独立于 Provider 结果，阻止晚到成功提交历史。
+    pub(crate) fn is_cancelled(&self) -> bool {
+        *self.cancelled.borrow()
+    }
+    /// 保存失败的完整终态保留在内存，重试使用同一轮次标识。
+    pub(crate) fn queue_save(
+        &self,
+        key: String,
+        completion: llmproxy_store::chat_history::Completion,
+    ) {
+        self.state.lock().expect("chat state mutex").pending_save = Some((key, completion));
+    }
+    /// 读取待保存终态的独立副本，不在状态锁内等待数据库。
+    pub(crate) fn pending_save(
+        &self,
+    ) -> Option<(String, llmproxy_store::chat_history::Completion)> {
+        self.state
+            .lock()
+            .expect("chat state mutex")
+            .pending_save
+            .clone()
+    }
+    /// 成功保存后清除提示，并唤醒页面重新读取权威统计。
+    pub(crate) fn saved(&self) {
+        let mut state = self.state.lock().expect("chat state mutex");
+        state.pending_save = None;
+        state.save_error.clear();
+        drop(state);
+        let _ = self.changed.send(());
+    }
+    /// 保存错误在历史区域单独展示，不能混入发送上下文。
+    pub(crate) fn save_error(&self, error: &str) {
+        self.state.lock().expect("chat state mutex").save_error = error.into();
+        let _ = self.changed.send(());
+    }
+    /// 页面独立展示保存错误，生成结果本身保持可见。
+    pub(crate) fn persistence_error(&self) -> String {
+        self.state
+            .lock()
+            .expect("chat state mutex")
+            .save_error
+            .clone()
+    }
+    /// 来源记录更新实际模型与用量；生成中的页面累计快照暂时保留。
+    pub(crate) fn apply_record(&self, record: &llmproxy_store::chat_history::Turn) {
+        let mut state = self.state.lock().expect("chat state mutex");
+        let id = state
+            .turns
+            .iter()
+            .find(|(_, t)| t.record_id.as_deref() == Some(&record.id))
+            .map(|(id, _)| id.clone());
+        if let Some(id) = id {
+            if let Some(turn) = state.turns.get_mut(&id) {
+                turn.actual = record.actual.clone();
+            }
+            if record.call_finished || !record.call_started {
+                let mut label = record
+                    .usage
+                    .as_ref()
+                    .map(saved_usage_label)
+                    .unwrap_or_else(|| "用量未报告".into());
+                if record.usage.is_some() {
+                    label.push_str(&format!(" · {}", record.usage_state.label()));
+                }
+                if let Some(rate) = record
+                    .usage
+                    .as_ref()
+                    .and_then(|u| u.input_tokens.zip(u.cache.read_input_tokens))
+                    .filter(|(i, r)| *i > 0 && r <= i)
+                    .map(|(i, r)| r as f64 / i as f64 * 100.0)
+                {
+                    label.push_str(&format!(" · 缓存命中率 {rate:.1}%"));
+                }
+                state.usage.insert(id, label);
+            } else {
+                state.usage.insert(id, "来源用量正在保存，尚未确认".into());
+            }
+        }
+    }
+    /// 完成活跃展示并提交有效 IR，失败只保留可见内容。
     pub(crate) fn finish(&self, result: std::result::Result<ChatReply, String>) {
         let mut state = self.state.lock().expect("chat state mutex");
         let stopped = *self.cancelled.borrow();
@@ -354,13 +488,19 @@ impl ChatSession {
                     }
                 }
                 Err(error) => {
-                    message.content = error;
+                    if message.content.is_empty() {
+                        message.content = error.clone();
+                    }
+                    let warning_id = message.id.clone();
                     message.status = if stopped {
                         ChatMessageStatus::Cancelled
                     } else {
                         ChatMessageStatus::Failed
                     };
-                    let id = message.id.clone();
+                    let id = warning_id;
+                    if let Some(turn) = state.turns.get_mut(&id) {
+                        turn.warnings.push(error);
+                    }
                     // 未完成的工具和累计快照不能作为完整回复或最终用量保留。
                     state.parts.remove(&id);
                     state.usage.remove(&id);
@@ -390,7 +530,29 @@ fn usage_label(usage: &llmproxy_core::ir::usage::Usage) -> String {
     .join(" · ")
 }
 
+/// 持久化详情明确显示每项缺失值，防止“未报告”被误读为零。
+fn saved_usage_label(usage: &llmproxy_core::ir::usage::Usage) -> String {
+    [
+        ("输入", usage.input_tokens),
+        ("输出", usage.output_tokens),
+        ("总计", usage.total_tokens),
+        ("缓存读取", usage.cache.read_input_tokens),
+        ("缓存写入", usage.cache.write_input_tokens),
+        ("推理", usage.output_details.reasoning_tokens),
+    ]
+    .into_iter()
+    .map(|(name, value)| {
+        format!(
+            "{name} {}",
+            value.map_or_else(|| "未报告".into(), |n| n.to_string())
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
 impl ChatSessions {
+    #[cfg(test)]
     pub(crate) fn create(
         &self,
         scope: Option<&str>,
@@ -428,6 +590,101 @@ impl ChatSessions {
         Some(session.clone())
     }
 
+    /// 加载空闲历史，签名仍保留在结构化 IR 中。
+    pub(crate) fn restore(
+        &self,
+        record: &llmproxy_store::chat_history::Conversation,
+        turns: &[llmproxy_store::chat_history::Turn],
+    ) -> Arc<ChatSession> {
+        let room = Arc::new(ChatSession::new(
+            llmproxy_store::chat_history::OWNER.into(),
+            record.selection.model_id.clone(),
+            record.selection.protocol.as_str().into(),
+        ));
+        {
+            let mut state = room.state.lock().expect("chat state mutex");
+            state.title = record.title.clone();
+            state.thinking_choice = record.thinking;
+            for turn in turns {
+                let uid = (turn.sequence * 2 - 1).to_string();
+                let aid = (turn.sequence * 2).to_string();
+                state.messages.push(ChatMessage::new(
+                    uid,
+                    ChatBubbleRole::User,
+                    ChatMessageStatus::Complete,
+                    &turn.prompt,
+                ));
+                state
+                    .history
+                    .append(&turn.selection, Content::text(Role::User, &turn.prompt));
+                let reply = turn.reply.clone().unwrap_or_default();
+                let status = match turn.status {
+                    llmproxy_store::chat_history::Status::Completed
+                    | llmproxy_store::chat_history::Status::Incomplete => {
+                        ChatMessageStatus::Complete
+                    }
+                    llmproxy_store::chat_history::Status::Cancelled => ChatMessageStatus::Cancelled,
+                    llmproxy_store::chat_history::Status::Generating => ChatMessageStatus::Sending,
+                    _ => ChatMessageStatus::Failed,
+                };
+                let text = if reply.content.is_empty() {
+                    turn.error.clone().unwrap_or_default()
+                } else {
+                    reply.content.clone()
+                };
+                state.messages.push(ChatMessage::new(
+                    aid.clone(),
+                    ChatBubbleRole::Assistant,
+                    status,
+                    text,
+                ));
+                if turn.status.usable() {
+                    state.history.append(&turn.selection, reply.history.clone());
+                    state.parts.insert(aid.clone(), reply.parts.clone());
+                }
+                state
+                    .thinking
+                    .insert(aid.clone(), reply.visible_thinking().into());
+                let mut warnings = reply.warnings.clone();
+                if let Some(error) = &turn.error {
+                    warnings.push(error.clone());
+                }
+                state.turns.insert(
+                    aid,
+                    TurnInfo {
+                        record_id: Some(turn.id.clone()),
+                        actual: turn.actual.clone(),
+                        thinking: turn.thinking,
+                        selection: turn.selection.clone(),
+                        alias: turn.alias.clone(),
+                        reported_model: reply.model,
+                        warnings,
+                    },
+                );
+                state.next_id = (turn.sequence * 2) as u64;
+            }
+        }
+        for turn in turns {
+            room.apply_record(turn);
+        }
+        let mut entries = self.entries.lock().expect("chat sessions mutex");
+        let now = Instant::now();
+        entries.retain(|_, (seen, room)| {
+            now.duration_since(*seen) < SESSION_IDLE_LIMIT
+                || room.snapshot().2
+                || room.pending_save().is_some()
+        });
+        entries
+            .entry(record.id.clone())
+            .or_insert_with(|| (Instant::now(), room))
+            .1
+            .clone()
+    }
+    /// 删除持久化会话后同步移除缓存。
+    pub(crate) fn remove(&self, id: &str) {
+        self.entries.lock().expect("chat sessions mutex").remove(id);
+    }
+    #[cfg(test)]
     pub(crate) fn list(
         &self,
         scope: &str,

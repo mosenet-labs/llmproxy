@@ -233,13 +233,19 @@ async fn postgresql_startup_applies_pending_migration_and_rejects_wrong_key() {
         let directory = directory("postgresql-migration");
         let gateway = start(&directory, Some(&url));
         assert_eq!(
-            toasty::sql::query("SELECT id FROM __toasty_migrations")
+            toasty::sql::query("SELECT id FROM __toasty_migrations WHERE id = 202610070001")
                 .exec(&mut db)
                 .await
                 .unwrap()
                 .len(),
-            5
+            1
         );
+        for table in ["chat_conversations", "chat_turns"] {
+            toasty::sql::query(format!("SELECT id FROM {table}"))
+                .exec(&mut db)
+                .await
+                .unwrap();
+        }
         toasty::sql::query("SELECT id FROM model_mappings")
             .exec(&mut db)
             .await

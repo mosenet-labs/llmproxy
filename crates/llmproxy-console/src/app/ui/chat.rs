@@ -23,7 +23,7 @@ use topcoat_ant_design::{
 };
 
 use crate::{
-    app::AppState,
+    app::{AppState, chat_service::ChatService},
     chat_stream::{chat_reply, history::Selection},
 };
 
@@ -111,17 +111,28 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         .or_else(|| routes.first().map(|route| &route.protocol))
         .map(|protocol| protocol.as_str().to_owned())
         .unwrap_or_else(|| Protocol::OpenAiChat.as_str().to_owned());
-    let initial = state
-        .chat_sessions
-        .create(None, &first_model, &first_protocol)?;
+    let service = ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    };
+    let (initial, selected) = service
+        .initial(Selection {
+            model_id: first_model,
+            protocol: selected_protocol(&first_protocol).map_err(io::Error::other)?,
+        })
+        .await?;
+    let initial_busy = service.load(&initial).await?.snapshot().2;
     let session = signal(cx, || initial);
-    let model_id = signal(cx, || first_model);
-    let protocol = signal(cx, || first_protocol);
+    let model_id = signal(cx, || selected.model_id);
+    let protocol = signal(cx, || selected.protocol.as_str().to_owned());
+    let history_page = signal(cx, || 0usize);
     let draft = signal(cx, String::new);
     let selection_error = signal(cx, String::new);
     let busy = signal(cx, || false);
     let streaming = signal(cx, || true);
     let refresh = signal(cx, || 0usize);
+    let usage_open = signal(cx, || false);
+    let settings_open = signal(cx, || false);
     let csrf = state.csrf.clone();
     let submit = attributes! { cx => @submit=$(async |event: Event| {
         event.prevent_default();
@@ -141,9 +152,8 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
     }) };
     let reset_csrf = state.csrf.clone();
     let model_csrf = state.csrf.clone();
-    let stop_csrf = state.csrf.clone();
     Ok(view! {
-        <section :data-chat-session=$(session.get()) class="chat-workspace flex h-[calc(100dvh-80px)] min-h-[560px] w-full overflow-hidden rounded-xl border border-border bg-white shadow-[0_12px_32px_-24px_rgba(16,24,40,.28)] max-[760px]:h-[calc(100dvh-180px)] max-[760px]:min-h-[650px] max-[760px]:flex-col" aria-label="模型聊天">
+        <section :data-chat-session=$(session.get()) data-chat-resume=(if initial_busy { "true" } else { "false" }) @chatresume=$(|_event: Event| { refresh.increment(); }) class="chat-workspace flex h-[calc(100dvh-80px)] min-h-[560px] w-full overflow-hidden rounded-xl border border-border bg-white shadow-[0_12px_32px_-24px_rgba(16,24,40,.28)] max-[760px]:h-[calc(100dvh-180px)] max-[760px]:min-h-[650px] max-[760px]:flex-col" aria-label="模型聊天">
             <aside class="flex w-[232px] shrink-0 flex-col border-r border-[#e9edf2] bg-[#f9fafc] px-3 py-4 max-[760px]:w-full max-[760px]:border-r-0 max-[760px]:border-b max-[760px]:py-3" aria-label="聊天设置与历史会话">
                 <div class="px-2 pb-4 max-[760px]:pb-2">
                     <p class="m-0 text-[11px] font-semibold tracking-[0.13em] text-[#8a94a3]">"LLMPROXY / CHAT"</p>
@@ -159,27 +169,37 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                         refresh.increment();
                         busy.set(false);
                     })>icon(data: PLUS_OUTLINED, attrs: attributes! { class="size-3.5" aria-hidden="true" })"新会话"</button>
-                    <div class="border-t border-[#e9edf2] px-2 pt-4 max-[760px]:pt-3">
-                        <h3 class="m-0 text-[11px] font-semibold tracking-[0.12em] text-[#8793a2]">"设置"</h3>
-                        <div class="mt-3 grid grid-cols-[32px_minmax(0,1fr)] items-center gap-2">
+                    <details class="chat-settings border-t border-[#e9edf2] px-2 pt-4 max-[760px]:pt-3" :open=$(settings_open.get())>
+                        <summary class="flex cursor-pointer items-center gap-2 text-[12px] font-semibold text-[#8793a2]" @click=$(|event:Event|{event.prevent_default();settings_open.set(!settings_open.get());})>
+                            <span class="chat-settings-caret text-[16px] leading-none" aria-hidden="true">"›"</span>"设置"
+                            <span class="ml-auto flex items-center gap-1.5 text-[11px] font-normal text-secondary">
+                                <span :hidden=$(protocol.get() != "openai_chat")>"Chat"</span>
+                                <span :hidden=$(protocol.get() != "openai_responses")>"Responses"</span>
+                                <span :hidden=$(protocol.get() != "anthropic_messages")>"Messages"</span>
+                                <span :hidden=$(protocol.get() != "gemini")>"Gemini"</span>
+                                <span aria-hidden="true">"·"</span><span :hidden=$(!streaming.get())>"流式"</span><span :hidden=$(streaming.get())>"非流式"</span>
+                            </span>
+                        </summary>
+                        <div class="mt-4 grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
                             <label class="text-[12px] font-medium text-secondary" for="chat-protocol">"协议"</label>
                             chat_protocol_picker(model_id: $(model_id), protocol: $(protocol), session: $(session), refresh: $(refresh), busy: $(busy), selection_error: $(selection_error))
                         </div>
-                        <p class="mt-2 mb-0 pl-10 text-[11px] leading-[1.5] text-[#8a94a3]">"切换模型或协议会保留当前对话上下文"</p>
-                        if !selection_error.get().is_empty() {<p role="alert" class="mt-2 mb-0 text-[12px] text-red-600">$(selection_error.get())</p>}
+                        <p class="mt-2 mb-0 text-[11px] leading-[1.5] text-[#8a94a3]">"切换模型或协议会保留当前对话上下文"</p>
                         chat_thinking_picker(model_id: $(model_id), session: $(session), refresh: $(refresh), busy: $(busy), selection_error: $(selection_error))
-                        <label class="mt-3 flex items-center gap-2 text-[12px] text-secondary"><input type="checkbox" :checked=$(streaming.get()) :disabled=$(busy.get()) @change=$(|event: Event| { streaming.set(event.target.checked); })>"流式输出"</label>
+                        <label class="mt-3 grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2 text-[12px] font-medium text-secondary"><span>"流式输出"</span><input type="checkbox" :checked=$(streaming.get()) :disabled=$(busy.get()) @change=$(|event: Event| { streaming.set(event.target.checked); })></label>
                         <p class="mt-2 mb-0 text-[11px] text-secondary">"流式输出会逐步显示回复。"</p>
-                    </div>
-                    <div class="mt-6 flex min-h-0 flex-1 flex-col border-t border-[#e9edf2] px-2 pt-4 max-[760px]:mt-3 max-[760px]:pt-3">
-                        <div class="flex items-center justify-between"><h3 class="m-0 text-[11px] font-semibold tracking-[0.12em] text-[#8793a2]">"历史会话"</h3><span class="text-[11px] text-[#9aa4b0]">"本页"</span></div>
-                        <div class="mt-2 min-h-0 overflow-y-auto max-[760px]:max-h-24">chat_session_list(session: $(session), model_id: $(model_id), protocol: $(protocol), draft: $(draft), refresh: $(refresh), busy: $(busy))</div>
-                    </div>
-                    <p class="mt-3 mb-0 px-2 text-[11px] leading-[1.5] text-[#9aa4b0] max-[760px]:hidden">"刷新或关闭页面后不保留会话"</p>
+                    </details>
+                    if !selection_error.get().is_empty() {<p role="alert" class="mt-2 mb-0 px-2 text-[12px] text-red-600">$(selection_error.get())</p>}
                 }
+                    <div class="mt-6 flex min-h-0 flex-1 flex-col border-t border-[#e9edf2] px-2 pt-4 max-[760px]:mt-3 max-[760px]:pt-3">
+                        <div class="flex items-center justify-between"><h3 class="m-0 text-[11px] font-semibold tracking-[0.12em] text-[#8793a2]">"历史会话"</h3><span class="text-[11px] text-[#9aa4b0]">"已保存"</span></div>
+                        <div class="mt-2 min-h-0 overflow-y-auto max-[760px]:max-h-24">chat_session_list(page: $(history_page), session: $(session), model_id: $(model_id), protocol: $(protocol), draft: $(draft), refresh: $(refresh), busy: $(busy))</div>
+                    </div>
+                    <button type="button" class="mt-3 px-2 text-left text-[12px] text-red-600" :disabled=$(busy.get()) @click=$(async |_event:Event| { busy.set(true); let next=delete_chat(reset_csrf.clone(),session.get()).await; session.set(next); draft.set("".to_owned()); history_page.set(0); refresh.increment(); busy.set(false); })>"删除当前会话"</button>
+                    <p class="mt-3 mb-0 px-2 text-[11px] leading-[1.5] text-[#9aa4b0] max-[760px]:hidden">"会话保存到本地数据库，可刷新后继续"</p>
             </aside>
             <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-                <header class="flex h-14 shrink-0 items-center border-b border-[#eef0f3] px-7 max-[640px]:px-4"><div><h1 class="m-0 text-[16px] font-semibold leading-5 text-heading">"Chat"</h1><p class="m-0 text-[11px] text-muted">"通过网关与已接入模型对话"</p></div></header>
+                <header class="relative z-20 flex h-16 shrink-0 items-center justify-between gap-3 border-b border-[#eef0f3] px-7 max-[640px]:px-4"><div class="shrink-0"><h1 class="m-0 text-[16px] font-semibold leading-5 text-heading">"Chat"</h1><p class="m-0 text-[11px] text-muted max-[640px]:hidden">"通过网关与已接入模型对话"</p></div>chat_usage(session: $(session), refresh: $(refresh), open: $(usage_open))</header>
                 if available {
                     <div id="chat-scroll" class="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto px-8 py-8 max-[640px]:px-4 max-[640px]:py-5">
                         <div class="mx-auto flex min-h-full w-full max-w-[1200px] shrink-0 flex-col">
@@ -210,17 +230,16 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                     }
                                     busy.set(false);
                                 }) },
+                                    if !models.iter().any(|model|model.id.to_string()==model_id.get()) && !routes.iter().any(|route|format!("route:{}",route.id)==model_id.get()) { <option value=(model_id.get())>"原模型配置已失效，请选择模型"</option> }
                                     for model in &models { <option value=(model.id.to_string())>(model.alias.as_str())</option> }
                                     for route in &routes { <option value=(format!("route:{}", route.id))>(format!("{} · 路由 ({})", route.name, protocol_label(route.protocol)))</option> }
                                 )
-                                <button type="button" class="ml-3 rounded-md border border-border px-3 py-1 text-[12px] text-secondary" :hidden=$(!busy.get()) aria-label="停止生成" @click=$(async |_event: Event| {
-                                    let _stopped = stop_chat(stop_csrf.clone(), session.get()).await;
-                                })>"停止生成"</button>
+                                chat_stop_button(session: $(session), refresh: $(refresh))
                             </div>
                         )</div>
                     </div>
                 } else {
-                    <div class="flex flex-1 flex-col items-center justify-center px-6 text-center"><h2 class="m-0 text-lg font-medium text-heading">"暂无可聊天的模型"</h2><p class="mt-2 mb-5 text-sm text-secondary">"先在 Models 中添加模型，并启用对应 Provider。"</p><a class="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-white hover:bg-primary-hover" href=(href!(super::models::models))>"前往 Models"</a></div>
+                    <div class="flex flex-1 flex-col items-center justify-center px-6 text-center"><h2 class="m-0 text-lg font-medium text-heading">"暂无可聊天的模型"</h2><p class="mt-2 mb-5 text-sm text-secondary">"先在 Models 中添加模型，并启用对应 Provider。"</p><a class="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-white hover:bg-primary-hover" href=(href!(super::models::models))>"前往 Models"</a></div><div class="overflow-y-auto p-6">chat_history(session: $(session), refresh: $(refresh))</div>
                 }
             </div>
         </section>
@@ -238,7 +257,6 @@ pub async fn new_chat(cx: &Cx, csrf: String, current_session: String) -> Result<
     if current.snapshot().2 {
         return Err(io::Error::other("正在生成回复，请先停止或等待完成").into());
     }
-    let scope = current.scope().to_owned();
     let selection = current.selection();
     let protocol_kind = selection.protocol;
     let (_, protocols, available, _) = chat_target(&state.store, &selection.model_id)
@@ -251,11 +269,12 @@ pub async fn new_chat(cx: &Cx, csrf: String, current_session: String) -> Result<
     if current.snapshot().2 {
         return Err(io::Error::other("正在生成回复，请先停止或等待完成").into());
     }
-    Ok(sessions.create(
-        Some(&scope),
-        &selection.model_id,
-        selection.protocol.as_str(),
-    )?)
+    ChatService {
+        store: &state.store,
+        sessions,
+    }
+    .create(selection)
+    .await
 }
 
 /// 校验目标后在原会话内更新下一轮选择，失败时不改变选择及历史。
@@ -283,16 +302,23 @@ pub async fn switch_chat(
     if !available || !protocols.contains(&kind) {
         return Ok("所选模型或协议已不可用，当前选择已保留".into());
     }
-    Ok(
-        if session.select(Selection {
+    match (ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    })
+    .select(
+        &session_id,
+        Selection {
             model_id,
             protocol: kind,
-        }) {
-            String::new()
-        } else {
-            "正在生成回复，请先停止或等待完成后切换".into()
         },
+        session.thinking_choice(),
     )
+    .await
+    {
+        Ok(()) => Ok(String::new()),
+        Err(error) => Ok(error.to_string()),
+    }
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/default-chat-protocol")]
@@ -329,20 +355,76 @@ pub async fn default_protocol(
 pub async fn begin_chat(cx: &Cx, csrf: String, session_id: String, prompt: String) -> Result<bool> {
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
-    let Some(session) = state.chat_sessions.get(&session_id) else {
-        return Ok(false);
+    let service = ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
     };
-    Ok(session.begin(&prompt))
+    let session = service.load(&session_id).await?;
+    let (alias, _, available, _) = chat_target(&state.store, &session.selection().model_id)
+        .await
+        .map_err(io::Error::other)?;
+    if !available {
+        session.save_error("当前模型已不可用，请选择有效模型");
+        return Ok(false);
+    }
+    match service.begin(&session_id, &prompt, &alias).await {
+        Ok(started) => Ok(started),
+        Err(error) => {
+            session.save_error(&error.to_string());
+            Ok(false)
+        }
+    }
+}
+
+/// 停止控件由服务端活跃状态驱动，刷新页面后仍可取消原请求。
+#[shard("/ui/_topcoat/runtime/shards/chat-stop-button")]
+pub async fn chat_stop_button(
+    cx: &Cx,
+    session: Signal<String>,
+    refresh: Signal<usize>,
+) -> Result<impl View> {
+    let _revision = refresh.get();
+    let state = app_context::<AppState>(cx);
+    let room = ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    }
+    .load(&session.get())
+    .await?;
+    let csrf = state.csrf.clone();
+    Ok(live! {
+        let mut changed=room.subscribe();
+        loop {
+            let busy=room.snapshot().2;
+            let token=emit! {
+                if busy {<button type="button" class="ml-3 rounded-md border border-border px-3 py-1 text-[12px] text-secondary" aria-label="停止生成" @click=$(async |_event:Event| {let _stopped=stop_chat(csrf.clone(),session.get()).await;})>"停止生成"</button>}
+            }?;
+            // GET 首屏立即完成；浏览器的 POST shard 通过 HTTP 增量等待广播。
+            if topcoat::router::request::original_method(cx) != topcoat::router::Method::POST || !busy {break Ok(token);}
+            changed.recv().await.ok();
+        }
+    })
 }
 
 /// 停止当前对话请求，不把停止说明写进下一轮发送给模型的历史。
 #[procedure("/ui/_topcoat/runtime/procedures/stop-chat")]
 pub async fn stop_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool> {
     crate::app::check_csrf(cx, &csrf)?;
-    Ok(app_context::<AppState>(cx)
-        .chat_sessions
-        .get(&session_id)
-        .is_some_and(|session| session.stop()))
+    let state = app_context::<AppState>(cx);
+    let service = ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    };
+    let Ok(room) = service.load(&session_id).await else {
+        return Ok(false);
+    };
+    let stopped = room.stop();
+    if stopped && !room.request_active() {
+        service
+            .finish(&session_id, Err("已停止生成".into()))
+            .await?;
+    }
+    Ok(stopped)
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/send-chat")]
@@ -378,6 +460,9 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: boo
             &turn.history,
             streaming,
             turn.thinking,
+            turn.record_id
+                .as_deref()
+                .map(|key| (key, state.history_auth.as_str())),
             |reply| session.update(reply),
         )
         .await
@@ -388,7 +473,12 @@ pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: boo
         _ = cancellation.wait_for(|stopped| *stopped) => Err("已停止生成".to_owned()),
         result = request => result,
     };
-    session.finish(result);
+    ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    }
+    .finish(&session_id, result)
+    .await?;
     Ok(true)
 }
 
@@ -406,7 +496,7 @@ pub async fn chat_protocol_picker(
     let csrf = state.csrf.clone();
     let (_, protocols, _, _) = chat_target(&state.store, &model_id.get())
         .await
-        .map_err(io::Error::other)?;
+        .unwrap_or_else(|_| (String::new(), Vec::new(), false, Support::Unknown));
     Ok(view! {
         select(attrs: attributes! { cx => id="chat-protocol" aria-label="选择模型协议" class="w-full" :value=$(protocol.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
             busy.set(true);
@@ -427,6 +517,7 @@ pub async fn chat_protocol_picker(
 #[shard("/ui/_topcoat/runtime/shards/chat-session-list")]
 pub async fn chat_session_list(
     cx: &Cx,
+    page: Signal<usize>,
     session: Signal<String>,
     model_id: Signal<String>,
     protocol: Signal<String>,
@@ -436,10 +527,6 @@ pub async fn chat_session_list(
 ) -> Result<impl View> {
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
-    let current = state
-        .chat_sessions
-        .get(&session.get())
-        .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
     let mut aliases: HashMap<_, _> = state
         .store
         .list_models()
@@ -450,20 +537,40 @@ pub async fn chat_session_list(
     for route in state.store.list_routes().await? {
         aliases.insert(format!("route:{}", route.id), route.name);
     }
-    let rooms: Vec<_> = state
-        .chat_sessions
-        .list(current.scope(), &session.get())
+    let records = state
+        .store
+        .list_chat_conversations(page.get() * 20, 21)
+        .await?;
+    let has_next = records.len() > 20;
+    let rooms: Vec<_> = records
         .into_iter()
-        .map(|(id, title, model, kind)| {
-            let alias = aliases.get(&model).cloned().unwrap_or_default();
-            (id, title, model, kind, alias)
+        .take(20)
+        .map(|record| {
+            let alias = aliases
+                .get(&record.selection.model_id)
+                .cloned()
+                .unwrap_or_else(|| "模型配置已失效".into());
+            (
+                record.id,
+                if record.title.is_empty() {
+                    "新会话".into()
+                } else {
+                    record.title
+                },
+                record.selection.model_id,
+                record.selection.protocol.as_str().to_owned(),
+                alias,
+            )
         })
         .collect();
+    let csrf = state.csrf.clone();
     Ok(view! {
-        <nav class="grid gap-1" aria-label="本页历史会话">
+        <nav class="grid gap-1" aria-label="已保存历史会话">
             #[key(id.clone())]
             for (id, title, model, kind, alias) in rooms {
-                <button type="button" class="chat-session-item flex w-full min-w-0 flex-col items-start rounded-lg px-2.5 py-2 text-left hover:bg-[#edf2f8]" :data-active=$(session.get() == id) :disabled=$(busy.get()) @click=$(|_event: Event| {
+                <button type="button" class="chat-session-item flex w-full min-w-0 flex-col items-start rounded-lg px-2.5 py-2 text-left hover:bg-[#edf2f8]" :data-active=$(session.get() == id) :disabled=$(busy.get()) @click=$(async |_event: Event| {
+                    let error=open_chat(csrf.clone(),id.clone()).await;
+                    if !error.is_empty() {return;}
                     session.set(id.clone());
                     model_id.set(model.clone());
                     protocol.set(kind.clone());
@@ -473,8 +580,42 @@ pub async fn chat_session_list(
                     <span class="mt-0.5 w-full truncate text-[11px] text-[#8a94a3]">(format!("{} · {}", alias, match kind.as_str() { "openai_chat" => "Chat", "openai_responses" => "Responses", "anthropic_messages" => "Messages", "gemini" => "Gemini", _ => "" }))</span>
                 </button>
             }
+            <div class="mt-2 flex justify-between text-[11px] text-secondary">
+                if page.get()>0 { <button type="button" :disabled=$(busy.get()) @click=$(|_event:Event|{ page.set(page.get()-1); })>"上一页"</button> }
+                if has_next { <button type="button" :disabled=$(busy.get()) @click=$(|_event:Event|{ page.increment(); })>"下一页"</button> }
+            </div>
         </nav>
     })
+}
+
+/// 点击旧记录时先恢复类型化 IR，页面信号随后切换。
+#[procedure("/ui/_topcoat/runtime/procedures/open-chat")]
+pub async fn open_chat(cx: &Cx, csrf: String, session_id: String) -> Result<String> {
+    crate::app::check_csrf(cx, &csrf)?;
+    let state = app_context::<AppState>(cx);
+    match (ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    })
+    .load(&session_id)
+    .await
+    {
+        Ok(_) => Ok(String::new()),
+        Err(error) => Ok(error.to_string()),
+    }
+}
+/// 删除当前会话后创建同选择的空会话。
+#[procedure("/ui/_topcoat/runtime/procedures/delete-chat")]
+pub async fn delete_chat(cx: &Cx, csrf: String, session_id: String) -> Result<String> {
+    crate::app::check_csrf(cx, &csrf)?;
+    let state = app_context::<AppState>(cx);
+    let service = ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    };
+    let selection = service.load(&session_id).await?.selection();
+    service.delete(&session_id).await?;
+    service.create(selection).await
 }
 
 #[shard("/ui/_topcoat/runtime/shards/chat-history")]
@@ -484,13 +625,29 @@ pub async fn chat_history(
     refresh: Signal<usize>,
 ) -> Result<impl View> {
     let _revision = refresh.get();
-    let room = app_context::<AppState>(cx)
-        .chat_sessions
-        .get(&session.get())
-        .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
+    let state = app_context::<AppState>(cx);
+    let service = ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    };
+    let room = service.load(&session.get()).await?;
+    let csrf = state.csrf.clone();
     Ok(live! {
         let mut changed = room.subscribe();
+        let mut deadline=None;
         loop {
+            let mut pending=false;
+            if !room.snapshot().2 {
+                let records=match state.store.chat_turns(&session.get()).await {
+                    Ok(records)=>records,
+                    Err(_)=>{room.save_error("无法读取历史保存状态，请恢复数据库后重试保存");Vec::new()}
+                };
+                for record in &records {
+                    room.apply_record(record);pending|=record.call_started&&!record.call_finished;
+                    if state.store.chat_usage_pending(&record.id) {room.save_error("本轮来源用量尚未保存，请重试保存");}
+                }
+            }
+            let save_error=room.persistence_error();
             let (messages, thinking, busy) = room.snapshot();
             let usage = room.usage_snapshot();
             let parts = room.parts_snapshot();
@@ -508,10 +665,11 @@ pub async fn chat_history(
                 })
                 .collect();
             let token = emit! {
+                if !save_error.is_empty() {<p role="alert" class="mb-3 text-sm text-red-600">(save_error.as_str())</p><button type="button" @click=$(async |_event:Event| {let _saved=retry_chat_save(csrf.clone(),session.get()).await;refresh.increment();})>"重试保存"</button>}
                 if entries.is_empty() {
                     <div class="flex min-h-[300px] flex-1 flex-col justify-center">
                         <h2 class="m-0 text-[25px] font-semibold tracking-tight text-heading">"今天想聊什么？"</h2>
-                        <p class="mt-2 mb-0 text-sm leading-6 text-secondary">"从下方选择模型，输入你的问题。历史会话仅保留在当前页面。"</p>
+                        <p class="mt-2 mb-0 text-sm leading-6 text-secondary">"从下方选择模型，输入你的问题。历史会话保存到本地数据库。"</p>
                     </div>
                 } else {
                     chat_message_list(label: "聊天消息", attrs: attributes! { class="pb-2" },
@@ -522,7 +680,10 @@ pub async fn chat_history(
                     )
                 }
             }?;
+            // 首屏不能等待整轮结束，否则浏览器尚未绑定停止等事件。
+            if topcoat::router::request::original_method(cx) != topcoat::router::Method::POST {break Ok(token);}
             if !busy {
+                if pending && tokio::time::Instant::now()<*deadline.get_or_insert_with(||tokio::time::Instant::now()+std::time::Duration::from_secs(5)) {tokio::time::sleep(std::time::Duration::from_millis(100)).await;continue;}
                 break Ok(token);
             }
             changed.recv().await.ok();
@@ -646,11 +807,16 @@ pub async fn set_chat_thinking(
     if session.selection() != selection {
         return Ok("模型选择已改变，请重试".into());
     }
-    Ok(if session.set_thinking(&selection, choice) {
-        String::new()
-    } else {
-        "正在生成回复，请先停止或等待完成".into()
+    match (ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
     })
+    .select(&session_id, selection, choice)
+    .await
+    {
+        Ok(()) => Ok(String::new()),
+        Err(error) => Ok(error.to_string()),
+    }
 }
 
 /// 能力与偏好分开显示，切换模型后保留不兼容偏好并明确提示，不能静默更改意图。
@@ -672,7 +838,7 @@ pub async fn chat_thinking_picker(
     let current = room.thinking_choice();
     let (_, _, _, support) = chat_target(&state.store, &model_id.get())
         .await
-        .map_err(io::Error::other)?;
+        .unwrap_or_else(|_| (String::new(), Vec::new(), false, Support::Unknown));
     let warning = (Config {
         support,
         ..Default::default()
@@ -683,9 +849,9 @@ pub async fn chat_thinking_picker(
     let csrf = state.csrf.clone();
     Ok(view! {
         <div class="mt-3" data-thinking-support=(support.as_str())>
-            if support == Support::Unknown || support == Support::Unsupported { <p class="m-0 text-[11px] text-secondary">(support.label())</p> }
             if support == Support::Switchable || support == Support::AlwaysOn || current != Choice::Default {
-                <label class="mb-1 block text-[12px] text-secondary" for="chat-thinking">"思考模式"</label>
+                <div class="grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
+                <label class="text-[12px] font-medium text-secondary" for="chat-thinking">"思考模式"</label>
                 select(attrs: attributes! { cx => id="chat-thinking" aria-label="思考模式" class="w-full" :value=$(choice.get()) :disabled=$(busy.get()) @change=$(async |event: Event| {
                     busy.set(true);
                     let next = event.target.value;
@@ -698,10 +864,119 @@ pub async fn chat_thinking_picker(
                     <option value="enabled" disabled=(!matches!(support, Support::Switchable | Support::AlwaysOn))>"开启"</option>
                     <option value="disabled" disabled=(support != Support::Switchable)>"关闭"</option>
                 )
+                </div>
                 if support == Support::AlwaysOn { <p class="mt-1 mb-0 text-[11px] text-secondary">"模型始终开启思考"</p> }
                 <p class="mt-1 mb-0 text-[11px] text-secondary">"开启时请求模型支持的可见思考或摘要。"</p>
                 if let Some(message) = warning { <p role="alert" class="mt-1 mb-0 text-[11px] text-red-600">(message)</p> }
-            }
+            } else { <div class="grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2 text-[12px] text-secondary"><span class="font-medium">"思考模式"</span><span>(support.label())</span></div> }
         </div>
     })
+}
+
+/// 合计标明计数覆盖范围，未报告字段不会补零。
+fn counter_label(
+    name: &str,
+    counter: &llmproxy_store::chat_history::Counter,
+    turns: u64,
+) -> String {
+    match counter.total {
+        Some(total) => format!("{name} {total}（{}/{turns} 轮已报告）", counter.reported),
+        None => format!("{name} 未报告"),
+    }
+}
+fn totals_label(t: &llmproxy_store::chat_history::Totals) -> String {
+    let mut fields = vec![
+        format!("{} 轮", t.turns),
+        counter_label("输入", &t.input, t.turns),
+        counter_label("输出", &t.output, t.turns),
+        counter_label("总计", &t.total, t.turns),
+        counter_label("缓存读取", &t.read, t.turns),
+        counter_label("缓存写入", &t.write, t.turns),
+        counter_label("推理", &t.reasoning, t.turns),
+    ];
+    if let Some(rate) = t.hit_rate() {
+        fields.push(format!(
+            "缓存命中率 {rate:.1}%（{} 轮可统计）",
+            t.hit_reported
+        ));
+    }
+    fields.push(format!(
+        "部分用量 {} 轮 · 用量未报告 {} 轮",
+        t.partial, t.unreported
+    ));
+    fields.join(" · ")
+}
+/// 标题栏独立订阅轮次终态；生成期间展示已保存累计值，避免逐帧查询数据库。
+#[shard("/ui/_topcoat/runtime/shards/chat-usage")]
+pub async fn chat_usage(
+    cx: &Cx,
+    session: Signal<String>,
+    refresh: Signal<usize>,
+    open: Signal<bool>,
+) -> Result<impl View> {
+    let _revision = refresh.get();
+    let state = app_context::<AppState>(cx);
+    let room = ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    }
+    .load(&session.get())
+    .await?;
+    let mut records = state
+        .store
+        .chat_turns(&session.get())
+        .await
+        .unwrap_or_default();
+    Ok(live! {
+        let mut changed = room.subscribe();
+        let mut deadline = None;
+        loop {
+            let busy = room.snapshot().2;
+            if !busy && let Ok(saved) = state.store.chat_turns(&session.get()).await { records = saved; }
+            let pending = records.iter().any(|record| record.call_started && !record.call_finished);
+            let summary = llmproxy_store::chat_history::Summary::from_turns(&records);
+            let total = summary.totals.total.total.map(|total|format!("总计 {total} tokens")).unwrap_or_else(||if records.is_empty(){"暂无用量".into()}else{"总计 未报告".into()});
+            let rate = summary.totals.hit_rate().map(|rate|format!("缓存命中 {rate:.1}%")).unwrap_or_else(||"缓存 未报告".into());
+            let token = emit! {
+                <div class="relative min-w-0" aria-label="会话用量统计" @keydown=$(|event:Event|{if event.key == "Escape" {open.set(false);}})>
+                    <button type="button" class="chat-usage-trigger flex min-w-0 flex-col items-end gap-0.5 rounded-lg px-3 py-1.5 text-right hover:bg-[#f3f6fa]" aria-label="会话累计用量" :aria-expanded=$(open.get()) aria-controls="chat-usage-panel" @click=$(|_event:Event|{open.set(!open.get());})>
+                        <span class="text-[11px] font-semibold text-heading">"会话用量 · "(if busy {"生成中"} else if pending {"待确认"} else {"已保存"})</span>
+                        <span class="text-[11px] text-secondary">(total.as_str())<span class="max-[640px]:hidden">" · "(rate.as_str())</span></span>
+                    </button>
+                    <div class="fixed inset-0 z-30" :hidden=$(!open.get()) aria-hidden="true" @click=$(|_event:Event|{open.set(false);})></div>
+                    <section id="chat-usage-panel" class="absolute top-full right-0 z-40 mt-2 w-[480px] max-w-[calc(100vw-32px)] overflow-hidden rounded-xl border border-[#dce4ee] bg-white text-left shadow-[0_12px_40px_rgba(24,39,68,0.16)]" :hidden=$(!open.get()) aria-label="会话用量详情">
+                        <div class="flex items-center justify-between border-b border-border px-4 py-3"><h2 class="m-0 text-[13px] font-semibold text-heading">"会话累计用量"</h2><button type="button" class="rounded px-2 py-1 text-[12px] text-secondary hover:bg-surface" aria-label="关闭用量面板" @click=$(|_event:Event|{open.set(false);})>"关闭"</button></div>
+                        <div class="max-h-[min(60dvh,400px)] overflow-y-auto overscroll-contain px-4 py-3 text-[11px] leading-6 text-secondary">
+                            if busy { <p class="mt-0 mb-2 text-muted">"当前显示已保存的累计用量，本轮结束后更新。"</p> }
+                            <p class="m-0">(totals_label(&summary.totals))</p>
+                            for model in &summary.models { <section class="mt-3 border-t border-border pt-3"><strong class="break-words text-heading">(format!("{} / {}",model.provider_name,model.upstream_model))</strong><p class="mt-1 mb-0">(totals_label(&model.totals))</p></section> }
+                        </div>
+                    </section>
+                </div>
+            }?;
+            if topcoat::router::request::original_method(cx) != topcoat::router::Method::POST { break Ok(token); }
+            if !busy {
+                if pending && tokio::time::Instant::now() < *deadline.get_or_insert_with(||tokio::time::Instant::now()+std::time::Duration::from_secs(5)) { tokio::time::sleep(std::time::Duration::from_millis(100)).await; continue; }
+                break Ok(token);
+            }
+            changed.recv().await.ok();
+        }
+    })
+}
+
+/// 重试同一份终态记录，不重新调用 Provider。
+#[procedure("/ui/_topcoat/runtime/procedures/retry-chat-save")]
+pub async fn retry_chat_save(cx: &Cx, csrf: String, session_id: String) -> Result<bool> {
+    crate::app::check_csrf(cx, &csrf)?;
+    let state = app_context::<AppState>(cx);
+    ChatService {
+        store: &state.store,
+        sessions: &state.chat_sessions,
+    }
+    .retry_save(&session_id)
+    .await?;
+    Ok(state
+        .chat_sessions
+        .get(&session_id)
+        .is_some_and(|room| room.persistence_error().is_empty()))
 }

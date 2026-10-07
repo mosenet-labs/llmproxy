@@ -16,6 +16,7 @@ pub(super) use observe::Observer;
 use pingora::{Error, ErrorType, Result};
 
 pub struct Stream {
+    history: Option<crate::history::Sink>,
     source: Protocol,
     target: Protocol,
     framing: sse::Decoder,
@@ -37,6 +38,7 @@ impl Stream {
     ) -> Result<Self> {
         let limits = Limits::default();
         Ok(Self {
+            history: None,
             source,
             target,
             framing: sse::Decoder::new(super::MAX_BUFFERED_BODY),
@@ -50,6 +52,10 @@ impl Stream {
             span: tracing::Span::current(),
             terminal: None,
         })
+    }
+    /// 将来源累计用量写入本轮共享采集器，正文回调不写数据库。
+    pub(crate) fn set_history(&mut self, sink: crate::history::Sink) {
+        self.history = Some(sink);
     }
     /// 字节交给分帧器；调用方每拿到一帧就 await 处理及发送，维持背压。
     pub fn frame(&mut self, byte: u8) -> Result<Option<sse::Frame>> {
@@ -72,6 +78,9 @@ impl Stream {
     /// 先完成本帧状态校验和签名持久化，再返回可交付的目标字节。
     async fn convert_raw(&mut self, raw: &stream::Event) -> Result<Vec<Bytes>> {
         let events = self.decoder.push(raw).map_err(|_| invalid())?;
+        if let Some(history) = &self.history {
+            history.stream(self.decoder.state(), true);
+        }
         if let Some(capture) = &mut self.capture {
             capture.observe(raw, &events).map_err(|_| invalid())?;
         }
