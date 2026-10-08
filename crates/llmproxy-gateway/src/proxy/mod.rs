@@ -1,4 +1,5 @@
 mod buffered;
+mod models;
 mod request;
 mod route;
 use route::SelectedRoute;
@@ -87,6 +88,9 @@ impl Gateway {
         u16,
     > {
         let model = self.providers.select(protocol, alias).ok_or(404u16)?;
+        if model.blocked {
+            return Err(503);
+        }
         let provider = model.provider.as_ref().ok_or(503u16)?.clone();
         Ok((
             provider,
@@ -177,6 +181,13 @@ impl ProxyHttp for Gateway {
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         if buffered::resume(session, ctx)? {
             return Ok(false);
+        }
+        if models::matches(session.req_header().uri.path()) {
+            let request = session.req_header();
+            ctx.telemetry
+                .begin(request.method.as_str(), request.uri.path());
+            models::serve(&self.providers, session).await?;
+            return Ok(true);
         }
         if crate::subscriptions::matches(session.req_header().uri.path()) {
             // 订阅入口提前返回，先识别遥测路由，使成功轮询／心跳按 DEBUG 记录。

@@ -1919,6 +1919,7 @@ dependencies = [
  "hyper-util",
  "llmproxy-console",
  "llmproxy-core",
+ "llmproxy-probe",
  "llmproxy-store",
  "llmproxy-telemetry",
  "opentelemetry",
@@ -1947,6 +1948,7 @@ version = "0.1.0"
 dependencies = [
  "llmproxy-core",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1960,6 +1962,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "llmproxy-core",
+ "llmproxy-probe",
  "rust_decimal",
  "serde",
  "serde_json",

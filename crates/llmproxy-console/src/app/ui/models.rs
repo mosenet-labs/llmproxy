@@ -2,10 +2,9 @@
 #![expect(clippy::too_many_arguments)]
 
 use std::collections::HashSet;
-use std::time::Duration;
 
 use llmproxy_core::protocol::Protocol;
-use llmproxy_probe::{InferenceProbeTarget, Reason, ThinkingMode, Verdict};
+use llmproxy_probe::{Reason, ThinkingMode, Verdict};
 use llmproxy_store::{
     ModelMappingInput, ModelMappingView, ModelPrice, PricePlanView, ProviderView, StoreError,
 };
@@ -33,8 +32,11 @@ use crate::app::{
 
 mod actions;
 mod editor;
+mod health;
 mod pricing;
 mod thinking;
+use health::{HealthEditor, health_dialog, health_trigger};
+pub(crate) use health::{model_health, save_health_check};
 
 use actions::model_delete;
 pub(crate) use actions::{
@@ -180,6 +182,29 @@ pub async fn model_workspace(
     let previous_page = current_page.saturating_sub(1).max(1);
     let next_page = current_page.saturating_add(1).min(page_count);
     let pages = page_numbers(current_page, page_count);
+    let mut health_enabled = HashSet::new();
+    let mut health_states = std::collections::HashMap::new();
+    for model in &page_models {
+        let checks = state.store.model_health_checks(model.id).await?;
+        if checks.iter().any(|check| check.config.enabled) {
+            health_enabled.insert(model.id);
+        }
+        let (label, tone) = health::list_status(model.provider_enabled, &checks);
+        let detail = checks
+            .iter()
+            .filter(|check| check.config.enabled)
+            .map(|check| {
+                format!(
+                    "{}：{}",
+                    protocol_label(check.protocol),
+                    health::status_label(check.status)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("；");
+        health_states.insert(model.id, (label, tone, detail));
+    }
+    let health_editor = HealthEditor::new(cx);
     let editor = Editor::new(cx);
     let price_editor_state = PriceEditor::new(cx);
     let create = editor_trigger(cx, &editor, None, None, None);
@@ -206,6 +231,7 @@ pub async fn model_workspace(
             success: &success,
             refresh: &refresh
         )
+        health_dialog(editor: &health_editor, refresh: &refresh, success: &success)
         price_editor(
             editor: &price_editor_state,
             csrf: csrf.as_str(),
@@ -375,6 +401,7 @@ pub async fn model_workspace(
                             <th>"协议"</th>
                             <th>"参考价格"</th>
                             <th>"状态"</th>
+                            <th>"探活"</th>
                             <th class="text-right!">"操作"</th>
                         </tr>
                     </thead>
@@ -456,16 +483,25 @@ pub async fn model_workspace(
                                     </button>
                                 </td>
                                 <td>
+                                    if let Some((label, tone, detail)) = health_states.get(
+                                        &model.id,
+                                    ) {
+                                        <span title=(detail.as_str())>
+                                            tag(tone: *tone, (*label))
+                                        </span>
+                                    }
+                                </td>
+                                <td>
                                     tag(
-                                        tone: if model.provider_enabled {
+                                        tone: if health_enabled.contains(&model.id) {
                                             TagTone::Success
                                         } else {
-                                            TagTone::Warning
+                                            TagTone::Default
                                         },
-                                        (if model.provider_enabled {
-                                            "可用"
+                                        (if health_enabled.contains(&model.id) {
+                                            "已配置"
                                         } else {
-                                            "Provider 已停用"
+                                            "未配置"
                                         })
                                     )
                                 </td>
@@ -485,6 +521,13 @@ pub async fn model_workspace(
                                             ))
                                         >
                                             "编辑"
+                                        </button>
+                                        <button
+                                            class=(TEXT_LINK)
+                                            type="button"
+                                            (health_trigger(cx, &health_editor, model))
+                                        >
+                                            "探活配置"
                                         </button>
                                         model_delete(
                                             model: model,

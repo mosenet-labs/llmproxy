@@ -3,6 +3,7 @@
 pub mod chat_history;
 mod crypto;
 mod database;
+pub mod health;
 mod holiday;
 mod model;
 mod pricing;
@@ -299,6 +300,8 @@ pub struct ModelRouteView {
 
 /// Server-only model route. Credentials are never serialized to the browser.
 pub struct ModelRoute {
+    /// 最终选择的模型映射；没有启用目标时为空。
+    pub model_id: Option<i64>,
     /// 实际 Provider／模型的思考能力与启用参数。
     pub thinking: llmproxy_core::thinking::Config,
     pub alias: String,

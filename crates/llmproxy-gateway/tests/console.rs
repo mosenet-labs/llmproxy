@@ -1097,10 +1097,76 @@ async fn exercise_http(database_url: &str) {
         .text()
         .await
         .unwrap();
-    assert!(models.contains("Unified Mock/mock-model"));
+    assert!(models.contains("Unified Mock/mock-model"), "{models}");
     assert!(models.contains("Chat"));
     assert!(models.contains("Responses"));
     assert!(models.contains("可用性探测"));
+    assert!(models.contains("探活配置"));
+    assert!(models.contains("id=\"model-health-dialog\""));
+    assert!(models.contains("未配置"));
+    assert!(!models.contains("定时探活 / 健康状态"));
+    assert!(!models.contains("开启定时探活"));
+    assert!(!models.contains(PROVIDER_KEY));
+    let signal = |id: u8, value: serde_json::Value| serde_json::json!({"t":"Signal", "id":format!("{id:032x}"), "v":value});
+    let dialog = client
+        .post(format!("{base}/_topcoat/runtime/shards/model-health"))
+        .header("x-topcoat-identity", "_glY_FmvJupFutmO6b-Ysw")
+        .json(&serde_json::json!({"args":[model_id.to_string(), 0.0,
+            signal(1, serde_json::json!(0.0)), signal(2, serde_json::json!(true)),
+            signal(3, serde_json::json!(false)), signal(4, serde_json::json!(0.0)),
+            signal(5, serde_json::json!("")), signal(6, serde_json::json!(""))], "signals":{}}))
+        .send()
+        .await
+        .unwrap();
+    let status = dialog.status();
+    let dialog = dialog.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{dialog}");
+    assert!(dialog.contains("开启定时探活"), "{dialog}");
+    assert!(dialog.contains("立即探测"));
+    assert!(dialog.contains("最近检查"));
+    assert!(dialog.contains("未配置"));
+    assert!(dialog.contains("<details"));
+    for details in dialog.split("<details").skip(1) {
+        let attributes = details.split('>').next().unwrap();
+        assert!(
+            !attributes.contains(" open"),
+            "protocol configuration should start collapsed: {attributes}"
+        );
+    }
+    assert!(models.contains("未探活"));
+
+    for (token, interval, expected_status, expected_key) in [
+        ("invalid-csrf", "300", StatusCode::FORBIDDEN, ""),
+        (csrf.as_str(), "29", StatusCode::OK, "err"),
+        (csrf.as_str(), "300", StatusCode::OK, "ok"),
+    ] {
+        let response = client
+            .post(format!(
+                "{base}/_topcoat/runtime/procedures/save-health-check"
+            ))
+            .json(&serde_json::json!([
+                token,
+                model_id.to_string(),
+                "openai_chat",
+                "0",
+                false,
+                interval,
+                "30000",
+                "1"
+            ]))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status);
+        if !expected_key.is_empty() {
+            let result = response.json::<serde_json::Value>().await.unwrap();
+            assert!(result.get(expected_key).is_some(), "{result}");
+        }
+    }
+    let check = store.model_health_checks(model_id).await.unwrap().remove(0);
+    assert!(!check.config.enabled);
+    assert_eq!(check.config.interval_seconds, 300);
+
     assert!(models.contains("参考价格"));
     assert!(models.contains("In: $0.15/M"));
     assert!(models.contains("Out: $0.60/M"));

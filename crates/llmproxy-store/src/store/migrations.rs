@@ -111,6 +111,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0022_subscription_config_version.sql",
         include_str!("../../migrations/postgresql/0022_subscription_config_version.sql"),
     ),
+    MigrationFile::new(
+        202610080003,
+        "0023_model_health_checks.sql",
+        include_str!("../../migrations/postgresql/0023_model_health_checks.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -388,5 +393,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610080002,
         "0055_subscription_config_version.sql",
         include_str!("../../migrations/sqlite/0055_subscription_config_version.sql"),
+    ),
+    MigrationFile::new(
+        202610080003,
+        "0056_model_health_checks.sql",
+        include_str!("../../migrations/sqlite/0056_model_health_checks.sql"),
     ),
 ]);

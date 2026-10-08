@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Server-only configuration. The credential is deliberately excluded from Debug.
@@ -39,14 +40,14 @@ impl ModelProber {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Verdict {
     Available,
     Unavailable,
     Inconclusive,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Reason {
     ModelNotFound,
     Authentication,
@@ -59,19 +60,19 @@ pub enum Reason {
     ThinkingStillEnabled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ThinkingMode {
     DisabledRequested,
     Low,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ProbeResult {
     pub verdict: Verdict,
     pub reason: Option<Reason>,

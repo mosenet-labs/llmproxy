@@ -23,6 +23,7 @@ use crate::{
 };
 
 mod chat_history;
+mod health;
 mod holidays;
 mod migrations;
 mod models;
@@ -87,6 +88,7 @@ impl ProviderStore {
                 RouteBinding,
                 StoreKey,
                 ModelMapping,
+                crate::model::ModelHealthCheck,
                 ModelRouteRow,
                 ModelRouteTargetRow,
                 ModelPricePlan,

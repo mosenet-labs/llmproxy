@@ -25,10 +25,7 @@ use topcoat_ant_design::{
 use crate::{
     app::{
         AppState,
-        chat_service::{
-            ChatService, HistoryAction,
-            target::{resolve as chat_target, route_available},
-        },
+        chat_service::{ChatService, HistoryAction, target::resolve as chat_target},
     },
     chat_stream::history::Selection,
 };
@@ -54,33 +51,38 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         .list_models()
         .await?
         .into_iter()
-        .filter(|model| model.provider_enabled && !model.protocols.is_empty())
+        .filter(|model| !model.protocols.is_empty())
         .collect();
     models.sort_by(|a, b| a.alias.cmp(&b.alias));
-    let mut routes: Vec<_> = state
-        .store
-        .list_routes()
-        .await?
-        .into_iter()
-        .filter(route_available)
-        .collect();
+    let mut routes: Vec<_> = state.store.list_routes().await?.into_iter().collect();
     routes.sort_by(|a, b| {
         a.name
             .cmp(&b.name)
             .then(a.protocol.as_str().cmp(b.protocol.as_str()))
     });
     let available = !models.is_empty() || !routes.is_empty();
-    let first_model = models
-        .first()
-        .map(|model| model.id.to_string())
-        .or_else(|| routes.first().map(|route| format!("route:{}", route.id)))
-        .unwrap_or_default();
-    let first_protocol = models
+    let mut first_model = String::new();
+    let mut first_protocol = models
         .first()
         .and_then(|model| model.protocols.first())
         .or_else(|| routes.first().map(|route| &route.protocol))
         .map(|protocol| protocol.as_str().to_owned())
         .unwrap_or_else(|| Protocol::OpenAiChat.as_str().to_owned());
+    for id in models
+        .iter()
+        .map(|model| model.id.to_string())
+        .chain(routes.iter().map(|route| format!("route:{}", route.id)))
+    {
+        let protocol =
+            crate::app::chat_service::target::choose_protocol(&state.store, &id, &first_protocol)
+                .await
+                .map_err(io::Error::other)?;
+        if !protocol.is_empty() {
+            first_model = id;
+            first_protocol = protocol;
+            break;
+        }
+    }
     let service = ChatService {
         store: &state.store,
         sessions: &state.chat_sessions,
@@ -131,6 +133,8 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                     session.get(),
                                     streaming.get(),
                                 ).await;
+                            } else {
+                                refresh.increment();
                             }
                             busy.set(false);
                         }
@@ -140,7 +144,6 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         })
     };
     let reset_csrf = state.csrf.clone();
-    let model_csrf = state.csrf.clone();
     Ok(view! {
         <section
             :data-chat-session=$(session.get())
@@ -387,6 +390,14 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                             >
                                 "此会话已归档，请在左侧菜单中恢复后继续。"
                             </p>
+                            chat_health_updates(refresh: $(refresh))
+                            chat_health_notice(
+                                selected: $(model_id.get()),
+                                current: $(protocol.get()),
+                                revision: $(refresh.get()),
+                                refresh: $(refresh),
+                                busy: $(busy)
+                            )
                             <fieldset
                                 class="m-0 min-w-0 border-0 p-0"
                                 :disabled=$(session_archived.get())
@@ -400,79 +411,17 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                     language: UiLanguage::ChineseSimplified,
                                     attrs: attributes! { class="chat-composer" },
                                     <div class="chat-composer-model flex min-w-0 items-center">
-                                        select(
-                                            attrs: attributes! {
-                                                cx =>
-                                                id="chat-model"
-                                                aria-label="选择聊天模型"
-                                                class="min-w-0 max-w-[320px]"
-                                                :value=$(model_id.get())
-                                                :disabled=$(if busy.get() {
-                                                    true
-                                                } else {
-                                                    generating.get()
-                                                })
-                                                @change=$(async |event: Event| {
-                                                    busy.set(true);
-                                                    let next_model = event.target.value;
-                                                    let next_protocol = default_protocol(
-                                                        model_csrf.clone(),
-                                                        next_model.clone(),
-                                                        protocol.get(),
-                                                    ).await;
-                                                    if !next_protocol.is_empty() {
-                                                        let error = switch_chat(
-                                                            model_csrf.clone(),
-                                                            session.get(),
-                                                            next_model.clone(),
-                                                            next_protocol.clone(),
-                                                        ).await;
-                                                        if error.is_empty() {
-                                                            model_id.set(next_model);
-                                                            protocol.set(next_protocol);
-                                                            refresh.increment();
-                                                        } else {
-                                                            // 原生 select 已先改变 DOM，拒绝后重新应用当前选择。
-                                                            model_id.set(model_id.get().clone());
-                                                        }
-                                                        selection_error.set(error);
-                                                    } else {
-                                                        model_id.set(model_id.get().clone());
-                                                        selection_error.set(
-                                                            "所选模型已不可用，当前对话和选择已保留".to_owned(
-
-                                                            ),
-                                                        );
-                                                    }
-                                                    busy.set(false);
-                                                })
-                                            },
-                                            if !models
-                                                    .iter()
-                                                    .any(|model| model.id.to_string() == model_id.get())
-                                                && !routes
-                                                    .iter()
-                                                    .any(
-                                                        |route| format!("route:{}", route.id) == model_id.get(),
-                                                    ) {
-                                                <option value=(model_id.get())>
-                                                    "原模型配置已失效，请选择模型"
-                                                </option>
-                                            }
-                                            for model in &models {
-                                                <option value=(model.id.to_string())>
-                                                    (model.alias.as_str())
-                                                </option>
-                                            }
-                                            for route in &routes {
-                                                <option value=(format!("route:{}", route.id))>
-                                                    (format!(
-                                                        "{} · 路由 ({})",
-                                                        route.name,
-                                                        protocol_label(route.protocol),
-                                                    ))
-                                                </option>
-                                            }
+                                        chat_model_picker(
+                                            selected: $(model_id.get()),
+                                            current: $(protocol.get()),
+                                            revision: $(refresh.get()),
+                                            model_id: $(model_id),
+                                            protocol: $(protocol),
+                                            session: $(session),
+                                            refresh: $(refresh),
+                                            busy: $(busy),
+                                            generating: $(generating),
+                                            selection_error: $(selection_error)
                                         )
                                     </div>
                                     chat_stop_button(
@@ -563,6 +512,15 @@ pub async fn switch_chat(
     if !available || !protocols.contains(&kind) {
         return Ok("所选模型或协议已不可用，当前选择已保留".into());
     }
+    let health = crate::app::chat_service::target::health(&state.store, &model_id, kind)
+        .await
+        .map_err(io::Error::other)?;
+    if health.blocked {
+        return Ok(format!(
+            "{}，当前选择已保留，请切换协议或模型",
+            health.label
+        ));
+    }
     match (ChatService {
         store: &state.store,
         sessions: &state.chat_sessions,
@@ -590,26 +548,13 @@ pub async fn default_protocol(
     current: String,
 ) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
-    let Ok((_, protocols, available, _)) =
-        chat_target(&app_context::<AppState>(cx).store, &model_id).await
-    else {
-        return Ok(String::new());
-    };
-    Ok(
-        if available
-            && selected_protocol(&current).is_ok_and(|current| protocols.contains(&current))
-        {
-            current
-        } else if available {
-            protocols
-                .first()
-                .map(|protocol| protocol.as_str())
-                .unwrap_or_default()
-                .to_owned()
-        } else {
-            String::new()
-        },
+    Ok(crate::app::chat_service::target::choose_protocol(
+        &app_context::<AppState>(cx).store,
+        &model_id,
+        &current,
     )
+    .await
+    .unwrap_or_default())
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/begin-chat")]
@@ -621,11 +566,31 @@ pub async fn begin_chat(cx: &Cx, csrf: String, session_id: String, prompt: Strin
         sessions: &state.chat_sessions,
     };
     let session = service.load(&session_id).await?;
-    let (alias, _, available, _) = chat_target(&state.store, &session.selection().model_id)
-        .await
-        .map_err(io::Error::other)?;
+    let (alias, _, available, _) =
+        match chat_target(&state.store, &session.selection().model_id).await {
+            Ok(target) => target,
+            Err(_) => {
+                session.save_error("当前模型配置已失效，请选择有效模型");
+                return Ok(false);
+            }
+        };
     if !available {
         session.save_error("当前模型已不可用，请选择有效模型");
+        return Ok(false);
+    }
+    let selection = session.selection();
+    let health = crate::app::chat_service::target::health(
+        &state.store,
+        &selection.model_id,
+        selection.protocol,
+    )
+    .await
+    .map_err(io::Error::other)?;
+    if health.blocked {
+        session.save_error(&format!(
+            "{}；当前选择已保留，请重新探测或切换模型",
+            health.label
+        ));
         return Ok(false);
     }
     match service.begin(&session_id, &prompt, &alias).await {
@@ -748,6 +713,13 @@ pub async fn chat_protocol_picker(
     let (_, protocols, _, _) = chat_target(&state.store, &model_id.get())
         .await
         .unwrap_or_else(|_| (String::new(), Vec::new(), false, Support::Unknown));
+    let mut options = Vec::new();
+    for kind in protocols {
+        let health = crate::app::chat_service::target::health(&state.store, &model_id.get(), kind)
+            .await
+            .map_err(io::Error::other)?;
+        options.push((kind, health));
+    }
     Ok(view! {
         select(
             attrs: attributes! {
@@ -776,8 +748,10 @@ pub async fn chat_protocol_picker(
                     busy.set(false);
                 })
             },
-            for kind in &protocols {
-                <option value=(kind.as_str())>(protocol_label(*kind))</option>
+            for (kind, health) in &options {
+                <option value=(kind.as_str()) :disabled=(health.blocked)>
+                    (protocol_label(*kind))
+                </option>
             }
         )
     })
@@ -1965,4 +1939,276 @@ pub async fn retry_chat_save(cx: &Cx, csrf: String, session_id: String) -> Resul
         .chat_sessions
         .get(&session_id)
         .is_some_and(|room| room.persistence_error().is_empty()))
+}
+
+#[shard("/ui/_topcoat/runtime/shards/chat-model-picker")]
+pub async fn chat_model_picker(
+    cx: &Cx,
+    selected: String,
+    current: String,
+    revision: usize,
+    model_id: Signal<String>,
+    protocol: Signal<String>,
+    session: Signal<String>,
+    refresh: Signal<usize>,
+    busy: Signal<bool>,
+    generating: Signal<bool>,
+    selection_error: Signal<String>,
+) -> Result<impl View> {
+    crate::app::request_connection(cx);
+    let _ = revision;
+    let state = app_context::<AppState>(cx);
+    let model_csrf = state.csrf.clone();
+    let mut models = state.store.list_models().await?;
+    models.sort_by(|a, b| a.alias.cmp(&b.alias));
+    let mut routes = state.store.list_routes().await?;
+    routes.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.protocol.as_str().cmp(b.protocol.as_str()))
+    });
+    let mut options = Vec::new();
+    for (id, label, protocols) in models
+        .into_iter()
+        .map(|model| (model.id.to_string(), model.alias, model.protocols))
+        .chain(routes.into_iter().map(|route| {
+            (
+                format!("route:{}", route.id),
+                format!("{} · 路由 ({})", route.name, protocol_label(route.protocol)),
+                vec![route.protocol],
+            )
+        }))
+    {
+        let preferred = if id == selected {
+            current.clone()
+        } else {
+            crate::app::chat_service::target::choose_protocol(&state.store, &id, &current)
+                .await
+                .unwrap_or_default()
+        };
+        let kind = Protocol::parse(&preferred).or_else(|| protocols.first().copied());
+        if let Some(kind) = kind {
+            let health = crate::app::chat_service::target::health(&state.store, &id, kind)
+                .await
+                .map_err(io::Error::other)?;
+            options.push((id, label, health.blocked));
+        }
+    }
+    let selected_blocked = options
+        .iter()
+        .any(|(id, _, blocked)| id == &selected && *blocked);
+    Ok(view! {
+        select(
+            attrs: attributes! {
+                cx =>
+                id="chat-model"
+                aria-label="选择聊天模型"
+                class=(if selected_blocked {
+                    "min-w-0 max-w-[320px] text-muted!"
+                } else {
+                    "min-w-0 max-w-[320px]"
+                })
+                :value=$(model_id.get())
+                :disabled=$(if busy.get() { true } else { generating.get() })
+                @change=$(async |event: Event| {
+                    busy.set(true);
+                    let next_model = event.target.value;
+                    let next_protocol = default_protocol(
+                        model_csrf.clone(),
+                        next_model.clone(),
+                        protocol.get(),
+                    ).await;
+                    if !next_protocol.is_empty() {
+                        let error = switch_chat(
+                            model_csrf.clone(),
+                            session.get(),
+                            next_model.clone(),
+                            next_protocol.clone(),
+                        ).await;
+                        if error.is_empty() {
+                            model_id.set(next_model);
+                            protocol.set(next_protocol);
+                            refresh.increment();
+                        } else {
+                            // 原生 select 已先改变 DOM，拒绝后重新应用当前选择。
+                            model_id.set(model_id.get().clone());
+                        }
+                        selection_error.set(error);
+                    } else {
+                        model_id.set(model_id.get().clone());
+                        selection_error.set(
+                            "所选模型已不可用，当前对话和选择已保留".to_owned(
+
+                            ),
+                        );
+                    }
+                    busy.set(false);
+                })
+            },
+            if !options.iter().any(|option| option.0 == selected) {
+                <option value=(selected.as_str()) disabled="">
+                    "原模型配置已失效，请切换模型"
+                </option>
+            }
+            for (id, label, blocked) in &options {
+                <option
+                    value=(id.as_str())
+                    :disabled=(*blocked)
+                    class=(if *blocked { "text-muted!" } else { "" })
+                >
+                    (label.as_str())
+                </option>
+            }
+        )
+    })
+}
+
+#[shard("/ui/_topcoat/runtime/shards/chat-health-notice")]
+pub async fn chat_health_notice(
+    cx: &Cx,
+    selected: String,
+    current: String,
+    revision: usize,
+    refresh: Signal<usize>,
+    busy: Signal<bool>,
+) -> Result<impl View> {
+    crate::app::request_connection(cx);
+    let _ = revision;
+    let state = app_context::<AppState>(cx);
+    let csrf = state.csrf.clone();
+    let message = signal(cx, String::new);
+    let protocol = selected_protocol(&current).map_err(io::Error::other)?;
+    let health = crate::app::chat_service::target::health(&state.store, &selected, protocol)
+        .await
+        .unwrap_or(crate::app::chat_service::target::Health {
+            blocked: true,
+            warning: true,
+            severe: true,
+            label: if selected.is_empty() {
+                "请选择可用模型".into()
+            } else {
+                "模型配置已失效".into()
+            },
+        });
+    let hint = if health.blocked {
+        "当前选择和对话已保留，请重新探测或切换模型。"
+    } else if health.warning {
+        "最近探测未确认可用，仍可尝试发送。"
+    } else {
+        ""
+    };
+    Ok(view! {
+        if health.warning {
+            <div
+                class=(if health.severe {
+                    "mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+                } else if health.warning {
+                    "mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+                } else {
+                    "mb-2 px-1 text-xs text-secondary"
+                })
+                role="status"
+                aria-live="polite"
+            >
+                <div
+                    class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2"
+                >
+                    <span class="min-w-0 break-words">
+                        (format!("{} · {}", protocol_label(protocol), health.label))
+                    </span>
+                    <div class="flex shrink-0 items-center gap-3">
+                        <button
+                            class="border-0 bg-transparent p-0 text-xs text-primary hover:underline"
+                            type="button"
+                            :disabled=$(busy.get())
+                            @click=$(|_event: Event| refresh.increment())
+                        >
+                            "刷新状态"
+                        </button>
+                        if health.warning {
+                            <button
+                                class="border-0 bg-transparent p-0 text-xs text-primary hover:underline"
+                                type="button"
+                                :disabled=$(busy.get())
+                                @click=$(async |_event: Event| {
+                                    busy.set(true);
+                                    let outcome = reprobe_chat_model(csrf, selected, current).await;
+                                    busy.set(false);
+                                    if outcome.is_err() {
+                                        message.set(outcome.unwrap_err());
+                                    } else {
+                                        message.set("".to_owned());
+                                        refresh.increment();
+                                    }
+                                })
+                            >
+                                "重新探测"
+                            </button>
+                            <label
+                                for="chat-model"
+                                class="cursor-pointer text-primary hover:underline"
+                            >
+                                "切换模型"
+                            </label>
+                        }
+                    </div>
+                </div>
+                if !hint.is_empty() {
+                    <p class="mt-1 mb-0 leading-5">(hint)</p>
+                }
+                <p class="mt-1 mb-0 leading-5" :hidden=$(message.get().is_empty())>
+                    $(message.get())
+                </p>
+            </div>
+        }
+    })
+}
+
+#[procedure("/ui/_topcoat/runtime/procedures/reprobe-chat-model")]
+pub async fn reprobe_chat_model(
+    cx: &Cx,
+    csrf: String,
+    selected: String,
+    protocol: String,
+) -> Result<std::result::Result<String, String>> {
+    crate::app::check_csrf(cx, &csrf)?;
+    let state = app_context::<AppState>(cx);
+    let result = async {
+        let protocol = selected_protocol(&protocol)?;
+        crate::app::chat_service::target::reprobe(&state.store, &state.health, &selected, protocol)
+            .await?;
+        Ok("探测已完成".to_owned())
+    }
+    .await;
+    Ok(result)
+}
+
+/// Health notifications reuse the document connection and invalidate existing pickers.
+#[shard("/ui/_topcoat/runtime/shards/chat-health-updates")]
+pub async fn chat_health_updates(cx: &Cx, refresh: Signal<usize>) -> Result<impl View> {
+    crate::app::request_connection(cx);
+    let state = app_context::<AppState>(cx);
+    Ok(live! {
+        let mut changed = state.health.subscribe();
+        let mut update = 0usize;
+        loop {
+            let token = emit! {
+                <span
+                    hidden=""
+                    :data-health-update=$(raw!(
+                        "(() => { if (${update}.dehydrate() > 0) queueMicrotask(() => ${refresh}.increment()); return ${update}.dehydrate(); })()",
+                        update,
+                    ))
+                ></span>
+            }?;
+            if topcoat::router::request::original_method(cx)
+                != topcoat::router::Method::POST {
+                break Ok(token);
+            }
+            if changed.changed().await.is_err() {
+                break Ok(token);
+            }
+            update += 1;
+        }
+    })
 }

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 aes-gcm = { version = "0.11.1", features = ["zeroize"] }
 base64 = "0.23.1"
+llmproxy-probe = { path = "../llmproxy-probe" }
 llmproxy-core = { path = "../llmproxy-core" }
 toasty = { version = "0.11.0", default-features = false, features = ["postgresql", "sqlite", "migration", "serde"] }
 toasty-core = "0.11.0"

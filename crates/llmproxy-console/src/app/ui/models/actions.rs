@@ -250,42 +250,8 @@ pub async fn probe_saved_model(
             .filter(|value| (1..=1024).contains(value))
             .ok_or_else(|| "输出上限须为 1–1024 token".to_owned())?;
         let state = app_context::<AppState>(cx);
-        let route = state
-            .store
-            .load_model_route(id, protocol)
-            .await
-            .map_err(|error| error.to_string())?;
-        let provider = route
-            .provider
-            .ok_or_else(|| "Provider 已停用，无法探测".to_owned())?;
-        let provider_id = provider.id;
-        let scheme = if provider.tls { "https" } else { "http" };
-        let url = format!(
-            "{scheme}://{}:{}{}",
-            provider.host, provider.port, provider.upstream_path
-        )
-        .parse()
-        .map_err(|_| "Provider 上游地址无效".to_owned())?;
-        let target = InferenceProbeTarget {
-            url,
-            protocol,
-            secret: provider.secret,
-            anthropic_version: provider.anthropic_version,
-            messages_auth: provider.messages_auth,
-            timeout: Duration::from_millis(
-                provider
-                    .connect_timeout_ms
-                    .saturating_add(provider.read_timeout_ms),
-            ),
-        };
-        let probe = state
-            .prober
-            .probe_model(&target, &route.upstream_model_id, max_output_tokens)
-            .await;
-        state
-            .telemetry
-            .model_probe(provider_id, &route.upstream_model_id, protocol, &probe);
-        let label = format!("「{}」{}", route.alias, protocol_label(protocol));
+        let (alias, probe) = state.health.probe(id, protocol, max_output_tokens).await?;
+        let label = format!("「{}」{}", alias, protocol_label(protocol));
         let thinking_note = if probe.thinking_mode == ThinkingMode::Low {
             "（低思考模式，仍会消耗思考 token）"
         } else {

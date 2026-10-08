@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod chat_stream;
+mod model_health;
 pub mod observability;
 
 use std::io;
@@ -28,6 +29,7 @@ pub struct Console {
     history_auth: String,
     router: Router,
     subscriptions: SubscriptionPresence,
+    _health_worker: std::sync::Arc<model_health::HealthWorker>,
 }
 
 impl Console {
@@ -57,15 +59,17 @@ impl Console {
             Ok("false") => false,
             _ => return Err(io::Error::other("LLMPROXY_UI_WEBSOCKET 须为 true 或 false").into()),
         };
+        let telemetry = std::sync::Arc::new(observability::ConsoleTelemetry::new());
+        let health = model_health::ModelHealthService::new(store.clone(), telemetry.clone())?;
         let state = app::AppState {
             websocket,
             subscriptions: subscriptions.clone(),
             history_auth: history_auth.clone(),
             store,
-            prober: llmproxy_probe::ModelProber::new()?,
+            health: health.clone(),
             csrf,
             port: listen.port(),
-            telemetry: observability::ConsoleTelemetry::new(),
+            telemetry,
             chat_sessions: std::sync::Arc::new(app::chat_sessions::ChatSessions::default()),
             chat_client: reqwest::Client::builder().no_proxy().build()?,
             gateway_origin: format!(
@@ -88,6 +92,10 @@ impl Console {
             .route(app::ui::chat::chat_history)
             .route(app::ui::chat::chat_usage)
             .route(app::ui::chat::chat_protocol_picker)
+            .route(app::ui::chat::chat_model_picker)
+            .route(app::ui::chat::chat_health_notice)
+            .route(app::ui::chat::chat_health_updates)
+            .route(app::ui::chat::reprobe_chat_model)
             .route(app::ui::chat::chat_thinking_picker)
             .route(app::ui::chat::chat_session_list)
             .route(app::ui::chat::chat_session_activity)
@@ -114,6 +122,8 @@ impl Console {
             .route(app::ui::models::save_models)
             .route(app::ui::models::delete_model)
             .route(app::ui::models::probe_saved_model)
+            .route(app::ui::models::model_health)
+            .route(app::ui::models::save_health_check)
             .route(app::ui::models::price_rule_rows)
             .route(app::ui::models::price_matrix_rows)
             .route(app::ui::models::price_peak_windows)
@@ -131,6 +141,7 @@ impl Console {
             .route(app::ui::providers::provider_action)
             .route(app::ui::providers::preview_models)
             .route(app::ui::providers::provider_list)
+            .route(app::ui::providers::provider_health)
             .page(app::ui::subscriptions::import_models)
             .route(app::ui::subscriptions::set_enabled)
             .route(app::ui::subscriptions::rename)
@@ -157,6 +168,7 @@ impl Console {
         Ok(Self {
             history_auth,
             router: builder.build(),
+            _health_worker: health.start(),
             subscriptions,
         })
     }

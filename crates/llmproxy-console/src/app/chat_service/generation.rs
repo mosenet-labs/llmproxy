@@ -34,6 +34,10 @@ pub(crate) fn spawn(
             if !available || !protocols.contains(&protocol) {
                 return Err("当前模型或协议已不可用".to_owned());
             }
+            let health = super::target::health(&store, &turn.selection.model_id, protocol).await?;
+            if health.blocked {
+                return Err(format!("{}，请切换模型或重新探测", health.label));
+            }
             Config {
                 support,
                 ..Default::default()

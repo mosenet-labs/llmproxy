@@ -1,0 +1,20 @@
+CREATE TABLE model_health_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id BIGINT NOT NULL REFERENCES model_mappings(id) ON DELETE CASCADE,
+    protocol TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    interval_seconds BIGINT NOT NULL DEFAULT 300,
+    timeout_ms BIGINT NOT NULL DEFAULT 30000,
+    max_output_tokens BIGINT NOT NULL DEFAULT 1,
+    next_probe_at BIGINT NOT NULL DEFAULT 0,
+    lease_until BIGINT NOT NULL DEFAULT 0,
+    generation BIGINT NOT NULL DEFAULT 0,
+    model_version BIGINT NOT NULL DEFAULT 0,
+    provider_version BIGINT NOT NULL DEFAULT 0,
+    last_probe_at BIGINT,
+    last_success_at BIGINT,
+    result_json TEXT,
+    consecutive_failures BIGINT NOT NULL DEFAULT 0,
+    version BIGINT NOT NULL DEFAULT 0,
+    UNIQUE(model_id, protocol)
+);

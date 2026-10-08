@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, RwLock},
     thread::{self, JoinHandle},
     time::Duration,
@@ -15,6 +15,39 @@ use tokio::{runtime::Builder, sync::oneshot, time};
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(5);
 const MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+const PROTOCOLS: [Protocol; 4] = [
+    Protocol::OpenAiChat,
+    Protocol::OpenAiResponses,
+    Protocol::AnthropicMessages,
+    Protocol::Gemini,
+];
+
+fn protocol_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::OpenAiChat => "chat",
+        Protocol::OpenAiResponses => "responses",
+        Protocol::AnthropicMessages => "messages",
+        Protocol::Gemini => "gemini",
+    }
+}
+
+fn protocol_path(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Gemini => "/v1beta/models/{model}:generateContent",
+        _ => protocol.upstream_path(),
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct CatalogModel {
+    id: String,
+    name: String,
+    object: &'static str,
+    created: u64,
+    owned_by: &'static str,
+    protocols: BTreeMap<&'static str, &'static str>,
+}
 
 // Resolved credentials deliberately have no Debug or Serialize implementation.
 #[derive(Clone)]
@@ -51,6 +84,7 @@ pub struct ProviderSnapshot {
 }
 
 pub struct ResolvedModel {
+    pub blocked: bool,
     pub thinking: llmproxy_core::thinking::Config,
     pub upstream_model_id: String,
     pub provider: Option<Arc<ResolvedProvider>>,
@@ -73,7 +107,73 @@ impl ProviderSnapshot {
         Ok(snapshot)
     }
 
-    fn from_database(routes: Vec<ModelRoute>) -> Result<Self, &'static str> {
+    fn select(&self, protocol: Protocol, alias: &str) -> Option<Arc<ResolvedModel>> {
+        let exact = self.models.get(&(protocol, alias.to_owned()));
+        // Explicitly disabled configuration must not be bypassed by bridging.
+        if let Some(model) = exact
+            && (model.provider.is_none() || !model.blocked)
+        {
+            return Some(model.clone());
+        }
+        PROTOCOLS
+            .iter()
+            .filter_map(|kind| self.models.get(&(*kind, alias.to_owned())))
+            .find(|model| model.provider.is_some() && !model.blocked)
+            .or(exact)
+            .or_else(|| {
+                PROTOCOLS
+                    .iter()
+                    .find_map(|kind| self.models.get(&(*kind, alias.to_owned())))
+            })
+            .cloned()
+    }
+
+    fn catalog(&self) -> Vec<CatalogModel> {
+        let mut entries = BTreeMap::new();
+        for (_, alias) in self.models.keys() {
+            entries.entry(alias.clone()).or_insert_with(|| {
+                let protocols = PROTOCOLS
+                    .iter()
+                    .filter_map(|protocol| {
+                        self.select(*protocol, alias)
+                            .filter(|model| model.provider.is_some() && !model.blocked)
+                            .map(|_| (protocol_name(*protocol), protocol_path(*protocol)))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                CatalogModel {
+                    id: alias.clone(),
+                    name: alias.clone(),
+                    object: "model",
+                    created: 0,
+                    owned_by: "llmproxy",
+                    protocols,
+                }
+            });
+        }
+        entries
+            .into_values()
+            .filter(|model| !model.protocols.is_empty())
+            .collect()
+    }
+
+    async fn load(store: &ProviderStore) -> Result<Self, ()> {
+        let routes = store.load_model_routes().await.map_err(|_| ())?;
+        let ids: HashSet<_> = routes.iter().filter_map(|route| route.model_id).collect();
+        let mut unavailable = HashSet::new();
+        for id in ids {
+            for check in store.model_health_checks(id).await.map_err(|_| ())? {
+                if check.status.blocks_calls() {
+                    unavailable.insert((id, check.protocol));
+                }
+            }
+        }
+        Self::from_database(routes, &unavailable).map_err(|_| ())
+    }
+
+    fn from_database(
+        routes: Vec<ModelRoute>,
+        unavailable: &HashSet<(i64, Protocol)>,
+    ) -> Result<Self, &'static str> {
         let mut resolved = Vec::with_capacity(routes.len());
         for route in routes {
             let Some(provider) = route.provider else {
@@ -81,6 +181,7 @@ impl ProviderSnapshot {
                     route.protocol,
                     route.alias,
                     ResolvedModel {
+                        blocked: false,
                         thinking: route.thinking,
                         upstream_model_id: route.upstream_model_id,
                         provider: None,
@@ -111,6 +212,9 @@ impl ProviderSnapshot {
                 route.protocol,
                 route.alias,
                 ResolvedModel {
+                    blocked: route
+                        .model_id
+                        .is_some_and(|id| unavailable.contains(&(id, provider.protocol))),
                     thinking: route.thinking,
                     upstream_model_id: route.upstream_model_id,
                     provider: Some(Arc::new(ResolvedProvider {
@@ -151,9 +255,14 @@ impl ProviderSnapshots {
         self.current
             .read()
             .unwrap_or_else(|error| error.into_inner())
-            .models
-            .get(&(protocol, alias.to_owned()))
-            .cloned()
+            .select(protocol, alias)
+    }
+
+    pub fn catalog(&self) -> Vec<CatalogModel> {
+        self.current
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .catalog()
     }
 
     fn replace(&self, snapshot: ProviderSnapshot) {
@@ -191,12 +300,10 @@ impl ProviderSnapshots {
                 event_kind = "runtime",
                 "provider database schema ready"
             );
-            let providers = time::timeout(DATABASE_TIMEOUT, store.load_model_routes())
+            let initial = time::timeout(DATABASE_TIMEOUT, ProviderSnapshot::load(&store))
                 .await
                 .map_err(|_| "initial provider snapshot timed out")?
                 .map_err(|_| "cannot load provider snapshot; check provider records")?;
-            let initial = ProviderSnapshot::from_database(providers)
-                .map_err(|_| "initial provider snapshot is invalid")?;
             Ok::<_, &'static str>((store, initial))
         })?;
         let snapshots = Self::new(initial);
@@ -216,13 +323,10 @@ impl ProviderSnapshots {
                     loop {
                         let next_snapshot = async {
                             interval.tick().await;
-                            time::timeout(DATABASE_TIMEOUT, store.load_model_routes())
+                            time::timeout(DATABASE_TIMEOUT, ProviderSnapshot::load(&store))
                                 .await
                                 .map_err(|_| ())?
                                 .map_err(|_| ())
-                                .and_then(|providers| {
-                                    ProviderSnapshot::from_database(providers).map_err(|_| ())
-                                })
                         };
                         let loaded = tokio::select! {
                             _ = &mut stopping => break,
@@ -307,6 +411,7 @@ mod tests {
                 Protocol::OpenAiChat,
                 "public/one".to_owned(),
                 ResolvedModel {
+                    blocked: false,
                     thinking: Default::default(),
                     upstream_model_id: "one".to_owned(),
                     provider: Some(Arc::new(provider("old.example", "old-dummy-key"))),
@@ -322,6 +427,7 @@ mod tests {
                 Protocol::OpenAiChat,
                 "public/one".to_owned(),
                 ResolvedModel {
+                    blocked: false,
                     thinking: Default::default(),
                     upstream_model_id: "two".to_owned(),
                     provider: Some(Arc::new(provider("new.example", "new-dummy-key"))),
@@ -356,6 +462,7 @@ mod tests {
                     Protocol::OpenAiChat,
                     "same".to_owned(),
                     ResolvedModel {
+                        blocked: false,
                         thinking: Default::default(),
                         upstream_model_id: "one".to_owned(),
                         provider: Some(Arc::new(provider("first.example", "dummy")))
@@ -365,6 +472,7 @@ mod tests {
                     Protocol::OpenAiChat,
                     "same".to_owned(),
                     ResolvedModel {
+                        blocked: false,
                         thinking: Default::default(),
                         upstream_model_id: "two".to_owned(),
                         provider: Some(Arc::new(provider("second.example", "dummy")))
@@ -373,5 +481,100 @@ mod tests {
             ])
             .is_err()
         );
+    }
+    fn model(protocol: Protocol, id: &str, blocked: bool, enabled: bool) -> ResolvedModel {
+        let mut upstream = provider("fixture.example", "dummy-key");
+        upstream.protocol = protocol;
+        upstream.upstream_path = protocol.upstream_path().into();
+        ResolvedModel {
+            blocked,
+            thinking: Default::default(),
+            upstream_model_id: id.into(),
+            provider: enabled.then(|| Arc::new(upstream)),
+        }
+    }
+
+    #[test]
+    fn cross_protocol_selection_and_catalog_share_availability() {
+        let snapshot = ProviderSnapshot::new([
+            (
+                Protocol::Gemini,
+                "multi".into(),
+                model(Protocol::Gemini, "gemini", false, true),
+            ),
+            (
+                Protocol::OpenAiChat,
+                "multi".into(),
+                model(Protocol::OpenAiChat, "chat", false, true),
+            ),
+            (
+                Protocol::OpenAiResponses,
+                "multi".into(),
+                model(Protocol::OpenAiResponses, "responses", true, true),
+            ),
+            (
+                Protocol::OpenAiChat,
+                "absent".into(),
+                model(Protocol::OpenAiChat, "absent", true, true),
+            ),
+            (
+                Protocol::OpenAiChat,
+                "disabled".into(),
+                model(Protocol::OpenAiChat, "disabled", false, false),
+            ),
+            (
+                Protocol::OpenAiResponses,
+                "partial".into(),
+                model(Protocol::OpenAiResponses, "off", false, false),
+            ),
+            (
+                Protocol::Gemini,
+                "partial".into(),
+                model(Protocol::Gemini, "on", false, true),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .select(Protocol::Gemini, "multi")
+                .unwrap()
+                .upstream_model_id,
+            "gemini"
+        );
+        for kind in [Protocol::AnthropicMessages, Protocol::OpenAiResponses] {
+            assert_eq!(
+                snapshot.select(kind, "multi").unwrap().upstream_model_id,
+                "chat"
+            );
+        }
+        assert!(snapshot.select(Protocol::Gemini, "unknown").is_none());
+        assert!(snapshot.select(Protocol::Gemini, "absent").unwrap().blocked);
+        assert!(
+            snapshot
+                .select(Protocol::Gemini, "disabled")
+                .unwrap()
+                .provider
+                .is_none()
+        );
+        assert!(
+            snapshot
+                .select(Protocol::OpenAiResponses, "partial")
+                .unwrap()
+                .provider
+                .is_none()
+        );
+        let catalog = snapshot.catalog();
+        assert_eq!(
+            catalog.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["multi", "partial"]
+        );
+        assert_eq!(catalog[0].id, catalog[0].name);
+        assert_eq!(catalog[0].protocols.len(), 4);
+        assert_eq!(
+            catalog[0].protocols["gemini"],
+            "/v1beta/models/{model}:generateContent"
+        );
+        assert_eq!(catalog[1].protocols.len(), 3);
+        assert!(!catalog[1].protocols.contains_key("responses"));
     }
 }

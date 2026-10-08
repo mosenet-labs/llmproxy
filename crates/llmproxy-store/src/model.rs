@@ -299,3 +299,29 @@ pub(crate) struct ChatTurnRow {
     pub started_at: i64,
     pub ended_at: Option<i64>,
 }
+
+#[derive(toasty::Model)]
+#[table = "model_health_checks"]
+pub(crate) struct ModelHealthCheck {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub model_id: i64,
+    pub protocol: String,
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub timeout_ms: u64,
+    pub max_output_tokens: u32,
+    pub next_probe_at: i64,
+    pub lease_until: i64,
+    pub generation: u64,
+    pub model_version: u64,
+    pub provider_version: u64,
+    pub last_probe_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    #[column(type = text)]
+    pub result_json: Option<toasty::Json<llmproxy_probe::ProbeResult>>,
+    pub consecutive_failures: u64,
+    #[version]
+    pub version: u64,
+}

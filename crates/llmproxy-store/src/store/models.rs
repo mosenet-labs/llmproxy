@@ -312,6 +312,7 @@ impl ProviderStore {
                 None
             };
             routes.push(ModelRoute {
+                model_id: selected.map(|(_, mapping, _)| mapping.id),
                 thinking: selected
                     .map(|(_, mapping, _)| mapping.thinking())
                     .transpose()?
@@ -349,6 +350,7 @@ impl ProviderStore {
                     None
                 };
                 routes.push(ModelRoute {
+                    model_id: Some(mapping.id),
                     thinking: mapping.thinking()?,
                     alias: mapping.alias.clone(),
                     upstream_model_id: mapping.upstream_model_id.clone(),
@@ -382,6 +384,7 @@ impl ProviderStore {
         };
         tx.commit().await?;
         Ok(ModelRoute {
+            model_id: Some(mapping.id),
             thinking: mapping.thinking()?,
             alias: mapping.alias,
             upstream_model_id: mapping.upstream_model_id,

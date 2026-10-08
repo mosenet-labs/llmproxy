@@ -34,7 +34,7 @@ Gemini 原生接入：在 Providers 中选择 Gemini，上游地址填写 `https
 | --- | --- |
 | 需求与计划 | [原始需求](docs/00-original-requirements.md) · [架构设计](docs/01-architecture.md) · [实施任务](docs/02-tasks.md) |
 | 启动与部署 | [本地运行与遥测](docs/03-development.md) · [单进程、单端口与 `/ui`](docs/11-unified-service.md) · [SQLite 与 PostgreSQL](docs/12-sqlite-compatibility-plan.md) |
-| 代理实现 | [明确入口联调](docs/05-explicit-routes-validation.md) · [Pingora 请求阶段](docs/06-pingora-request-lifecycle.md) |
+| 代理实现 | [模型发现与跨协议路由](docs/36-model-discovery-and-protocol-routing.md) · [实现任务](docs/37-model-discovery-and-protocol-routing-tasks.md) · [明确入口联调](docs/05-explicit-routes-validation.md) · [Pingora 请求阶段](docs/06-pingora-request-lifecycle.md) |
 | Provider 与模型控制台 | [Provider 管理](docs/07-provider-console.md) · [多协议 Provider 与模型探测](docs/13-provider-interfaces-and-model-discovery.md) · [模型映射与 Models 控制台](docs/14-model-mapping.md) · [Model Routes](docs/18-model-routes.md) · [模型参考价格规则](docs/16-model-pricing.md) · [节假日日历](docs/17-holiday-calendar.md) · [异步操作与一次性通知](docs/09-console-async-actions.md) |
 | 可观测性 | [访问日志](docs/04-access-logging.md) · [网关连接诊断](docs/08-gateway-observability.md) · [统一遥测](docs/10-shared-telemetry.md) |
 | 控制台实时更新 | [共享 WebSocket 设计](docs/32-console-shard-connections-design.md) · [Shard connections 任务](docs/33-console-shard-connections-tasks.md) |

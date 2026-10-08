@@ -35,6 +35,8 @@ use crate::app::{
 
 mod actions;
 mod editor;
+mod health;
+pub(crate) use health::provider_health;
 
 use actions::{action_input, save_input};
 pub(crate) use actions::{preview_models, provider_action, save_provider};
@@ -493,6 +495,10 @@ pub async fn provider_list(
                                                 TagTone::Default
                                             },
                                             (if provider.enabled { "已启用" } else { "已停用" })
+                                        )
+                                        provider_health(
+                                            provider_id: provider.id,
+                                            enabled: provider.enabled
                                         )
                                     </div>
                                 </td>

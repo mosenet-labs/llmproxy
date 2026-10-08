@@ -1368,3 +1368,392 @@ async fn enabled_gemini_summaries_reach_all_clients_in_both_modes() {
         }
     }
 }
+
+async fn save_probe(
+    store: &llmproxy_store::ProviderStore,
+    id: i64,
+    protocol: Protocol,
+    verdict: llmproxy_probe::Verdict,
+    reason: Option<llmproxy_probe::Reason>,
+) {
+    let job = store
+        .claim_health_checks(Some((id, protocol, 1)), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        store
+            .finish_health_check(
+                &job,
+                llmproxy_probe::ProbeResult {
+                    verdict,
+                    reason,
+                    http_status: Some(404),
+                    usage: None,
+                    elapsed: Duration::from_millis(10),
+                    thinking_mode: llmproxy_probe::ThinkingMode::DisabledRequested,
+                },
+                0
+            )
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn chat_health_blocks_confirmed_failures_and_preserves_selection_and_provider_status() {
+    use llmproxy_probe::{Reason, Verdict};
+    let fixture = Fixture::new().await;
+    let base = fixture.base();
+    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let editor = client
+        .get(format!("{base}/providers/form"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = attribute(editor.split_once("name=\"csrf\"").unwrap().1, "value");
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let session = attribute(&page, "data-chat-session");
+    let model = fixture
+        .database
+        .store
+        .list_models()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|model| model.alias == "multi-protocol")
+        .unwrap();
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "switch-chat",
+            json!([csrf, session, model.id.to_string(), "openai_chat"])
+        )
+        .await,
+        ""
+    );
+    save_probe(
+        &fixture.database.store,
+        model.id,
+        Protocol::OpenAiChat,
+        Verdict::Unavailable,
+        Some(Reason::ModelNotFound),
+    )
+    .await;
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(attribute(&page, "data-chat-session"), session);
+    assert!(page.contains("模型不存在"));
+    assert!(page.contains("当前选择和对话已保留"));
+    assert!(page.contains("重新探测"));
+    let model_option = page
+        .split("<option")
+        .map(|option| option.split('>').next().unwrap())
+        .find(|attributes| attributes.contains(&format!("value=\"{}\"", model.id)))
+        .unwrap();
+    assert!(model_option.contains("disabled"), "{model_option}");
+    let option_label = page
+        .split("<option")
+        .find(|option| option.starts_with(&format!(" value=\"{}\"", model.id)))
+        .unwrap()
+        .split_once('>')
+        .unwrap()
+        .1
+        .split("</option>")
+        .next()
+        .unwrap();
+    assert_eq!(option_label.trim(), model.alias);
+    assert!(!page.contains("Chat · 未探活"));
+    assert!(!page.contains("Responses · 未探活"));
+
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, session, "should not send"])
+        )
+        .await,
+        false
+    );
+    assert!(
+        fixture
+            .database
+            .store
+            .chat_turns(session)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        procedure(
+            &client,
+            &base,
+            "switch-chat",
+            json!([csrf, session, model.id.to_string(), "openai_chat"])
+        )
+        .await
+        .as_str()
+        .unwrap()
+        .contains("模型不存在")
+    );
+    let backup = fixture
+        .database
+        .store
+        .list_models()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.protocols == vec![Protocol::OpenAiChat])
+        .unwrap();
+    let route = fixture
+        .database
+        .store
+        .create_route(llmproxy_store::ModelRouteInput {
+            name: "health-route".into(),
+            protocol: Protocol::OpenAiResponses,
+            provider_protocol: Protocol::OpenAiChat,
+            enabled: true,
+            targets: vec![
+                llmproxy_store::ModelRouteTargetInput {
+                    model_id: model.id,
+                    enabled: true,
+                },
+                llmproxy_store::ModelRouteTargetInput {
+                    model_id: backup.id,
+                    enabled: true,
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    let rejected = procedure(
+        &client,
+        &base,
+        "switch-chat",
+        json!([
+            csrf,
+            session,
+            format!("route:{}", route.id),
+            "openai_responses"
+        ]),
+    )
+    .await;
+    assert!(rejected.as_str().unwrap().contains("首选目标不可用"));
+    save_probe(
+        &fixture.database.store,
+        backup.id,
+        Protocol::OpenAiChat,
+        Verdict::Unavailable,
+        Some(Reason::ModelNotFound),
+    )
+    .await;
+    let route_page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let rejected = procedure(
+        &client,
+        &base,
+        "switch-chat",
+        json!([
+            csrf,
+            session,
+            format!("route:{}", route.id),
+            "openai_responses"
+        ]),
+    )
+    .await;
+    assert!(rejected.as_str().unwrap().contains("路由所有候选均不可用"));
+    assert!(route_page.contains("模型不存在"));
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, session, "all candidates absent"])
+        )
+        .await,
+        false
+    );
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "default-chat-protocol",
+            json!([csrf, model.id.to_string(), "openai_chat"])
+        )
+        .await,
+        "openai_responses"
+    );
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "switch-chat",
+            json!([csrf, session, model.id.to_string(), "openai_responses"])
+        )
+        .await,
+        ""
+    );
+    for _ in 0..2 {
+        save_probe(
+            &fixture.database.store,
+            model.id,
+            Protocol::OpenAiResponses,
+            Verdict::Inconclusive,
+            Some(Reason::Timeout),
+        )
+        .await;
+    }
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("最近探活失败"));
+    assert!(page.contains("仍可尝试发送"));
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, session, "soft failure may send"])
+        )
+        .await,
+        true
+    );
+    assert_eq!(
+        procedure(&client, &base, "send-chat", json!([csrf, session, false])).await,
+        true
+    );
+    let _ = saved_turn(&fixture, session, 1).await;
+    save_probe(
+        &fixture.database.store,
+        model.id,
+        Protocol::OpenAiResponses,
+        Verdict::Inconclusive,
+        Some(Reason::Timeout),
+    )
+    .await;
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("连续探活失败"));
+    assert!(page.contains("当前选择和对话已保留"));
+    let attributes = page
+        .split("<option")
+        .map(|option| option.split('>').next().unwrap())
+        .find(|attrs| attrs.contains(&format!("value=\"{}\"", model.id)))
+        .unwrap();
+    assert!(attributes.contains("disabled"));
+    assert!(attributes.contains("text-muted"));
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, session, "confirmed failure"])
+        )
+        .await,
+        false
+    );
+    let provider_page = client
+        .get(format!("{base}/providers"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(provider_page.contains("上游不可用"));
+    assert!(provider_page.contains("已启用"));
+    let recovered = procedure(
+        &client,
+        &base,
+        "reprobe-chat-model",
+        json!([csrf, model.id.to_string(), "openai_chat"]),
+    )
+    .await;
+    assert!(recovered.get("ok").is_some(), "{recovered}");
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "default-chat-protocol",
+            json!([csrf, model.id.to_string(), "openai_chat"])
+        )
+        .await,
+        "openai_chat"
+    );
+    let denied = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/reprobe-chat-model"
+        ))
+        .json(&json!([
+            "invalid-csrf",
+            model.id.to_string(),
+            "openai_chat"
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    let provider = fixture.database.store.get(model.provider_id).await.unwrap();
+    fixture
+        .database
+        .store
+        .set_enabled(provider.id, provider.version, false)
+        .await
+        .unwrap();
+    let page = client
+        .get(format!("{base}/chat"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("Provider 已停用"));
+    assert_eq!(attribute(&page, "data-chat-session"), session);
+    assert_eq!(
+        procedure(
+            &client,
+            &base,
+            "begin-chat",
+            json!([csrf, session, "disabled provider"])
+        )
+        .await,
+        false
+    );
+}
