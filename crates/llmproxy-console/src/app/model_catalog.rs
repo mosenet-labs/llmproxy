@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
+#[topcoat::runtime::record]
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct ModelCandidate {
+pub struct ModelCandidate {
     pub id: String,
     pub input_price_per_million: Option<String>,
     pub output_price_per_million: Option<String>,

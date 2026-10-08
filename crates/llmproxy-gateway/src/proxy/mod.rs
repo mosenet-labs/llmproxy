@@ -38,6 +38,7 @@ pub struct Gateway {
     telemetry: GatewayTelemetry,
     console: llmproxy_console::Console,
     tool_states: Arc<crate::tool_state::Cache>,
+    subscriptions: crate::subscriptions::Hub,
 }
 
 pub struct RequestContext {
@@ -61,6 +62,10 @@ impl Gateway {
         store: llmproxy_store::ProviderStore,
     ) -> Self {
         Self {
+            subscriptions: crate::subscriptions::Hub::new(
+                store.clone(),
+                console.subscription_presence(),
+            ),
             history_store: store.clone(),
             providers,
             telemetry: GatewayTelemetry::new(),
@@ -172,6 +177,10 @@ impl ProxyHttp for Gateway {
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         if buffered::resume(session, ctx)? {
             return Ok(false);
+        }
+        if crate::subscriptions::matches(session.req_header().uri.path()) {
+            self.subscriptions.serve(session).await?;
+            return Ok(true);
         }
         // WEB控制台
         if crate::console::matches(session.req_header().uri.path()) {

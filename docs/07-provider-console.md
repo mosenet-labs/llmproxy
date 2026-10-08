@@ -94,11 +94,11 @@ API Key 由 UI 输入，使用带认证的加密保存到数据库。主密钥�
 
 ## 启动
 
-组件库当前使用本地路径依赖 `../topcoat-ant-design`，依赖其中的中文标签及 `native_dialog`、`anchored_menu` 组件。本机已经存在该目录；其他环境需要准备包含这些改动的组件库 checkout，已发布的同版本 crates.io 包尚不包含这些 API。组件库地址见 [topcoat-ant-design](https://github.com/mosenet-labs/topcoat-ant-design)。
+组件库使用 crates.io 发布包 [topcoat-ant-design](https://crates.io/crates/topcoat-ant-design) 0.3.0，支持 Topcoat 0.10.0；Cargo.toml 声明版本，Cargo.lock 锁定具体版本和校验和，Cargo 自动下载，无需本地 checkout。
 
 默认 SQLite 启动时：
 
-1. 准备相邻目录的 `topcoat-ant-design` 组件库。
+1. 首次构建需要联网下载 crates.io 依赖。
 2. 不设置 `LLMPROXY_DATABASE_URL` 和 `LLMPROXY_MASTER_KEY`，首次启动自动创建 `./data/llmproxy.sqlite3`、密钥文件和 schema。
 
 改用 PostgreSQL 时，在 PostgreSQL 创建开发库，复制 `.env.example` 为 `.env` 并填写数据库 URL 与固定的 `LLMPROXY_MASTER_KEY`；可选填写 `LLMPROXY_TEST_DATABASE_URL` 运行 PostgreSQL 回归。现有 `.env` 中的 PostgreSQL URL 会优先于默认 SQLite。

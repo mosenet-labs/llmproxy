@@ -96,6 +96,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0019_chat_archive.sql",
         include_str!("../../migrations/postgresql/0019_chat_archive.sql"),
     ),
+    MigrationFile::new(
+        202610070003,
+        "0020_subscription_nodes.sql",
+        include_str!("../../migrations/postgresql/0020_subscription_nodes.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -358,5 +363,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610070005,
         "0052_chat_archive_time_idx.sql",
         include_str!("../../migrations/sqlite/0052_chat_archive_time_idx.sql"),
+    ),
+    MigrationFile::new(
+        202610070006,
+        "0053_subscription_nodes.sql",
+        include_str!("../../migrations/sqlite/0053_subscription_nodes.sql"),
     ),
 ]);

@@ -29,6 +29,7 @@ mod models;
 mod pricing;
 mod providers;
 mod routes;
+mod subscription_nodes;
 mod tool_continuations;
 
 use migrations::{MIGRATIONS, SQLITE_MIGRATIONS};
@@ -93,7 +94,8 @@ impl ProviderStore {
                 HolidayDateRow,
                 ToolContinuationRow,
                 ChatConversationRow,
-                ChatTurnRow
+                ChatTurnRow,
+                crate::model::SubscriptionNode
             ))
             .max_pool_size(10)
             .pool_wait_timeout(Some(Duration::from_secs(10)))

@@ -4,6 +4,7 @@ mod history;
 mod observability;
 mod proxy;
 mod snapshot;
+mod subscriptions;
 mod tool_state;
 mod transform;
 

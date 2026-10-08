@@ -126,6 +126,17 @@ async fn exercise_http(database_url: &str) {
     assert!(html.contains("连接第一个模型服务"));
     assert!(html.contains("/ui/_topcoat/runtime/shards/provider-list"));
     assert_navigation(&html, "/ui/providers", "Providers");
+    assert!(html.contains("data-topcoat-usize-bits=\"64\""));
+    assert!(html.contains("src=\"/ui/assets/chat-resume.js\""));
+    let resume = client
+        .get(format!("{base}/assets/chat-resume.js"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(resume.contains("new MutationObserver(resume)"));
     assert!(!html.contains("id=\"routes\""));
     let routes = client.get(format!("{base}/routes")).send().await.unwrap();
     assert_eq!(routes.status(), StatusCode::OK);
@@ -873,6 +884,25 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert_eq!(hidden(&editor, "models_probe_status"), "success");
+    let candidates = client
+        .post(format!(
+            "{base}/_topcoat/runtime/procedures/load-model-candidates"
+        ))
+        .json(&serde_json::json!([provider.id.to_string()]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(candidates.status(), StatusCode::OK);
+    let candidates: serde_json::Value = candidates.json().await.unwrap();
+    assert!(
+        candidates["ok"]["v"].is_array(),
+        "candidates must be typed records"
+    );
+    assert_eq!(candidates["ok"]["v"][0]["v"]["id"], "mock-model");
+    assert_eq!(
+        received.recv_timeout(support::DEADLINE).unwrap().target,
+        "/custom/models"
+    );
     let draft = client
         .post(format!(
             "{base}/_topcoat/runtime/procedures/add-draft-model"
@@ -1601,6 +1631,16 @@ fn assert_navigation(html: &str, active_href: &str, title: &str) {
     );
     assert!(html.contains(&format!("<strong>{title}</strong>")));
     assert!(!html.contains("href=\"/#routes\""));
+    for id in [
+        "console-shell",
+        "console-sidebar",
+        "console-navigation",
+        "console-content",
+        "console-header",
+        "main",
+    ] {
+        assert_eq!(html.matches(&format!("id=\"{id}\"")).count(), 1);
+    }
     let nav = html
         .split_once("<nav")
         .unwrap()
@@ -1609,11 +1649,21 @@ fn assert_navigation(html: &str, active_href: &str, title: &str) {
         .next()
         .unwrap();
     assert_eq!(nav.matches("aria-current=\"page\"").count(), 1);
+    assert_eq!(nav.matches("data-topcoat-link=").count(), 6);
+    let chat_link = nav
+        .split("<a ")
+        .find(|anchor| anchor.contains("href=\"/ui/chat\""))
+        .unwrap();
+    assert!(chat_link.contains("data-topcoat-link=\"never\""));
     let active = nav
         .split("<a ")
         .find(|anchor| anchor.contains("aria-current=\"page\""))
         .unwrap();
     assert!(active.contains(&format!("href=\"{active_href}\"")));
+    assert!(active.contains(&format!(
+        "id=\"nav-{}\"",
+        active_href.trim_start_matches("/ui/")
+    )));
 }
 
 fn hidden(html: &str, name: &str) -> String {

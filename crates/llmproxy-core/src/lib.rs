@@ -6,3 +6,4 @@ pub mod routing;
 pub mod thinking;
 
 pub mod conversation;
+pub mod subscription;

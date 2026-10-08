@@ -1,0 +1,15 @@
+{
+  "revision": "1199b3976277424fbc5035b55ca11ce69c860a69",
+  "archive_sha256": "af0a9883e89c2fae2613b21955c40bbb39348d686e772e555cbe4df29786c301",
+  "original_files": {
+    "codex-rs/app-server/src/lib.rs": "b4c6b019d3ed6e5511abc997a725f466a0377c055ea09d2db8535f9275697c47",
+    "codex-rs/app-server/src/message_processor.rs": "5e17343f7c7129dc09a77300771dcd93119192c5cb39a3f4d1e29a547fec34ed",
+    "codex-rs/app-server/src/notification_media.rs": "fd6bae7c4c5d7f8589eb35bfa4aa668be67bed6211a18efc74c6089ad6481d9b",
+    "codex-rs/app-server-protocol/src/protocol/common.rs": "e25ebb90bf79be79def79ebf2dd704057577fa9806710fbea0ee240a909d0dc1",
+    "codex-rs/app-server-protocol/src/protocol/v2/thread.rs": "58ed840eb80aed53019a54cf1acb73d6c6c5af37305bfc9fe1b778e0b5e4c3fa",
+    "codex-rs/app-server/src/llmproxy_proxy.rs": null,
+    "codex-rs/tui/src/app/app_server_event_targets.rs": "c6b87662e02de7d24bde815db157edb4ad522592c551040f2cdf35b6e473439a",
+    "codex-rs/tui/src/chatwidget/protocol.rs": "46809d852877902c958f47d7f266ece94d59b0f863e3e9dd2673954ca0673a6e",
+    "codex-rs/app-server-protocol/src/precomputed_exports.rs": "661397f6329f7fac05e9d7ccfc7bceead266389d0975da7d1ef57544ee5aaa0c"
+  }
+}

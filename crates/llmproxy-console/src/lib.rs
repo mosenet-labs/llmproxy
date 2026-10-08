@@ -10,17 +10,21 @@ use llmproxy_store::ProviderStore;
 use topcoat::{
     asset::RouterBuilderAssetExt,
     router::{BodyLimit, Router},
-    runtime::RouterBuilderRuntimeExt,
+    runtime::{PrefetchMode, RouterBuilderRuntimeExt},
 };
 use topcoat_ant_design::RouterBuilderUiExt;
 
 pub use topcoat::router::{Body, request::Request, response::Response};
 
 pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
+pub type SubscriptionPresence = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<String, llmproxy_core::subscription::Presence>>,
+>;
 
 pub struct Console {
     history_auth: String,
     router: Router,
+    subscriptions: SubscriptionPresence,
 }
 
 impl Console {
@@ -44,7 +48,9 @@ impl Console {
         getrandom::fill(&mut random).map_err(|_| io::Error::other("无法生成安全随机令牌"))?;
         let csrf = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let history_auth = app::chat_service::new_id()?;
+        let subscriptions = SubscriptionPresence::default();
         let state = app::AppState {
+            subscriptions: subscriptions.clone(),
             history_auth: history_auth.clone(),
             store,
             prober: llmproxy_probe::ModelProber::new()?,
@@ -116,11 +122,17 @@ impl Console {
             .route(app::ui::providers::provider_action)
             .route(app::ui::providers::preview_models)
             .route(app::ui::providers::provider_list)
+            .page(app::ui::subscriptions::import_models)
+            .route(app::ui::subscriptions::set_enabled)
+            .route(app::ui::subscriptions::rename)
+            .route(app::ui::subscriptions::save_import)
             .route(assets::component_css)
             .route(assets::console_css)
             .route(assets::runtime_js)
             .route(assets::chat_resume_js)
             .runtime()
+            .prefetch(PrefetchMode::Intent)
+            .max_runs_per_connection(64)
             .topcoat_ant_design()
             .assets(assets::config().map_err(|_| io::Error::other("无法加载控制台静态资源"))?);
 
@@ -135,7 +147,12 @@ impl Console {
         Ok(Self {
             history_auth,
             router: builder.build(),
+            subscriptions,
         })
+    }
+
+    pub fn subscription_presence(&self) -> SubscriptionPresence {
+        self.subscriptions.clone()
     }
 
     /// 内部历史请求须通过服务端令牌认证，不使用浏览器 CSRF 令牌。

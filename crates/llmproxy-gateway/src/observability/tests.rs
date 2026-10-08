@@ -182,3 +182,85 @@ fn reused_digest_does_not_double_count_handshakes_and_release_clears_identity() 
         assert_eq!(points[0].count(), 1);
     }
 }
+
+#[test]
+fn subscription_background_success_is_debug_but_errors_and_inference_are_info() {
+    let mut request = RequestTelemetry::new();
+    for path in [
+        "/agents/v1/node/test-node/poll",
+        "/agents/v1/node/test-node/heartbeat",
+    ] {
+        request.begin("GET", path);
+        assert_ne!(request.route, "unmatched");
+        for status in [200, 204] {
+            assert_eq!(
+                request.completion_level(Some(status), false),
+                tracing::Level::DEBUG
+            );
+        }
+        for status in [401, 404, 429, 500, 503] {
+            assert_eq!(
+                request.completion_level(Some(status), false),
+                tracing::Level::INFO
+            );
+        }
+        assert_eq!(
+            request.completion_level(Some(200), true),
+            tracing::Level::INFO
+        );
+        assert_eq!(request.completion_level(None, false), tracing::Level::INFO);
+    }
+    for path in [
+        "/v1/responses",
+        "/agents/v1/register",
+        "/agents/v1/node/test-node/result/request",
+        "/internal/subscriptions/test-node/models",
+        "/internal/subscriptions/test-node/responses",
+    ] {
+        request.begin("POST", path);
+        assert_ne!(request.route, "unmatched");
+        assert_eq!(
+            request.completion_level(Some(200), false),
+            tracing::Level::INFO
+        );
+    }
+}
+
+#[test]
+fn subscription_completion_emits_debug_only_on_success() {
+    let _test = TELEMETRY_TEST.lock().unwrap();
+    let logs = InMemoryLogExporter::default();
+    let logger = SdkLoggerProvider::builder()
+        .with_simple_exporter(logs.clone())
+        .build();
+    let meters = SdkMeterProvider::builder().build();
+    let reporter = GatewayTelemetry::with_meter(meters.meter("test"));
+    let subscriber = tracing_subscriber::registry().with(OpenTelemetryTracingBridge::new(&logger));
+    tracing::subscriber::with_default(subscriber, || {
+        for (path, status) in [
+            ("/agents/v1/node/node/poll", 204),
+            ("/agents/v1/node/node/heartbeat", 200),
+            ("/agents/v1/node/node/poll", 401),
+            ("/v1/responses", 200),
+        ] {
+            let mut request = RequestTelemetry::new();
+            request.begin("GET", path);
+            reporter.finish(&mut request, Some(status), None);
+        }
+    });
+    let emitted = logs.get_emitted_logs().unwrap();
+    let severities: Vec<_> = emitted
+        .iter()
+        .map(|log| log.record.severity_number().unwrap())
+        .collect();
+    use opentelemetry::logs::Severity;
+    assert_eq!(
+        severities,
+        [
+            Severity::Debug,
+            Severity::Debug,
+            Severity::Info,
+            Severity::Info
+        ]
+    );
+}

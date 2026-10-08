@@ -40,20 +40,54 @@ pub async fn holidays(cx: &Cx) -> Result<impl View> {
     let busy = signal(cx, || false);
     let csrf = app_context::<AppState>(cx).csrf.clone();
     Ok(view! {
-        notification(message: &success, title: "导入成功", tone: NotificationTone::Success, language: UiLanguage::ChineseSimplified)
-        notification(message: &failure, title: "导入失败", tone: NotificationTone::Error, language: UiLanguage::ChineseSimplified)
+        notification(
+            message: &success,
+            title: "导入成功",
+            tone: NotificationTone::Success,
+            language: UiLanguage::ChineseSimplified
+        )
+        notification(
+            message: &failure,
+            title: "导入失败",
+            tone: NotificationTone::Error,
+            language: UiLanguage::ChineseSimplified
+        )
         <section class="mb-6 flex flex-wrap items-center justify-between gap-4">
-            <div><h1 class="m-0 text-[28px] font-semibold leading-[1.35] text-heading">"节假日"</h1><p class="mt-2 mb-0 text-sm text-secondary">"按国务院办公厅通知展示完整放假区间与调休上班日。"</p></div>
-            <button class="inline-flex h-9 items-center rounded-md border border-primary bg-primary px-4 text-sm font-medium text-white shadow-sm hover:bg-primary-hover disabled:opacity-50" type="button" :disabled=$(busy.get()) @click=$(async |_event: Event| {
-                busy.set(true);
-                let result = import_holidays(csrf.clone()).await;
-                if result.is_ok() {
-                    success.set(result.unwrap()); failure.set("".to_owned()); revision.increment();
-                } else { failure.set(result.unwrap_err()); success.set("".to_owned()); }
-                busy.set(false);
-            })>"导入 2026 年官方安排"</button>
+            <div>
+                <h1 class="m-0 text-[28px] font-semibold leading-[1.35] text-heading">
+                    "节假日"
+                </h1>
+                <p class="mt-2 mb-0 text-sm text-secondary">
+                    "按国务院办公厅通知展示完整放假区间与调休上班日。"
+                </p>
+            </div>
+            <button
+                class="inline-flex h-9 items-center rounded-md border border-primary bg-primary px-4 text-sm font-medium text-white shadow-sm hover:bg-primary-hover disabled:opacity-50"
+                type="button"
+                :disabled=$(busy.get())
+                @click=$(async |_event: Event| {
+                    busy.set(true);
+                    let result = import_holidays(csrf.clone()).await;
+                    if result.is_ok() {
+                        success.set(result.unwrap());
+                        failure.set("".to_owned());
+                        revision.increment();
+                    } else {
+                        failure.set(result.unwrap_err());
+                        success.set("".to_owned());
+                    }
+                    busy.set(false);
+                })
+            >
+                "导入 2026 年官方安排"
+            </button>
         </section>
-        holiday_workspace(revision: $(revision.get()), focus: $(focus), mode: $(mode), refresh: $(revision))
+        holiday_workspace(
+            revision: $(revision.get()),
+            focus: $(focus),
+            mode: $(mode),
+            refresh: $(revision)
+        )
     })
 }
 
@@ -91,30 +125,93 @@ pub async fn holiday_workspace(
         .collect();
     let today = china_today().to_string();
     Ok(view! {
-        <section class="mb-4 flex flex-wrap items-center justify-between gap-3" aria-label="日历操作">
+        <section
+            class="mb-4 flex flex-wrap items-center justify-between gap-3"
+            aria-label="日历操作"
+        >
             <div class="flex items-center gap-2">
-                <button class="h-9 rounded-md border border-border bg-white px-3 text-sm text-heading hover:border-primary hover:text-primary" type="button" aria-label="上一时段" @click=$(async |_event: Event| {
-                    focus.set(shift_holiday_date(focus.get(), mode.get(), -1_i32).await);
-                    refresh.increment();
-                })>"‹"</button>
-                <button class="h-9 rounded-md border border-border bg-white px-3 text-sm text-heading hover:border-primary hover:text-primary" type="button" @click=$(|_event: Event| {
-                    focus.set(today.clone()); refresh.increment();
-                })>"今天"</button>
-                <button class="h-9 rounded-md border border-border bg-white px-3 text-sm text-heading hover:border-primary hover:text-primary" type="button" aria-label="下一时段" @click=$(async |_event: Event| {
-                    focus.set(shift_holiday_date(focus.get(), mode.get(), 1_i32).await);
-                    refresh.increment();
-                })>"›"</button>
+                <button
+                    class="h-9 rounded-md border border-border bg-white px-3 text-sm text-heading hover:border-primary hover:text-primary"
+                    type="button"
+                    aria-label="上一时段"
+                    @click=$(async |_event: Event| {
+                        focus.set(
+                            shift_holiday_date(focus.get(), mode.get(), -1_i32).await,
+                        );
+                        refresh.increment();
+                    })
+                >
+                    "‹"
+                </button>
+                <button
+                    class="h-9 rounded-md border border-border bg-white px-3 text-sm text-heading hover:border-primary hover:text-primary"
+                    type="button"
+                    @click=$(|_event: Event| {
+                        focus.set(today.clone());
+                        refresh.increment();
+                    })
+                >
+                    "今天"
+                </button>
+                <button
+                    class="h-9 rounded-md border border-border bg-white px-3 text-sm text-heading hover:border-primary hover:text-primary"
+                    type="button"
+                    aria-label="下一时段"
+                    @click=$(async |_event: Event| {
+                        focus.set(
+                            shift_holiday_date(focus.get(), mode.get(), 1_i32).await,
+                        );
+                        refresh.increment();
+                    })
+                >
+                    "›"
+                </button>
             </div>
-            <div class="inline-flex rounded-md border border-border bg-white p-1" role="group" aria-label="日历视图">
+            <div
+                class="inline-flex rounded-md border border-border bg-white p-1"
+                role="group"
+                aria-label="日历视图"
+            >
                 for (value, label) in [("day", "日"), ("week", "周"), ("month", "月")] {
-                    <button class=(if selected_mode(&mode.get_untracked()) == selected_mode(value) { "rounded border-0! bg-primary-soft px-4 py-1.5 text-sm font-medium text-primary shadow-none!" } else { "rounded border-0! bg-transparent px-4 py-1.5 text-sm text-secondary shadow-none! hover:text-heading" }) type="button" aria-pressed=(mode.get_untracked() == value) @click=$(|_event: Event| {
-                        mode.set(value.to_owned()); refresh.increment();
-                    })>(label)</button>
+                    <button
+                        class=(if selected_mode(&mode.get_untracked())
+                            == selected_mode(value) {
+                            "rounded border-0! bg-primary-soft px-4 py-1.5 text-sm font-medium text-primary shadow-none!"
+                        } else {
+                            "rounded border-0! bg-transparent px-4 py-1.5 text-sm text-secondary shadow-none! hover:text-heading"
+                        })
+                        type="button"
+                        aria-pressed=(mode.get_untracked() == value)
+                        @click=$(|_event: Event| {
+                            mode.set(value.to_owned());
+                            refresh.increment();
+                        })
+                    >
+                        (label)
+                    </button>
                 }
             </div>
         </section>
-        calendar(date: date, today: china_today(), events: &entries, mode: view_mode, language: UiLanguage::ChineseSimplified)
-        <div class="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-secondary"><span>"红色：放假区间　黄色：调休上班"</span><a class="text-primary hover:underline" href=(holiday_notice::SOURCE_2026) target="_blank" rel="noopener noreferrer">"查看国务院办公厅 2026 年通知 ↗"</a></div>
+        calendar(
+            date: date,
+            today: china_today(),
+            events: &entries,
+            mode: view_mode,
+            language: UiLanguage::ChineseSimplified
+        )
+        <div
+            class="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-secondary"
+        >
+            <span>"红色：放假区间　黄色：调休上班"</span>
+            <a
+                class="text-primary hover:underline"
+                href=(holiday_notice::SOURCE_2026)
+                target="_blank"
+                rel="noopener noreferrer"
+            >
+                "查看国务院办公厅 2026 年通知 ↗"
+            </a>
+        </div>
     })
 }
 

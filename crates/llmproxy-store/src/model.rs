@@ -3,6 +3,23 @@ use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use crate::{ProbeStatus, ProviderPaths, ProviderView, StoreError, StoreResult};
 
 #[derive(toasty::Model)]
+#[table = "subscription_nodes"]
+pub(crate) struct SubscriptionNode {
+    #[key]
+    pub node_id: String,
+    pub name: String,
+    pub backend: String,
+    pub models_json: String,
+    pub concurrency: u64,
+    pub encrypted_node_key: String,
+    pub enabled: bool,
+    pub provider_id: Option<i64>,
+    #[version]
+    pub version: u64,
+    pub updated_at: i64,
+}
+
+#[derive(toasty::Model)]
 #[table = "providers"]
 pub(crate) struct Provider {
     #[key]

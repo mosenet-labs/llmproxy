@@ -16,6 +16,7 @@ pub fn route_builder() -> topcoat::router::RouterBuilder {
 }
 
 pub struct AppState {
+    pub subscriptions: crate::SubscriptionPresence,
     pub store: ProviderStore,
     pub prober: llmproxy_probe::ModelProber,
     pub csrf: String,

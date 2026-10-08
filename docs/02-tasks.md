@@ -1,5 +1,7 @@
 # 实施任务
 
+独立订阅代理的需求、设计和逐项实施进度见[文档 30](30-subscription-agent-requirements-and-design.md)及[任务清单 31](31-subscription-agent-tasks.md)。
+
 状态：`[x]` 已完成，`[ ]` 待实现。P0 基础架构、P1 三个明确入口的本地联调，以及 P2 Provider 控制台与数据库配置热更新已完成；其余任务保留验收标准。
 
 ## P0：基础架构

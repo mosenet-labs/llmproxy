@@ -41,8 +41,11 @@ struct BatchModelForm {
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/load-model-candidates")]
-pub async fn load_model_candidates(cx: &Cx, provider_id: String) -> Result<Outcome> {
-    let result: std::result::Result<String, String> = async {
+pub async fn load_model_candidates(
+    cx: &Cx,
+    provider_id: String,
+) -> Result<std::result::Result<Vec<ModelCandidate>, String>> {
+    let result: std::result::Result<Vec<ModelCandidate>, String> = async {
         let id = provider_id
             .parse::<i64>()
             .map_err(|_| "请选择 Provider".to_owned())?;
@@ -51,8 +54,7 @@ pub async fn load_model_candidates(cx: &Cx, provider_id: String) -> Result<Outco
             .probe_enabled_target(id)
             .await
             .map_err(|error| error.to_string())?;
-        let candidates = query_models(target).await?;
-        serde_json::to_string(&candidates).map_err(|_| "无法读取模型列表".to_owned())
+        query_models(target).await
     }
     .await;
     Ok(result)
@@ -332,13 +334,31 @@ pub(super) async fn model_delete(
     let version = model.version.to_string();
     let unavailable: Outcome = Err("删除请求失败，请刷新后重试".into());
     Ok(view! {
-        <button class=(class!(TEXT_LINK, "text-[#cf1322]!")) type="button" (trigger)>"删除"</button>
-        popconfirm(id: id.as_str(), title: title.as_str(), language: UiLanguage::ChineseSimplified,
-            <button class="gr-button gr-button-danger" type="button" @click=$(async |_event: Event| {
-                let result = raw!("await Promise.resolve(${delete_model}.call(${csrf}, ${model_id}, ${version})).catch(() => ${unavailable})", unavailable.clone());
-                if result.is_ok() { success.set(result.unwrap()); refresh.increment(); }
-                else { failure.set(result.unwrap_err()); }
-            })>"确认删除"</button>
+        <button class=(class!(TEXT_LINK, "text-[#cf1322]!")) type="button" (trigger)>
+            "删除"
+        </button>
+        popconfirm(
+            id: id.as_str(),
+            title: title.as_str(),
+            language: UiLanguage::ChineseSimplified,
+            <button
+                class="gr-button gr-button-danger"
+                type="button"
+                @click=$(async |_event: Event| {
+                    let result = raw!(
+                        "await Promise.resolve(${delete_model}.call(${csrf}, ${model_id}, ${version})).catch(() => ${unavailable})",
+                        unavailable.clone(),
+                    );
+                    if result.is_ok() {
+                        success.set(result.unwrap());
+                        refresh.increment();
+                    } else {
+                        failure.set(result.unwrap_err());
+                    }
+                })
+            >
+                "确认删除"
+            </button>
         )
     })
 }

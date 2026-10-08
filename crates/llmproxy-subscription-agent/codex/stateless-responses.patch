@@ -1,0 +1,809 @@
+diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
+--- a/codex-rs/app-server/src/lib.rs
++++ b/codex-rs/app-server/src/lib.rs
+@@ -121,6 +121,7 @@
+ mod gateway_oauth_notifications;
+ mod image_url;
+ pub mod in_process;
++mod llmproxy_proxy;
+ mod log_write_warning;
+ #[cfg(unix)]
+ mod managed_daemon;
+@@ -510,10 +511,14 @@
+         && runtime_options.managed_daemon;
+     #[cfg(unix)]
+     let nofile_limit_result = managed_daemon.then(managed_daemon::raise_nofile_limit);
+-    let loader_overrides = loader_overrides_with_test_user_config_file(
++    let mut loader_overrides = loader_overrides_with_test_user_config_file(
+         loader_overrides,
+         test_user_config_file_from_env(),
+     )?;
++    if llmproxy_proxy_mode() {
++        loader_overrides.ignore_user_config = true;
++        loader_overrides.ignore_project_config = true;
++    }
+     let (transport_event_tx, mut transport_event_rx) =
+         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
+     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(CHANNEL_CAPACITY);
+@@ -522,12 +527,18 @@
+ 
+     // Parse CLI overrides once and derive the base Config eagerly so later
+     // components do not need to work with raw TOML values.
+-    let cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
++    let mut cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
+         std::io::Error::new(
+             ErrorKind::InvalidInput,
+             format!("error parsing -c overrides: {e}"),
+         )
+     })?;
++    if llmproxy_proxy_mode() {
++        cli_kv_overrides.push((
++            "cli_auth_credentials_store".into(),
++            toml::Value::String("auto".into()),
++        ));
++    }
+     let codex_home = find_codex_home()?;
+     let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
+         arg0_paths.codex_self_exe.clone(),
+@@ -636,18 +647,22 @@
+     .map(Arc::new)
+     .map_err(std::io::Error::other)?;
+ 
+-    let otel = codex_core::otel_init::build_provider(
+-        &config,
+-        env!("CARGO_PKG_VERSION"),
+-        Some(OTEL_SERVICE_NAME),
+-        default_analytics_enabled,
+-    )
+-    .map_err(|e| {
+-        std::io::Error::new(
+-            ErrorKind::InvalidData,
+-            format!("error loading otel config: {e}"),
++    let otel = if llmproxy_proxy_mode() {
++        None
++    } else {
++        codex_core::otel_init::build_provider(
++            &config,
++            env!("CARGO_PKG_VERSION"),
++            Some(OTEL_SERVICE_NAME),
++            default_analytics_enabled,
+         )
+-    })?;
++        .map_err(|e| {
++            std::io::Error::new(
++                ErrorKind::InvalidData,
++                format!("error loading otel config: {e}"),
++            )
++        })?
++    };
+     codex_core::otel_init::record_process_start(otel.as_ref(), OTEL_SERVICE_NAME);
+     codex_core::otel_init::install_sqlite_telemetry(otel.as_ref(), OTEL_SERVICE_NAME);
+     let unix_socket_startup_lock = match &transport {
+@@ -658,13 +673,20 @@
+         }
+         _ => None,
+     };
+-    let state_db_init = match init_sqlite_state_db_with_fresh_start_on_corruption(&config).await {
+-        Ok(state_db_init) => state_db_init,
+-        Err(err) => {
+-            return Err(std::io::Error::other(format!(
+-                "failed to initialize sqlite state runtime under {}: {err}",
+-                config.sqlite_config().home().display()
+-            )));
++    let state_db_init = if llmproxy_proxy_mode() {
++        StateDbInitResult {
++            state_db: None,
++            recovery_notice: None,
++        }
++    } else {
++        match init_sqlite_state_db_with_fresh_start_on_corruption(&config).await {
++            Ok(state_db_init) => state_db_init,
++            Err(err) => {
++                return Err(std::io::Error::other(format!(
++                    "failed to initialize sqlite state runtime under {}: {err}",
++                    config.sqlite_config().home().display()
++                )));
++            }
+         }
+     };
+     let state_db = state_db_init.state_db;
+@@ -704,8 +726,11 @@
+         });
+     }
+ 
+-    let analytics_events_client =
+-        analytics_events_client_from_config(Arc::clone(&auth_manager), &config);
++    let analytics_events_client = if llmproxy_proxy_mode() {
++        codex_analytics::AnalyticsEventsClient::disabled()
++    } else {
++        analytics_events_client_from_config(Arc::clone(&auth_manager), &config)
++    };
+     let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
+         outgoing_tx,
+         analytics_events_client.clone(),
+@@ -737,17 +762,21 @@
+         &outgoing_message_sender,
+         &config,
+     );
+-    let feedback_layer = feedback.logger_layer();
+-    let feedback_metadata_layer = feedback.metadata_layer();
+-    let log_db = state_db
+-        .clone()
+-        .map(|state_db| log_db::start(state_db, log_write_warning.clone()));
++    let feedback_layer = (!llmproxy_proxy_mode()).then(|| feedback.logger_layer());
++    let feedback_metadata_layer = (!llmproxy_proxy_mode()).then(|| feedback.metadata_layer());
++    let log_db = if llmproxy_proxy_mode() {
++        None
++    } else {
++        state_db
++            .clone()
++            .map(|state_db| log_db::start(state_db, log_write_warning.clone()))
++    };
+     let log_db_layer = log_db
+         .clone()
+         .map(|layer| layer.with_filter(log_db::default_filter()));
+     let (otel_layers, otel_logger_reload_handle) = otel_reloader::layers(otel.as_ref());
+     let _ = tracing_subscriber::registry()
+-        .with(stderr_fmt)
++        .with((!llmproxy_proxy_mode()).then_some(stderr_fmt))
+         .with(feedback_layer)
+         .with(feedback_metadata_layer)
+         .with(log_db_layer)
+@@ -909,14 +938,16 @@
+         codex_home_metrics::spawn(&config, metrics.clone(), transport_shutdown_token.clone());
+     }
+ 
+-    let otel_reloader_handle = otel_reloader::spawn(
+-        otel,
+-        otel_logger_reload_handle,
+-        config_manager.clone(),
+-        Arc::clone(&auth_manager),
+-        default_analytics_enabled,
+-        transport_shutdown_token.clone(),
+-    );
++    let otel_reloader_handle = (!llmproxy_proxy_mode()).then(|| {
++        otel_reloader::spawn(
++            otel,
++            otel_logger_reload_handle,
++            config_manager.clone(),
++            Arc::clone(&auth_manager),
++            default_analytics_enabled,
++            transport_shutdown_token.clone(),
++        )
++    });
+ 
+     let outbound_handle = tokio::spawn(async move {
+         let mut outbound_connections = HashMap::<ConnectionId, OutboundConnectionState>::new();
+@@ -998,10 +1029,11 @@
+             code_mode_session_provider,
+             rpc_transport: analytics_rpc_transport(&transport),
+             remote_control_handle: Some(remote_control_handle.clone()),
+-            plugin_startup_tasks: matches!(
+-                runtime_options.plugin_startup_tasks,
+-                PluginStartupTasks::Start
+-            )
++            plugin_startup_tasks: (!llmproxy_proxy_mode()
++                && matches!(
++                    runtime_options.plugin_startup_tasks,
++                    PluginStartupTasks::Start
++                ))
+             .then_some(plugin_startup_config),
+         }));
+         let mut thread_created_rx = processor.thread_created_receiver();
+@@ -1363,7 +1395,9 @@
+     let _ = outbound_handle.await;
+ 
+     transport_shutdown_token.cancel();
+-    let _ = otel_reloader_handle.await;
++    if let Some(handle) = otel_reloader_handle {
++        let _ = handle.await;
++    }
+     for handle in transport_accept_handles {
+         let _ = handle.await;
+     }
+@@ -1627,3 +1661,9 @@
+         );
+     }
+ }
++
++/// Frozen process-wide bootstrap mode; ordinary Codex behaviour is unchanged.
++pub(crate) fn llmproxy_proxy_mode() -> bool {
++    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *MODE.get_or_init(|| std::env::var("LLMPROXY_CODEX_PROXY_V1").ok().as_deref() == Some("1"))
++}
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -140,10 +140,11 @@
+ }
+ 
+ pub(crate) struct MessageProcessor {
++    llmproxy_proxy: Arc<crate::llmproxy_proxy::Proxy>,
+     pub(crate) turn_admission: TurnAdmission,
+     user_verification: Arc<crate::user_verification::Service>,
+     outgoing: Arc<OutgoingMessageSender>,
+-    models_refresh_worker: ModelsRefreshWorker,
++    models_refresh_worker: Option<ModelsRefreshWorker>,
+     turn_cost_worker: Option<TurnCostWorker>,
+     skills_watcher: Arc<SkillsWatcher>,
+     account_processor: Arc<AccountRequestProcessor>,
+@@ -382,9 +383,13 @@
+             Arc::clone(&config),
+             thread_manager.get_models_manager(),
+         ));
+-        let models_refresh_worker = crate::models_refresh_worker::spawn(&model_catalog);
+-        let turn_cost_worker =
+-            TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager));
++        let models_refresh_worker = (!crate::llmproxy_proxy_mode())
++            .then(|| crate::models_refresh_worker::spawn(&model_catalog));
++        let turn_cost_worker = if crate::llmproxy_proxy_mode() {
++            None
++        } else {
++            TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager))
++        };
+         thread_manager
+             .plugins_manager()
+             .set_analytics_events_client(analytics_events_client.clone());
+@@ -527,6 +532,11 @@
+             Arc::clone(&skills_watcher),
+             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
+             config_warnings,
++        );
++        let llmproxy_proxy = crate::llmproxy_proxy::Proxy::new(
++            config.clone(),
++            auth_manager.clone(),
++            outgoing.clone(),
+         );
+         let turn_processor = TurnRequestProcessor::new(
+             auth_manager,
+@@ -586,6 +596,7 @@
+         );
+ 
+         Self {
++            llmproxy_proxy,
+             turn_admission,
+             user_verification,
+             outgoing,
+@@ -622,7 +633,9 @@
+     pub(crate) fn clear_runtime_references(&self) {
+         self.account_processor.clear_external_auth();
+         self.apps_processor.shutdown();
+-        self.models_refresh_worker.shutdown();
++        if let Some(worker) = &self.models_refresh_worker {
++            worker.shutdown();
++        }
+         self.skills_watcher.shutdown();
+     }
+ 
+@@ -846,7 +859,9 @@
+     }
+ 
+     pub(crate) async fn drain_background_tasks(&self) {
+-        self.models_refresh_worker.shutdown();
++        if let Some(worker) = &self.models_refresh_worker {
++            worker.shutdown();
++        }
+         if let Some(worker) = &self.turn_cost_worker {
+             worker.shutdown();
+         }
+@@ -870,6 +885,7 @@
+         connection_id: ConnectionId,
+         session_state: &ConnectionSessionState,
+     ) {
++        self.llmproxy_proxy.connection_closed(connection_id);
+         session_state.rpc_gate.close().await;
+         self.account_processor
+             .gateway_connection_closed(connection_id);
+@@ -1085,7 +1101,35 @@
+             connection_id,
+             request_id: codex_request.id().clone(),
+         };
++        if crate::llmproxy_proxy_mode()
++            && !matches!(
++                &codex_request,
++                ClientRequest::LlmproxyCapabilities { .. }
++                    | ClientRequest::LlmproxyResponses { .. }
++                    | ClientRequest::LlmproxyCancel { .. }
++            )
++        {
++            return Err(crate::llmproxy_proxy::failure());
++        }
+         let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
++            ClientRequest::LlmproxyCapabilities { .. } => self
++                .llmproxy_proxy
++                .capabilities()
++                .await
++                .map(|v| Some(v.into())),
++            ClientRequest::LlmproxyResponses { params, .. } => self
++                .llmproxy_proxy
++                .start(request_id.clone(), params.request)
++                .map(|_| None),
++            ClientRequest::LlmproxyCancel { params, .. } => {
++                self.llmproxy_proxy.cancel(&ConnectionRequestId {
++                    connection_id,
++                    request_id: params.request_id,
++                });
++                Ok(Some(
++                    codex_app_server_protocol::LlmproxyCancelResponse {}.into(),
++                ))
++            }
+             ClientRequest::Initialize { .. } => {
+                 panic!("Initialize should be handled before initialized request dispatch");
+             }
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -136,6 +136,7 @@
+         | ServerNotification::WindowsWorldWritableWarning(_)
+         | ServerNotification::WindowsSandboxSetupCompleted(_)
+         | ServerNotification::AccountLoginCompleted(_)
++        | ServerNotification::LlmproxyChunk(_)
+         | ServerNotification::GatewayOAuthChanged(_) => notification,
+     }
+ }
+diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
+--- a/codex-rs/app-server-protocol/src/protocol/common.rs
++++ b/codex-rs/app-server-protocol/src/protocol/common.rs
+@@ -546,6 +546,13 @@
+         response: v2::UserVerificationCancelResponse,
+     },
+ 
++    #[experimental("llmproxy/capabilities")]
++    LlmproxyCapabilities => "llmproxy/capabilities" { params: v2::LlmproxyCancelResponse, serialization: None, response: v2::LlmproxyCapabilitiesResponse, },
++    #[experimental("llmproxy/responses")]
++    LlmproxyResponses => "llmproxy/responses" { params: v2::LlmproxyResponsesParams, serialization: None, response: v2::LlmproxyResponsesHead, },
++    #[experimental("llmproxy/cancel")]
++    LlmproxyCancel => "llmproxy/cancel" { params: v2::LlmproxyCancelParams, serialization: None, response: v2::LlmproxyCancelResponse, },
++
+     /// NEW APIs
+     // Thread lifecycle
+     // Uses `inspect_params` because only some fields are experimental.
+@@ -1933,6 +1940,8 @@
+ }
+ 
+ server_notification_definitions! {
++    #[experimental("llmproxy/chunk")]
++    LlmproxyChunk => "llmproxy/chunk" (v2::LlmproxyChunkNotification),
+     /// NEW NOTIFICATIONS
+     Error => "error" (v2::ErrorNotification),
+     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+--- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+@@ -2077,3 +2077,43 @@
+     pub thread_id: String,
+     pub turn_id: String,
+ }
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++pub struct LlmproxyResponsesParams {
++    pub request: serde_json::Value,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++pub struct LlmproxyCapabilitiesResponse {
++    pub policy_version: u32,
++    pub stateless: bool,
++    pub client_tools_only: bool,
++    pub native_auth_ready: bool,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++pub struct LlmproxyResponsesHead {
++    pub status: u16,
++    pub content_type: Option<String>,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++pub struct LlmproxyCancelParams {
++    pub request_id: crate::RequestId,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++pub struct LlmproxyCancelResponse {}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++pub struct LlmproxyChunkNotification {
++    pub request_id: crate::RequestId,
++    pub data: String,
++    pub end: bool,
++    pub error: bool,
++}
+diff --git a/codex-rs/app-server/src/llmproxy_proxy.rs b/codex-rs/app-server/src/llmproxy_proxy.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/app-server/src/llmproxy_proxy.rs
+@@ -0,0 +1,348 @@
++//! Stateless native-auth Responses transport. This module never creates a thread or runs a tool.
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex};
++use std::time::Duration;
++
++use base64::Engine;
++use base64::engine::general_purpose::STANDARD;
++use codex_app_server_protocol::{
++    JSONRPCErrorError, LlmproxyCapabilitiesResponse, LlmproxyChunkNotification,
++    LlmproxyResponsesHead, ServerNotification,
++};
++use codex_core::config::Config;
++use codex_http_client::{ClientRouteClass, HttpClientBuilder, HttpResponse};
++use codex_login::AuthManager;
++use codex_model_provider::{SharedModelProvider, WorkspaceRoutingContext, create_model_provider};
++use codex_model_provider_info::ModelProviderInfo;
++use serde_json::Value;
++use tokio_util::sync::CancellationToken;
++
++use crate::outgoing_message::{ConnectionRequestId, OutgoingMessageSender};
++
++pub(crate) fn failure() -> JSONRPCErrorError {
++    JSONRPCErrorError {
++        code: -32000,
++        message: "stateless Codex Responses request failed".into(),
++        data: None,
++    }
++}
++
++pub(crate) struct Proxy {
++    config: Arc<Config>,
++    provider: SharedModelProvider,
++    auth: Arc<AuthManager>,
++    routing: WorkspaceRoutingContext,
++    outgoing: Arc<OutgoingMessageSender>,
++    active: Mutex<HashMap<ConnectionRequestId, CancellationToken>>,
++}
++
++impl Proxy {
++    pub(crate) fn new(
++        config: Arc<Config>,
++        auth: Arc<AuthManager>,
++        outgoing: Arc<OutgoingMessageSender>,
++    ) -> Arc<Self> {
++        Arc::new(Self {
++            provider: create_model_provider(
++                ModelProviderInfo::create_openai_provider(Some(format!(
++                    "{}/codex",
++                    config.chatgpt_base_url.trim_end_matches('/')
++                ))),
++                Some(auth.clone()),
++            ),
++            auth,
++            routing: WorkspaceRoutingContext::new(config.chatgpt_base_url.clone()),
++            config,
++            outgoing,
++            active: Mutex::new(HashMap::new()),
++        })
++    }
++
++    pub(crate) async fn capabilities(
++        &self,
++    ) -> Result<LlmproxyCapabilitiesResponse, JSONRPCErrorError> {
++        if !crate::llmproxy_proxy_mode() {
++            return Err(failure());
++        }
++        let native_auth_ready =
++            self.provider.auth().await.is_some_and(|auth| {
++                auth.is_chatgpt_auth() && !auth.is_personal_access_token_auth()
++            });
++        Ok(LlmproxyCapabilitiesResponse {
++            policy_version: 1,
++            stateless: true,
++            client_tools_only: true,
++            native_auth_ready,
++        })
++    }
++
++    pub(crate) fn connection_closed(&self, connection_id: crate::outgoing_message::ConnectionId) {
++        for (id, token) in self.active.lock().unwrap().iter() {
++            if id.connection_id == connection_id {
++                token.cancel();
++            }
++        }
++    }
++
++    pub(crate) fn cancel(&self, id: &ConnectionRequestId) {
++        if let Some(token) = self.active.lock().unwrap().get(id) {
++            token.cancel();
++        }
++    }
++
++    pub(crate) fn start(
++        self: &Arc<Self>,
++        id: ConnectionRequestId,
++        request: Value,
++    ) -> Result<(), JSONRPCErrorError> {
++        if !crate::llmproxy_proxy_mode() || !valid_request(&request) {
++            return Err(failure());
++        }
++        let token = CancellationToken::new();
++        {
++            let mut active = self.active.lock().unwrap();
++            if active.len() >= 64 || active.contains_key(&id) {
++                return Err(failure());
++            }
++            active.insert(id.clone(), token.clone());
++        }
++        let proxy = self.clone();
++        tokio::spawn(async move {
++            let _guard = ActiveRequest {
++                proxy: proxy.clone(),
++                id: id.clone(),
++            };
++            let mut head_sent = false;
++            let operation = async {
++                let mut recovery = proxy.auth.unauthorized_recovery();
++                let mut response = proxy.fetch(&request).await?;
++                // 仅对明确拒绝认证的 401 使用原生恢复，不重放断开的模型请求。
++                while response.status().as_u16() == 401 && recovery.has_next() {
++                    recovery.next().await.map_err(|_| "refresh")?;
++                    response = proxy.fetch(&request).await?;
++                }
++                drop(request);
++                let head = LlmproxyResponsesHead {
++                    status: response.status().as_u16(),
++                    content_type: response
++                        .headers()
++                        .get("content-type")
++                        .and_then(|v| v.to_str().ok())
++                        .map(str::to_owned),
++                };
++                proxy.outgoing.send_response(id.clone(), head).await;
++                head_sent = true;
++                while let Some(bytes) = response.chunk().await.map_err(|_| "stream")? {
++                    for part in bytes.chunks(32 * 1024) {
++                        proxy.chunk(&id, STANDARD.encode(part), false, false).await;
++                    }
++                }
++                proxy.chunk(&id, String::new(), true, false).await;
++                Ok::<_, &'static str>(())
++            };
++            let result = tokio::select! {
++                _ = token.cancelled() => Err("cancelled"),
++                result = tokio::time::timeout(Duration::from_secs(300), operation) => result.unwrap_or(Err("timeout")),
++            };
++            if let Err(stage) = result {
++                let report = async {
++                    if head_sent {
++                        proxy.chunk(&id, String::new(), true, true).await;
++                    } else {
++                        let mut error = failure();
++                        error.data = Some(serde_json::json!({"stage":stage}));
++                        proxy.outgoing.send_error(id, error).await;
++                    }
++                };
++                let _ = tokio::time::timeout(Duration::from_secs(2), report).await;
++            }
++        });
++        Ok(())
++    }
++
++    async fn fetch(&self, request: &Value) -> Result<HttpResponse, &'static str> {
++        if !self
++            .provider
++            .auth()
++            .await
++            .is_some_and(|auth| auth.is_chatgpt_auth() && !auth.is_personal_access_token_auth())
++        {
++            return Err("native_auth");
++        }
++        let resolved = self
++            .provider
++            .responses_api_provider(&self.routing)
++            .await
++            .map_err(|_| "routing")?;
++        let url = resolved.provider.url_for_path("responses");
++        let mut headers = codex_login::default_client::default_headers();
++        headers.extend(resolved.provider.headers);
++        self.provider
++            .api_auth()
++            .await
++            .map_err(|_| "authentication")?
++            .add_auth_headers(&mut headers);
++        let client = HttpClientBuilder::new()
++            .without_redirects()
++            .without_request_logging()
++            .with_chatgpt_cookies(&self.config.http_client_factory())
++            .build_respecting_outbound_proxy_policy(
++                &self.config.http_client_factory(),
++                &url,
++                ClientRouteClass::Api,
++            )
++            .map_err(|_| "network_policy")?;
++        client
++            .post(&url)
++            .headers(headers)
++            .json(request)
++            .send()
++            .await
++            .map_err(|_| "http")
++    }
++
++    async fn chunk(&self, id: &ConnectionRequestId, data: String, end: bool, error: bool) {
++        self.outgoing
++            .send_server_notification_to_connections(
++                &[id.connection_id],
++                ServerNotification::LlmproxyChunk(LlmproxyChunkNotification {
++                    request_id: id.request_id.clone(),
++                    data,
++                    end,
++                    error,
++                }),
++            )
++            .await;
++    }
++}
++
++struct ActiveRequest {
++    proxy: Arc<Proxy>,
++    id: ConnectionRequestId,
++}
++impl Drop for ActiveRequest {
++    fn drop(&mut self) {
++        self.proxy.active.lock().unwrap().remove(&self.id);
++    }
++}
++
++fn client_tools(value: &Value) -> bool {
++    value.as_array().is_some_and(|tools| {
++        tools.iter().all(|tool| match tool["type"].as_str() {
++            Some("function" | "custom") => true,
++            Some("namespace") => client_tools(&tool["tools"]),
++            _ => false,
++        })
++    })
++}
++
++fn valid_request(request: &Value) -> bool {
++    request.is_object()
++        && request["store"] == false
++        && request["stream"] == true
++        && request["model"].as_str().is_some_and(|v| !v.is_empty())
++        && ["previous_response_id", "conversation"]
++            .iter()
++            .all(|name| request[*name].is_null())
++        && request
++            .get("background")
++            .is_none_or(|v| v.is_null() || v == false)
++        && request
++            .get("tools")
++            .is_none_or(|v| v.is_null() || client_tools(v))
++        && request
++            .get("additional_tools")
++            .is_none_or(|v| v.is_null() || client_tools(v))
++        && request["input"].as_array().is_some_and(|items| {
++            items.iter().all(|item| {
++                item.get("tools")
++                    .is_none_or(|v| v.is_null() || client_tools(v))
++            })
++        })
++        && serde_json::to_vec(request).is_ok_and(|bytes| bytes.len() <= 16 * 1024 * 1024)
++}
++
++#[cfg(test)]
++mod llmproxy_proxy_tests {
++    use super::*;
++    use serde_json::json;
++
++    #[tokio::test]
++    async fn native_transport_preserves_http_status_bytes_account_and_parallel_tool_ids() {
++        use codex_core::config::{ConfigBuilder, LoaderOverrides};
++        use codex_login::CodexAuth;
++        use wiremock::matchers::{header, method};
++        use wiremock::{Mock, MockServer, ResponseTemplate};
++        let server = MockServer::start().await;
++        let source = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"output\":[{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"call_1\",\"arguments\":\"{}\"},{\"type\":\"function_call\",\"name\":\"apply_patch\",\"call_id\":\"call_2\",\"arguments\":\"{}\"}]}}\n\n";
++        Mock::given(method("POST"))
++            .and(header("ChatGPT-Account-ID", "account_id"))
++            .respond_with(
++                ResponseTemplate::new(200)
++                    .insert_header("content-type", "text/event-stream")
++                    .set_body_string(source),
++            )
++            .expect(2)
++            .mount(&server)
++            .await;
++        let home = tempfile::tempdir().unwrap();
++        let mut config = ConfigBuilder::default()
++            .codex_home(home.path().to_path_buf())
++            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
++            .build()
++            .await
++            .unwrap();
++        config.chatgpt_base_url = server.uri();
++        let auth =
++            AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
++        let (tx, _rx) = tokio::sync::mpsc::channel(8);
++        let outgoing = Arc::new(OutgoingMessageSender::new(
++            tx,
++            codex_analytics::AnalyticsEventsClient::disabled(),
++        ));
++        let proxy = Proxy::new(Arc::new(config), auth, outgoing);
++        let request = json!({"model":"m","instructions":"","store":false,"stream":true,"input":[
++            {"type":"function_call","name":"exec_command","call_id":"call_1","arguments":"{}"},
++            {"type":"function_call_output","call_id":"call_1","output":"client result"}
++        ],"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}],"future":{"preserve":true}});
++        let (first, second) = tokio::join!(proxy.fetch(&request), proxy.fetch(&request));
++        for response in [first, second] {
++            let mut response = response.unwrap();
++            assert_eq!(response.status().as_u16(), 200);
++            let mut body = Vec::new();
++            while let Some(bytes) = response.chunk().await.unwrap() {
++                body.extend(bytes);
++            }
++            assert_eq!(body, source.as_bytes());
++        }
++        let captured = server.received_requests().await.unwrap();
++        assert!(
++            captured
++                .iter()
++                .all(
++                    |received| serde_json::from_slice::<Value>(&received.body).unwrap() == request
++                )
++        );
++        assert!(!home.path().join("sessions").exists());
++        assert!(!home.path().join("history.jsonl").exists());
++    }
++
++    #[test]
++    fn persistence_and_hosted_tools_are_rejected_before_transport() {
++        let good = json!({"model":"m","store":false,"stream":true,"input":[],"tools":[{"type":"function","name":"exec_command"}]});
++        assert!(valid_request(&good));
++        for (name, value) in [
++            ("store", json!(true)),
++            ("background", json!(true)),
++            ("previous_response_id", json!("r")),
++            (
++                "tools",
++                json!([{"type":"namespace","tools":[{"type":"web_search"}]}]),
++            ),
++        ] {
++            let mut bad = good.clone();
++            bad[name] = value;
++            assert!(!valid_request(&bad));
++        }
++    }
++}
+diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
+--- a/codex-rs/tui/src/app/app_server_event_targets.rs
++++ b/codex-rs/tui/src/app/app_server_event_targets.rs
+@@ -221,6 +221,7 @@
+         | ServerNotification::FsChanged(_)
+         | ServerNotification::WindowsWorldWritableWarning(_)
+         | ServerNotification::WindowsSandboxSetupCompleted(_)
++        | ServerNotification::LlmproxyChunk(_)
+         | ServerNotification::AccountLoginCompleted(_) => None,
+     };
+ 
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -391,6 +391,7 @@
+             | ServerNotification::ThreadRealtimeOutputAudioDelta(_)
+             | ServerNotification::WindowsWorldWritableWarning(_)
+             | ServerNotification::WindowsSandboxSetupCompleted(_)
++            | ServerNotification::LlmproxyChunk(_)
+             | ServerNotification::AccountLoginCompleted(_)
+             | ServerNotification::ProjectChanged(_)
+             | ServerNotification::ThreadProjectUpdated(_) => {}
+diff --git a/codex-rs/app-server-protocol/src/precomputed_exports.rs b/codex-rs/app-server-protocol/src/precomputed_exports.rs
+--- a/codex-rs/app-server-protocol/src/precomputed_exports.rs
++++ b/codex-rs/app-server-protocol/src/precomputed_exports.rs
+@@ -103,6 +103,14 @@
+     };
+     let exports = load_exports(export_set)?;
+     write_exports(out_dir, &exports.json_schema)?;
++    if experimental_api {
++        // Identify this controlled build before an app-server process can start plugins.
++        write_export(
++            out_dir,
++            "llmproxy-proxy-policy.json",
++            r#"{"policyVersion":1,"stateless":true,"clientToolsOnly":true,"methods":["llmproxy/capabilities","llmproxy/responses","llmproxy/cancel"]}"#,
++        )?;
++    }
+     Ok(())
+ }
+ 

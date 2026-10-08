@@ -88,7 +88,23 @@ impl RequestTelemetry {
             "/v1/responses" => "/v1/responses",
             "/v1/messages" => "/v1/messages",
             "/v1/auto" => "/v1/auto",
-            _ => "unmatched",
+            "/agents/v1/register" => "/agents/v1/register",
+            _ => match path.split('/').collect::<Vec<_>>().as_slice() {
+                ["", "agents", "v1", "node", _, "poll"] => "/agents/v1/node/{node_id}/poll",
+                ["", "agents", "v1", "node", _, "heartbeat"] => {
+                    "/agents/v1/node/{node_id}/heartbeat"
+                }
+                ["", "agents", "v1", "node", _, "result", _] => {
+                    "/agents/v1/node/{node_id}/result/{request_id}"
+                }
+                ["", "internal", "subscriptions", _, "models"] => {
+                    "/internal/subscriptions/{node_id}/models"
+                }
+                ["", "internal", "subscriptions", _, "responses"] => {
+                    "/internal/subscriptions/{node_id}/responses"
+                }
+                _ => "unmatched",
+            },
         };
         let path: String = path.chars().take(512).collect();
         self.span = Some(
@@ -98,6 +114,19 @@ impl RequestTelemetry {
             http.status_code = tracing::field::Empty, otel.kind = "server",
             otel.status_code = tracing::field::Empty),
         );
+    }
+
+    fn completion_level(&self, status: Option<u16>, has_error: bool) -> tracing::Level {
+        if matches!(
+            self.route,
+            "/agents/v1/node/{node_id}/poll" | "/agents/v1/node/{node_id}/heartbeat"
+        ) && !has_error
+            && status.is_some_and(|status| (200..300).contains(&status))
+        {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        }
     }
 
     pub fn selected(&mut self, protocol: Protocol, upstream: Option<String>) {
@@ -338,44 +367,54 @@ impl GatewayTelemetry {
             .unwrap_or_default();
         let otel_span = context.span();
         let correlation = otel_span.span_context();
-        tracing::info!(
-            component = "gateway",
-            event_kind = "request",
-            request_id = request.id,
-            trace_id = correlation
-                .is_valid()
-                .then(|| correlation.trace_id().to_string()),
-            span_id = correlation
-                .is_valid()
-                .then(|| correlation.span_id().to_string()),
-            protocol = request.protocol,
-            route = request.route,
-            upstream = request.upstream,
-            upstream_address = request.address,
-            local_address = request.local_address,
-            status,
-            upstream_status = request.upstream_status,
-            duration_seconds = duration,
-            connection_id = request.connection_id,
-            connection_reused = request.reused,
-            tcp_connected = request.connection_id.is_some(),
-            dns_seconds = request.dns_seconds,
-            connection_acquire_seconds = request.acquire_seconds,
-            tcp_seconds = request.tcp_seconds,
-            tls_seconds = request.tls_seconds,
-            upstream_header_seconds = request.header_seconds,
-            tls_version = request.tls_version,
-            tls_cipher = request.tls_cipher,
-            failed,
-            error_type,
-            error_source = error.map(|e| e.esource().as_str()),
-            error_stage,
-            error_reason = error.map(error_reason),
-            error_io_kind = io_kind,
-            error_os_code = os_code,
-            error_response_write = request.error_response_write,
-            "request completed"
-        );
+        macro_rules! emit_completion {
+            ($level:expr) => {
+                tracing::event!(
+                    $level,
+                    component = "gateway",
+                    event_kind = "request",
+                    request_id = request.id,
+                    trace_id = correlation
+                        .is_valid()
+                        .then(|| correlation.trace_id().to_string()),
+                    span_id = correlation
+                        .is_valid()
+                        .then(|| correlation.span_id().to_string()),
+                    protocol = request.protocol,
+                    route = request.route,
+                    upstream = request.upstream,
+                    upstream_address = request.address,
+                    local_address = request.local_address,
+                    status,
+                    upstream_status = request.upstream_status,
+                    duration_seconds = duration,
+                    connection_id = request.connection_id,
+                    connection_reused = request.reused,
+                    tcp_connected = request.connection_id.is_some(),
+                    dns_seconds = request.dns_seconds,
+                    connection_acquire_seconds = request.acquire_seconds,
+                    tcp_seconds = request.tcp_seconds,
+                    tls_seconds = request.tls_seconds,
+                    upstream_header_seconds = request.header_seconds,
+                    tls_version = request.tls_version,
+                    tls_cipher = request.tls_cipher,
+                    failed,
+                    error_type,
+                    error_source = error.map(|e| e.esource().as_str()),
+                    error_stage,
+                    error_reason = error.map(error_reason),
+                    error_io_kind = io_kind,
+                    error_os_code = os_code,
+                    error_response_write = request.error_response_write,
+                    "request completed"
+                );
+            };
+        }
+        if request.completion_level(status, error.is_some()) == tracing::Level::DEBUG {
+            emit_completion!(tracing::Level::DEBUG);
+        } else {
+            emit_completion!(tracing::Level::INFO);
+        }
     }
 }
 

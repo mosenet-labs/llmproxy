@@ -3,12 +3,14 @@ pub(crate) mod holidays;
 pub(crate) mod models;
 pub(crate) mod providers;
 pub(crate) mod routes;
+pub(crate) mod subscriptions;
 
 use topcoat::{
     Result,
     context::Cx,
     icon::icon,
     router::{Slot, error::see_other, href, layout, request::uri, route},
+    runtime::{PrefetchMode, link_attrs, prefetch_mode},
     view::{View, attributes, view},
 };
 use topcoat_ant_design::head_assets;
@@ -28,6 +30,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     let models_page = uri(cx).path() == "/ui/models";
     let chat_page = uri(cx).path() == "/ui/chat";
     let holidays_page = uri(cx).path() == "/ui/holidays";
+    let subscriptions_page = uri(cx).path() == "/ui/subscriptions";
     let page_title = if routes_page {
         "Model Routes"
     } else if models_page {
@@ -36,14 +39,17 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
         "Chat"
     } else if holidays_page {
         "节假日"
+    } else if subscriptions_page {
+        "订阅节点"
     } else {
         "Providers"
     };
-    let providers_link = href!(providers::list).resolve(cx);
-    let models_link = href!(models::models).resolve(cx);
-    let chat_link = href!(chat::chat).resolve(cx);
-    let routes_link = href!(routes::routes).resolve(cx);
-    let holidays_link = href!(holidays::holidays).resolve(cx);
+    let providers_link = link_attrs(cx, href!(providers::list), prefetch_mode(cx));
+    let models_link = link_attrs(cx, href!(models::models), prefetch_mode(cx));
+    let chat_link = link_attrs(cx, href!(chat::chat), PrefetchMode::Never);
+    let routes_link = link_attrs(cx, href!(routes::routes), prefetch_mode(cx));
+    let holidays_link = link_attrs(cx, href!(holidays::holidays), prefetch_mode(cx));
+    let subscriptions_link = link_attrs(cx, href!(subscriptions::nodes), prefetch_mode(cx));
     Ok(view! {
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -55,24 +61,158 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                 head_assets()
                 <link rel="stylesheet" href="/ui/assets/console.css">
                 topcoat::runtime::script()
-                if chat_page { <script type="module" src="/ui/assets/chat-resume.js"></script> }
+                <script type="module" src="/ui/assets/chat-resume.js"></script>
             </head>
             <body>
-                <div class="grid min-h-screen grid-cols-[216px_minmax(0,1fr)] max-[900px]:grid-cols-[176px_minmax(0,1fr)] max-[640px]:block">
-                    <aside class="sticky top-0 flex h-screen flex-col border-r border-border bg-white px-3 max-[640px]:static max-[640px]:h-auto max-[640px]:border-r-0 max-[640px]:border-b max-[640px]:px-4 max-[640px]:pb-2">
-                        <a class="flex h-16 shrink-0 items-center gap-3 px-3 text-lg font-semibold max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-base max-[640px]:h-14 max-[640px]:px-0" href=(providers_link.clone())><span class="grid size-8 place-items-center rounded-lg bg-primary text-xl font-bold text-white" aria-hidden="true">"L"</span><strong>"LLMProxy"</strong></a>
-                        <nav class="mt-4 grid gap-1 max-[640px]:mt-0 max-[640px]:grid-cols-2" aria-label="主导航">
-                            <a class=(NAV_ITEM) href=(providers_link) aria-current=(if routes_page || models_page || chat_page || holidays_page { None } else { Some("page") })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Providers"</a>
-                            <a class=(NAV_ITEM) href=(models_link) aria-current=(if models_page { Some("page") } else { None })>icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Models"</a>
-                            <a class=(NAV_ITEM) href=(chat_link) aria-current=(if chat_page { Some("page") } else { None })>icon(data: PROJECT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Chat"</a>
-                            <a class=(NAV_ITEM) href=(routes_link) aria-current=(if routes_page { Some("page") } else { None })>icon(data: APARTMENT_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"Model Routes"</a>
-                            <a class=(NAV_ITEM) href=(holidays_link) aria-current=(if holidays_page { Some("page") } else { None })>icon(data: CALENDAR_OUTLINED, attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" })"节假日"</a>
+                <div
+                    id="console-shell"
+                    class="grid min-h-screen grid-cols-[216px_minmax(0,1fr)] max-[900px]:grid-cols-[176px_minmax(0,1fr)] max-[640px]:block"
+                >
+                    <aside
+                        id="console-sidebar"
+                        class="sticky top-0 flex h-screen flex-col border-r border-border bg-white px-3 max-[640px]:static max-[640px]:h-auto max-[640px]:border-r-0 max-[640px]:border-b max-[640px]:px-4 max-[640px]:pb-2"
+                    >
+                        <a
+                            class="flex h-16 shrink-0 items-center gap-3 px-3 text-lg font-semibold max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-base max-[640px]:h-14 max-[640px]:px-0"
+                            (providers_link.clone())
+                        >
+                            <span
+                                class="grid size-8 place-items-center rounded-lg bg-primary text-xl font-bold text-white"
+                                aria-hidden="true"
+                            >
+                                "L"
+                            </span>
+                            <strong>"LLMProxy"</strong>
+                        </a>
+                        <nav
+                            id="console-navigation"
+                            class="mt-4 grid gap-1 max-[640px]:mt-0 max-[640px]:grid-cols-2"
+                            aria-label="主导航"
+                        >
+                            <a
+                                id="nav-providers"
+                                class=(NAV_ITEM)
+                                (providers_link)
+                                aria-current=(if routes_page
+                                    || models_page
+                                    || chat_page
+                                    || holidays_page
+                                    || subscriptions_page {
+                                    None
+                                } else {
+                                    Some("page")
+                                })
+                            >
+                                icon(
+                                    data: APPSTORE_OUTLINED,
+                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                )
+                                "Providers"
+                            </a>
+                            <a
+                                id="nav-models"
+                                class=(NAV_ITEM)
+                                (models_link)
+                                aria-current=(if models_page { Some("page") } else { None })
+                            >
+                                icon(
+                                    data: APPSTORE_OUTLINED,
+                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                )
+                                "Models"
+                            </a>
+                            <a
+                                id="nav-chat"
+                                class=(NAV_ITEM)
+                                (chat_link)
+                                aria-current=(if chat_page { Some("page") } else { None })
+                            >
+                                icon(
+                                    data: PROJECT_OUTLINED,
+                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                )
+                                "Chat"
+                            </a>
+                            <a
+                                id="nav-routes"
+                                class=(NAV_ITEM)
+                                (routes_link)
+                                aria-current=(if routes_page { Some("page") } else { None })
+                            >
+                                icon(
+                                    data: APARTMENT_OUTLINED,
+                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                )
+                                "Model Routes"
+                            </a>
+                            <a
+                                id="nav-holidays"
+                                class=(NAV_ITEM)
+                                (holidays_link)
+                                aria-current=(if holidays_page {
+                                    Some("page")
+                                } else {
+                                    None
+                                })
+                            >
+                                icon(
+                                    data: CALENDAR_OUTLINED,
+                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                )
+                                "节假日"
+                            </a>
+                            <a
+                                id="nav-subscriptions"
+                                class=(NAV_ITEM)
+                                (subscriptions_link)
+                                aria-current=(if subscriptions_page {
+                                    Some("page")
+                                } else {
+                                    None
+                                })
+                            >
+                                icon(
+                                    data: APARTMENT_OUTLINED,
+                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                )
+                                "订阅节点"
+                            </a>
                         </nav>
-                        <div class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden">"本地开发环境"</div>
+                        <div
+                            class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden"
+                        >
+                            "本地开发环境"
+                        </div>
                     </aside>
-                    <div class="flex min-w-0 flex-col">
-                        <header class=(if chat_page { "sticky top-0 z-20 h-12 shrink-0 border-b border-[#e9edf2] bg-white text-xs text-[#788496] max-[640px]:hidden" } else { "sticky top-0 z-20 h-12 shrink-0 border-b border-border bg-white text-sm text-secondary max-[640px]:hidden" })><div class="flex size-full items-center px-7 [&_strong]:font-medium [&_strong]:text-heading"><span>"控制台"<span class="mx-2.5 text-[#b9c3ce]">"/"</span><strong>(page_title)</strong></span></div></header>
-                        <main id="main" class=(if chat_page { "w-full min-h-0 flex-1 p-4 max-[640px]:p-3" } else { "w-full flex-1 p-7 pb-12 max-[640px]:px-4 max-[640px]:pt-6 max-[640px]:pb-8" })>(slot)</main>
+                    <div id="console-content" class="flex min-w-0 flex-col">
+                        <header
+                            id="console-header"
+                            class=(if chat_page {
+                                "sticky top-0 z-20 h-12 shrink-0 border-b border-[#e9edf2] bg-white text-xs text-[#788496] max-[640px]:hidden"
+                            } else {
+                                "sticky top-0 z-20 h-12 shrink-0 border-b border-border bg-white text-sm text-secondary max-[640px]:hidden"
+                            })
+                        >
+                            <div
+                                class="flex size-full items-center px-7 [&_strong]:font-medium [&_strong]:text-heading"
+                            >
+                                <span>
+                                    "控制台"
+                                    <span class="mx-2.5 text-[#b9c3ce]">"/"</span>
+                                    <strong>(page_title)</strong>
+                                </span>
+                            </div>
+                        </header>
+                        <main
+                            id="main"
+                            class=(if chat_page {
+                                "w-full min-h-0 flex-1 p-4 max-[640px]:p-3"
+                            } else {
+                                "w-full flex-1 p-7 pb-12 max-[640px]:px-4 max-[640px]:pt-6 max-[640px]:pb-8"
+                            })
+                        >
+                            (slot)
+                        </main>
                     </div>
                 </div>
             </body>

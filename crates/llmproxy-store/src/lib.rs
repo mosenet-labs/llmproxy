@@ -22,6 +22,26 @@ pub use pricing::{
 };
 pub use store::ProviderStore;
 
+#[derive(Clone, Debug)]
+pub struct SubscriptionNodeView {
+    pub node_id: String,
+    pub name: String,
+    pub backend: String,
+    pub models: Vec<String>,
+    pub concurrency: u64,
+    pub enabled: bool,
+    pub provider_id: Option<i64>,
+    pub version: u64,
+}
+
+/// 服务端普通 Provider 转接目标；密钥不进入公开视图。
+#[derive(Clone)]
+pub struct SubscriptionRelayTarget {
+    pub host: String,
+    pub port: u16,
+    pub key: String,
+}
+
 /// Gateway 内部使用的工具续接记录；载荷含签名，不实现 Debug 或 Serialize。
 pub struct ToolContinuation {
     pub id: String,

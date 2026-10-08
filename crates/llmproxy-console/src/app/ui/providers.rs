@@ -163,9 +163,27 @@ async fn provider_workspace(
     let state = query.state.clone();
     let edit_id = edit_id.to_owned();
     Ok(view! {
-        notification(message: &success, title: "操作成功", tone: NotificationTone::Success, language: UiLanguage::ChineseSimplified)
-        notification(message: &failure, title: "操作失败", tone: NotificationTone::Error, language: UiLanguage::ChineseSimplified)
-        provider_list(q: $(q), protocol: $(protocol), state: $(state), edit_id: $(edit_id), editor_open: $(editor_open), success: $(success), failure: $(failure))
+        notification(
+            message: &success,
+            title: "操作成功",
+            tone: NotificationTone::Success,
+            language: UiLanguage::ChineseSimplified
+        )
+        notification(
+            message: &failure,
+            title: "操作失败",
+            tone: NotificationTone::Error,
+            language: UiLanguage::ChineseSimplified
+        )
+        provider_list(
+            q: $(q),
+            protocol: $(protocol),
+            state: $(state),
+            edit_id: $(edit_id),
+            editor_open: $(editor_open),
+            success: $(success),
+            failure: $(failure)
+        )
     })
 }
 
@@ -236,66 +254,327 @@ pub async fn provider_list(
     let total = all.len();
     let enabled = all.iter().filter(|provider| provider.enabled).count();
     let refresh = controls.refresh.clone();
-    let reset = attributes! { cx => @click=$(|_event: Event| {
-        draft_q.set("".to_owned());
-        draft_protocol.set("".to_owned());
-        draft_state.set("".to_owned());
-        applied_q.set("".to_owned());
-        applied_protocol.set("".to_owned());
-        applied_state.set("".to_owned());
-        refresh.increment();
-    }) };
+    let reset = attributes! {
+        cx =>
+        @click=$(|_event: Event| {
+            draft_q.set("".to_owned());
+            draft_protocol.set("".to_owned());
+            draft_state.set("".to_owned());
+            applied_q.set("".to_owned());
+            applied_protocol.set("".to_owned());
+            applied_state.set("".to_owned());
+            refresh.increment();
+        })
+    };
     Ok(view! {
         provider_editor(editor: &editor, controls: &controls)
         <section class=(PAGE_HEADING)>
-            <div><h1>"Providers"</h1><p>"管理上游连接、协议路径与凭据。"</p></div>
-            <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())>icon(data: PLUS_OUTLINED, attrs: attributes! { class="size-4 shrink-0" aria-hidden="true" })"新建 Provider"</button>
+            <div>
+                <h1>"Providers"</h1>
+                <p>"管理上游连接、协议路径与凭据。"</p>
+            </div>
+            <button
+                class=(class!(BUTTON, PRIMARY_BUTTON))
+                type="button"
+                (create.clone())
+            >
+                icon(
+                    data: PLUS_OUTLINED,
+                    attrs: attributes! { class="size-4 shrink-0" aria-hidden="true" }
+                )
+                "新建 Provider"
+            </button>
         </section>
-        <section class="providers-panel overflow-visible rounded-lg border border-border bg-white shadow-xs" aria-labelledby="providers-heading">
-            <div class="flex items-center justify-between gap-4 px-6 pt-5 max-[640px]:px-4 [&_h2]:m-0 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:text-base [&_h2]:font-semibold"><h2 id="providers-heading">"Provider 列表"<span class="rounded bg-surface px-2 text-[13px] font-normal leading-6 text-secondary">(total)</span></h2><span class="text-[13px] text-secondary">(enabled)" 个已启用"</span></div>
-            <form class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1" method="get" action="/ui/providers" role="search" @submit=$(|event: Event| {
-                event.prevent_default();
-                applied_q.set(draft_q.get());
-                applied_protocol.set(draft_protocol.get());
-                applied_state.set(draft_state.get());
-                refresh.increment();
-            })>
-                <div class="flex h-9 w-[300px] items-center gap-2 rounded-md border border-control-border pl-3 focus-within:border-primary-hover focus-within:ring-2 focus-within:ring-primary/10 max-[640px]:w-full [&_input]:h-8 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:pl-0 [&_input]:text-sm [&_input]:shadow-none">icon(data: SEARCH_OUTLINED, attrs: attributes! { class="size-4 shrink-0 text-muted" aria-hidden="true" })<input aria-label="搜索名称或主机" name="q" :value=$(draft_q.get()) @input=$(|event: Event| draft_q.set(event.target.value)) placeholder="搜索名称或主机地址"></div>
-                <select name="protocol" aria-label="筛选协议" :value=$(draft_protocol.get()) @change=$(|event: Event| draft_protocol.set(event.target.value))><option value="">"全部协议"</option>for protocol in PROTOCOLS { <option value=(protocol.as_str()) selected=(draft_protocol.get_untracked() == protocol.as_str())>(protocol_label(protocol))</option> }</select>
-                <select name="state" aria-label="筛选状态" :value=$(draft_state.get()) @change=$(|event: Event| draft_state.set(event.target.value))><option value="">"全部状态"</option><option value="enabled" selected=(draft_state.get_untracked() == "enabled")>"已启用"</option><option value="disabled" selected=(draft_state.get_untracked() == "disabled")>"已停用"</option></select>
+        <section
+            class="providers-panel overflow-visible rounded-lg border border-border bg-white shadow-xs"
+            aria-labelledby="providers-heading"
+        >
+            <div
+                class="flex items-center justify-between gap-4 px-6 pt-5 max-[640px]:px-4 [&_h2]:m-0 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:text-base [&_h2]:font-semibold"
+            >
+                <h2 id="providers-heading">
+                    "Provider 列表"
+                    <span
+                        class="rounded bg-surface px-2 text-[13px] font-normal leading-6 text-secondary"
+                    >
+                        (total)
+                    </span>
+                </h2>
+                <span class="text-[13px] text-secondary">
+                    (enabled)
+                    " 个已启用"
+                </span>
+            </div>
+            <form
+                class="flex flex-wrap items-center gap-3 px-6 py-5 max-[640px]:gap-2 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[144px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1"
+                method="get"
+                action="/ui/providers"
+                role="search"
+                @submit=$(|event: Event| {
+                    event.prevent_default();
+                    applied_q.set(draft_q.get());
+                    applied_protocol.set(draft_protocol.get());
+                    applied_state.set(draft_state.get());
+                    refresh.increment();
+                })
+            >
+                <div
+                    class="flex h-9 w-[300px] items-center gap-2 rounded-md border border-control-border pl-3 focus-within:border-primary-hover focus-within:ring-2 focus-within:ring-primary/10 max-[640px]:w-full [&_input]:h-8 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:pl-0 [&_input]:text-sm [&_input]:shadow-none"
+                >
+                    icon(
+                        data: SEARCH_OUTLINED,
+                        attrs: attributes! { class="size-4 shrink-0 text-muted" aria-hidden="true" }
+                    )
+                    <input
+                        aria-label="搜索名称或主机"
+                        name="q"
+                        :value=$(draft_q.get())
+                        @input=$(|event: Event| draft_q.set(event.target.value))
+                        placeholder="搜索名称或主机地址"
+                    >
+                </div>
+                <select
+                    name="protocol"
+                    aria-label="筛选协议"
+                    :value=$(draft_protocol.get())
+                    @change=$(|event: Event| draft_protocol.set(event.target.value))
+                >
+                    <option value="">"全部协议"</option>
+                    for protocol in PROTOCOLS {
+                        <option
+                            value=(protocol.as_str())
+                            selected=(draft_protocol.get_untracked()
+                                == protocol.as_str())
+                        >
+                            (protocol_label(protocol))
+                        </option>
+                    }
+                </select>
+                <select
+                    name="state"
+                    aria-label="筛选状态"
+                    :value=$(draft_state.get())
+                    @change=$(|event: Event| draft_state.set(event.target.value))
+                >
+                    <option value="">"全部状态"</option>
+                    <option
+                        value="enabled"
+                        selected=(draft_state.get_untracked() == "enabled")
+                    >
+                        "已启用"
+                    </option>
+                    <option
+                        value="disabled"
+                        selected=(draft_state.get_untracked() == "disabled")
+                    >
+                        "已停用"
+                    </option>
+                </select>
                 <button class=(BUTTON) type="submit">"查询"</button>
-                if !query.q.is_empty() || !query.protocol.is_empty() || !query.state.is_empty() { <button class=(class!(TEXT_LINK, "px-1")) type="button" (reset.clone())>"重置"</button> }
+                if !query.q.is_empty()
+                    || !query.protocol.is_empty()
+                    || !query.state.is_empty() {
+                    <button
+                        class=(class!(TEXT_LINK, "px-1"))
+                        type="button"
+                        (reset.clone())
+                    >
+                        "重置"
+                    </button>
+                }
             </form>
             if providers.is_empty() {
-                <div class="border-t border-border px-6 py-12 text-center [&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-heading [&_p]:mt-0 [&_p]:mb-6 [&_p]:text-sm [&_p]:text-secondary">icon(data: APPSTORE_OUTLINED, attrs: attributes! { class="mx-auto block size-10 text-[#bfbfbf]" aria-hidden="true" })<h3>(if all.is_empty() { "连接第一个模型服务" } else { "没有找到匹配的 Provider" })</h3><p>(if all.is_empty() { "添加上游地址与 API Key，即可开始管理你的模型连接。" } else { "尝试调整搜索关键词，或清除筛选条件。" })</p>if all.is_empty() { <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (create.clone())>"新建 Provider"</button> } else { <button class=(class!(BUTTON, PRIMARY_BUTTON)) type="button" (reset.clone())>"清除筛选"</button> }</div>
+                <div
+                    class="border-t border-border px-6 py-12 text-center [&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-heading [&_p]:mt-0 [&_p]:mb-6 [&_p]:text-sm [&_p]:text-secondary"
+                >
+                    icon(
+                        data: APPSTORE_OUTLINED,
+                        attrs: attributes! {
+                            class="mx-auto block size-10 text-[#bfbfbf]"
+                            aria-hidden="true"
+                        }
+                    )
+                    <h3>
+                        (if all.is_empty() {
+                            "连接第一个模型服务"
+                        } else {
+                            "没有找到匹配的 Provider"
+                        })
+                    </h3>
+                    <p>
+                        (if all.is_empty() {
+                            "添加上游地址与 API Key，即可开始管理你的模型连接。"
+                        } else {
+                            "尝试调整搜索关键词，或清除筛选条件。"
+                        })
+                    </p>
+                    if all.is_empty() {
+                        <button
+                            class=(class!(BUTTON, PRIMARY_BUTTON))
+                            type="button"
+                            (create.clone())
+                        >
+                            "新建 Provider"
+                        </button>
+                    } else {
+                        <button
+                            class=(class!(BUTTON, PRIMARY_BUTTON))
+                            type="button"
+                            (reset.clone())
+                        >
+                            "清除筛选"
+                        </button>
+                    }
+                </div>
             } else {
-                data_table(label: "Provider 列表", attrs: attributes! { class="min-w-[900px] [&_th]:px-6! [&_th]:text-[13px]! [&_td]:px-6! [&_td]:py-4! [&_td]:text-sm! [&_.gr-tag]:text-[13px]" },
-                    <thead><tr><th>"名称 / 协议"</th><th>"上游地址"</th><th>"状态"</th><th>"凭据"</th><th class="text-right!">"操作"</th></tr></thead>
+                data_table(
+                    label: "Provider 列表",
+                    attrs: attributes! {
+                        class="min-w-[900px] [&_th]:px-6! [&_th]:text-[13px]! [&_td]:px-6! [&_td]:py-4! [&_td]:text-sm! [&_.gr-tag]:text-[13px]"
+                    },
+                    <thead>
+                        <tr>
+                            <th>"名称 / 协议"</th>
+                            <th>"上游地址"</th>
+                            <th>"状态"</th>
+                            <th>"凭据"</th>
+                            <th class="text-right!">"操作"</th>
+                        </tr>
+                    </thead>
                     <tbody>
                         #[key(provider.id)]
                         for provider in &providers {
                             <tr id=(format!("provider-{}", provider.id))>
-                                <td><button class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary" type="button" (editor_trigger(cx, &editor, provider.clone().into()))>(provider.name.as_str())</button><span class="mt-1 block whitespace-nowrap text-[13px] leading-5 text-secondary" title=(provider.paths.supported().into_iter().map(protocol_label).collect::<Vec<_>>().join(" / "))>(provider.paths.supported().into_iter().map(protocol_compact_label).collect::<Vec<_>>().join(" · "))</span></td>
-                                <td><span class="whitespace-nowrap text-sm text-heading">(provider_url(provider))</span><span class="mt-1 block text-[13px] leading-5 text-secondary">"读取超时 "(provider.read_timeout_ms / 1000)" 秒"</span></td>
-                                <td><div class="flex max-w-[185px] flex-wrap gap-[5px]">tag(tone: if provider.enabled { TagTone::Success } else { TagTone::Default }, (if provider.enabled { "已启用" } else { "已停用" }))</div></td>
-                                <td><span class="inline-flex items-center gap-1.5 whitespace-nowrap text-[13px] text-secondary">if provider.key_configured { icon(data: CHECK_CIRCLE_FILLED, attrs: attributes! { class="size-3.5 text-muted" aria-hidden="true" }) }(if provider.key_configured { "已配置" } else { "未配置" })</span></td>
-                                <td><div class="flex min-w-[204px] items-center justify-end gap-3 whitespace-nowrap">
-                                    <button class=(TEXT_LINK) type="button" (editor_trigger(cx, &editor, provider.clone().into()))>"编辑"</button>
-                                    if provider.enabled {
-                                        provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: false)
-                                    } else {
-                                        action_form(controls: &controls, csrf: csrf, provider: provider, action: "enable", label: "启用".to_owned())
-                                        provider_action_confirmation(controls: &controls, provider: provider, csrf: csrf, delete: true)
-                                    }
-                                </div></td>
+                                <td>
+                                    <button
+                                        class="block border-0 bg-transparent p-0 text-left text-sm font-medium leading-[22px] text-heading hover:text-primary"
+                                        type="button"
+                                        (editor_trigger(cx, &editor, provider.clone().into()))
+                                    >
+                                        (provider.name.as_str())
+                                    </button>
+                                    <span
+                                        class="mt-1 block whitespace-nowrap text-[13px] leading-5 text-secondary"
+                                        title=(provider
+                                            .paths
+                                            .supported()
+                                            .into_iter()
+                                            .map(protocol_label)
+                                            .collect::<Vec<_>>()
+                                            .join(" / "))
+                                    >
+                                        (provider
+                                            .paths
+                                            .supported()
+                                            .into_iter()
+                                            .map(protocol_compact_label)
+                                            .collect::<Vec<_>>()
+                                            .join(" · "))
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="whitespace-nowrap text-sm text-heading">
+                                        (provider_url(provider))
+                                    </span>
+                                    <span
+                                        class="mt-1 block text-[13px] leading-5 text-secondary"
+                                    >
+                                        "读取超时 "
+                                        (provider.read_timeout_ms / 1000)
+                                        " 秒"
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="flex max-w-[185px] flex-wrap gap-[5px]">
+                                        tag(
+                                            tone: if provider.enabled {
+                                                TagTone::Success
+                                            } else {
+                                                TagTone::Default
+                                            },
+                                            (if provider.enabled { "已启用" } else { "已停用" })
+                                        )
+                                    </div>
+                                </td>
+                                <td>
+                                    <span
+                                        class="inline-flex items-center gap-1.5 whitespace-nowrap text-[13px] text-secondary"
+                                    >
+                                        if provider.key_configured {
+                                            icon(
+                                                data: CHECK_CIRCLE_FILLED,
+                                                attrs: attributes! { class="size-3.5 text-muted" aria-hidden="true" }
+                                            )
+                                        }
+                                        (if provider.key_configured {
+                                            "已配置"
+                                        } else {
+                                            "未配置"
+                                        })
+                                    </span>
+                                </td>
+                                <td>
+                                    <div
+                                        class="flex min-w-[204px] items-center justify-end gap-3 whitespace-nowrap"
+                                    >
+                                        <button
+                                            class=(TEXT_LINK)
+                                            type="button"
+                                            (editor_trigger(cx, &editor, provider.clone().into()))
+                                        >
+                                            "编辑"
+                                        </button>
+                                        if provider.enabled {
+                                            provider_action_confirmation(
+                                                controls: &controls,
+                                                provider: provider,
+                                                csrf: csrf,
+                                                delete: false
+                                            )
+                                        } else {
+                                            action_form(
+                                                controls: &controls,
+                                                csrf: csrf,
+                                                provider: provider,
+                                                action: "enable",
+                                                label: "启用".to_owned()
+                                            )
+                                            provider_action_confirmation(
+                                                controls: &controls,
+                                                provider: provider,
+                                                csrf: csrf,
+                                                delete: true
+                                            )
+                                        }
+                                    </div>
+                                </td>
                             </tr>
                         }
                     </tbody>
                 )
-                <div class="border-t border-border px-6 py-4 text-[13px] text-secondary max-[640px]:px-4">"显示 "(providers.len())" / "(total)" 个 Provider"</div>
+                <div
+                    class="border-t border-border px-6 py-4 text-[13px] text-secondary max-[640px]:px-4"
+                >
+                    "显示 "
+                    (providers.len())
+                    " / "
+                    (total)
+                    " 个 Provider"
+                </div>
             }
         </section>
-        <p class="mt-4 mb-0 flex items-start gap-2 text-[13px] leading-relaxed text-secondary">icon(data: INFO_CIRCLE_FILLED, attrs: attributes! { class="mt-1 size-3.5 shrink-0 text-muted" aria-hidden="true" })"请先在 Models 中添加上游模型，再到 Model Routes 配置对外模型名与候选顺序。"</p>
+        <p
+            class="mt-4 mb-0 flex items-start gap-2 text-[13px] leading-relaxed text-secondary"
+        >
+            icon(
+                data: INFO_CIRCLE_FILLED,
+                attrs: attributes! {
+                    class="mt-1 size-3.5 shrink-0 text-muted"
+                    aria-hidden="true"
+                }
+            )
+            "请先在 Models 中添加上游模型，再到 Model Routes 配置对外模型名与候选顺序。"
+        </p>
     })
 }
 
@@ -318,10 +597,39 @@ async fn provider_action_confirmation(
     let submit = action_submit(cx, controls, csrf, provider, action);
     let busy = &controls.busy;
     Ok(view! {
-        <button class=(class!(TEXT_LINK, "text-[#cf1322]! hover:text-[#ff4d4f]!")) type="button" (trigger) :disabled=$(busy.get())>(label)</button>
-        popconfirm(id: id.as_str(), title: title.as_str(), language: UiLanguage::ChineseSimplified,
-            attrs: attributes! { class="[&_footer]:items-center [&_footer_.gr-button]:h-8! [&_footer_.gr-button]:w-[88px]! [&_footer_.gr-button]:px-3! [&_footer_.gr-button]:py-1! [&_footer_.gr-button]:text-sm! [&_footer_.gr-button]:leading-[22px]!" },
-            <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class="gr-button gr-button-danger" type="submit" :disabled=$(busy.get())>(format!("确认{label}"))</button></form>
+        <button
+            class=(class!(TEXT_LINK, "text-[#cf1322]! hover:text-[#ff4d4f]!"))
+            type="button"
+            (trigger)
+            :disabled=$(busy.get())
+        >
+            (label)
+        </button>
+        popconfirm(
+            id: id.as_str(),
+            title: title.as_str(),
+            language: UiLanguage::ChineseSimplified,
+            attrs: attributes! {
+                class="[&_footer]:items-center [&_footer_.gr-button]:h-8! [&_footer_.gr-button]:w-[88px]! [&_footer_.gr-button]:px-3! [&_footer_.gr-button]:py-1! [&_footer_.gr-button]:text-sm! [&_footer_.gr-button]:leading-[22px]!"
+            },
+            <form
+                class="m-0 inline-flex"
+                action="/ui/providers/action"
+                method="post"
+                (submit)
+            >
+                <input type="hidden" name="csrf" value=(csrf)>
+                <input type="hidden" name="id" value=(provider.id)>
+                <input type="hidden" name="version" value=(provider.version)>
+                <input type="hidden" name="action" value=(action)>
+                <button
+                    class="gr-button gr-button-danger"
+                    type="submit"
+                    :disabled=$(busy.get())
+                >
+                    (format!("确认{label}"))
+                </button>
+            </form>
         )
     })
 }
@@ -337,9 +645,22 @@ async fn action_form(
 ) -> Result<impl View> {
     let submit = action_submit(cx, controls, csrf, provider, action);
     let busy = &controls.busy;
-    Ok(
-        view! { <form class="m-0 inline-flex" action="/ui/providers/action" method="post" (submit)><input type="hidden" name="csrf" value=(csrf)><input type="hidden" name="id" value=(provider.id)><input type="hidden" name="version" value=(provider.version)><input type="hidden" name="action" value=(action)><button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>(label)</button></form> },
-    )
+    Ok(view! {
+        <form
+            class="m-0 inline-flex"
+            action="/ui/providers/action"
+            method="post"
+            (submit)
+        >
+            <input type="hidden" name="csrf" value=(csrf)>
+            <input type="hidden" name="id" value=(provider.id)>
+            <input type="hidden" name="version" value=(provider.version)>
+            <input type="hidden" name="action" value=(action)>
+            <button class=(TEXT_LINK) type="submit" :disabled=$(busy.get())>
+                (label)
+            </button>
+        </form>
+    })
 }
 
 #[derive(Default, Deserialize)]
@@ -560,7 +881,9 @@ pub async fn form(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
     let _ = cx;
     let filters = ListQuery::default();
     let edit_id = query.id.map(|id| id.to_string()).unwrap_or_default();
-    Ok(view! { provider_workspace(query: &filters, edit_id: &edit_id, editor_open: true) })
+    Ok(view! {
+        provider_workspace(query: &filters, edit_id: &edit_id, editor_open: true)
+    })
 }
 
 type Outcome = std::result::Result<String, String>;
@@ -610,18 +933,28 @@ fn action_submit(
         "「{}」请求失败或结果未确认，请检查列表状态后重试",
         provider.name
     ));
-    attributes! { cx => @submit=$(async |event: Event| {
-        event.prevent_default();
-        if busy.get() { return; }
-        busy.set(true);
-        success.set("".to_owned());
-        failure.set("".to_owned());
-        // Native procedures need a transport rejection handler.
-        let result = raw!("await Promise.resolve(${provider_action}.call(${csrf}, ${id}, ${version}, ${action})).catch(() => ${unavailable})", unavailable.clone());
-        busy.set(false);
-        if result.is_ok() {
-            success.set(result.unwrap());
-            refresh.increment();
-        } else { failure.set(result.unwrap_err()); }
-    }) }
+    attributes! {
+        cx =>
+        @submit=$(async |event: Event| {
+            event.prevent_default();
+            if busy.get() {
+                return;
+            }
+            busy.set(true);
+            success.set("".to_owned());
+            failure.set("".to_owned());
+            // Native procedures need a transport rejection handler.
+            let result = raw!(
+                "await Promise.resolve(${provider_action}.call(${csrf}, ${id}, ${version}, ${action})).catch(() => ${unavailable})",
+                unavailable.clone(),
+            );
+            busy.set(false);
+            if result.is_ok() {
+                success.set(result.unwrap());
+                refresh.increment();
+            } else {
+                failure.set(result.unwrap_err());
+            }
+        })
+    }
 }

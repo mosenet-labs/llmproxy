@@ -508,7 +508,7 @@ async fn history_records_source_usage_in_all_directions_and_survives_restart() {
         json!([csrf, id, id, "archive"]),
     )
     .await;
-    let replacement = archived["ok"]["v"]["v"][0].as_str().unwrap().to_owned();
+    let replacement = archived["ok"]["v"][0].as_str().unwrap().to_owned();
     assert_ne!(replacement, id);
     assert!(
         fixture
@@ -551,7 +551,7 @@ async fn history_records_source_usage_in_all_directions_and_survives_restart() {
         json!([csrf, id, id, "delete"]),
     )
     .await;
-    assert_eq!(next["ok"]["v"]["v"][0].as_str().unwrap(), replacement);
+    assert_eq!(next["ok"]["v"][0].as_str().unwrap(), replacement);
     assert!(
         fixture
             .database
