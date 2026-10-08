@@ -37,6 +37,8 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
     let relay_key = "relay-key".repeat(8);
     let store = ProviderStore::connect(&database, &master).await.unwrap();
     store.migrate().await.unwrap();
+    let log_path = directory.join("gateway.log");
+    let log = std::fs::File::create(&log_path).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_llmproxy"))
         .env_clear()
         .env("LLMPROXY_DATABASE_URL", &database)
@@ -45,7 +47,7 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
         .env("LLMPROXY_SUBSCRIPTION_REGISTRATION_KEY", &register_key)
         .env("LLMPROXY_SUBSCRIPTION_RELAY_KEY", &relay_key)
         .current_dir(&directory)
-        .stdout(Stdio::null())
+        .stdout(log)
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
@@ -367,5 +369,56 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
             .status(),
         403
     );
+    // 实际 HTTP 入口必须初始化路由，成功轮询／心跳才会被默认 INFO 过滤掉。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let requests = loop {
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| {
+                event["fields"]["component"] == "gateway"
+                    && event["fields"]["event_kind"] == "request"
+            })
+            .collect();
+        if requests.iter().any(|event| {
+            event["fields"]["route"] == "unmatched"
+                || (event["fields"]["route"] == "/agents/v1/node/{node_id}/poll"
+                    && event["fields"]["status"] == 401)
+        }) {
+            break requests;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "missing request logs"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        requests
+            .iter()
+            .all(|event| event["fields"]["route"] != "unmatched"),
+        "subscription HTTP requests must initialize telemetry routes"
+    );
+    for (route, status) in [
+        ("/agents/v1/register", 200),
+        ("/agents/v1/node/{node_id}/result/{request_id}", 204),
+        ("/internal/subscriptions/{node_id}/responses", 200),
+        ("/agents/v1/node/{node_id}/poll", 401),
+    ] {
+        assert!(requests.iter().any(|event| {
+            event["level"] == "INFO"
+                && event["fields"]["route"] == route
+                && event["fields"]["status"] == status
+        }));
+    }
+    assert!(!requests.iter().any(|event| {
+        matches!(
+            event["fields"]["route"].as_str(),
+            Some("/agents/v1/node/{node_id}/poll" | "/agents/v1/node/{node_id}/heartbeat")
+        ) && event["fields"]["status"]
+            .as_u64()
+            .is_some_and(|status| (200..300).contains(&status))
+    }));
     drop(store);
 }

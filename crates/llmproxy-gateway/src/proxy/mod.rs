@@ -179,6 +179,10 @@ impl ProxyHttp for Gateway {
             return Ok(false);
         }
         if crate::subscriptions::matches(session.req_header().uri.path()) {
+            // 订阅入口提前返回，先识别遥测路由，使成功轮询／心跳按 DEBUG 记录。
+            let request = session.req_header();
+            ctx.telemetry
+                .begin(request.method.as_str(), request.uri.path());
             self.subscriptions.serve(session).await?;
             return Ok(true);
         }
