@@ -9,12 +9,16 @@ license.workspace = true
 aes-gcm = { version = "0.11.1", features = ["zeroize"] }
 base64 = "0.23.1"
 llmproxy-core = { path = "../llmproxy-core" }
-toasty = { version = "0.10.0", default-features = false, features = ["postgresql", "sqlite", "migration"] }
-toasty-core = "0.10.0"
-toasty-driver-sqlite = "0.10.0"
+toasty = { version = "0.11.0", default-features = false, features = ["postgresql", "sqlite", "migration", "serde"] }
+toasty-core = "0.11.0"
+toasty-driver-sqlite = "0.11.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync"] }
 dotenvy = "0.15.7"
 serde.workspace = true
 serde_json.workspace = true
 rust_decimal = "1.43.0"
 chrono = "0.4.45"
+
+[dev-dependencies]
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }

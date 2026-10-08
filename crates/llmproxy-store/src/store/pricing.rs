@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use super::*;
 use crate::{
-    PriceConditions, PriceItem, PricePlanInput, PricePlanView, PriceRule, PriceSchedule,
-    PriceSource,
+    PriceConditions, PriceItem, PricePlanInput, PricePlanView, PriceRule, PriceSource,
     pricing::{decimal_price, validate_price},
 };
 
@@ -33,9 +32,25 @@ impl ProviderStore {
             .filter(ModelPricePlan::fields().is_current().eq(true))
             .exec(&mut tx)
             .await?;
+        let mut rules: HashMap<i64, Vec<ModelPriceRule>> = HashMap::new();
+        if !plans.is_empty() {
+            let rows = ModelPriceRule::all()
+                .filter(
+                    ModelPriceRule::fields()
+                        .price_plan_id()
+                        .in_list(plans.iter().map(|plan| plan.id).collect::<Vec<_>>()),
+                )
+                .order_by(ModelPriceRule::fields().id().asc())
+                .exec(&mut tx)
+                .await?;
+            for row in rows {
+                rules.entry(row.price_plan_id).or_default().push(row);
+            }
+        }
         let mut views = Vec::with_capacity(plans.len());
         for plan in plans {
-            views.push(price_view(&mut tx, plan).await?);
+            let rows = rules.remove(&plan.id).unwrap_or_default();
+            views.push(price_view_with_rules(plan, rows)?);
         }
         tx.commit().await?;
         Ok(views)
@@ -55,6 +70,7 @@ impl ProviderStore {
                     .upstream_model_id()
                     .eq(input.upstream_model_id.as_str()),
             )
+            .select(ModelMapping::fields().id())
             .first()
             .exec(&mut tx)
             .await?;
@@ -98,12 +114,6 @@ async fn insert_price_plan(
     input: PricePlanInput,
     recorded_at: i64,
 ) -> StoreResult<ModelPricePlan> {
-    let schedule_json = input
-        .schedule
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|_| StoreError::Internal)?;
     let plan = ModelPricePlan::create()
         .provider_id(input.provider_id)
         .upstream_model_id(input.upstream_model_id)
@@ -113,18 +123,16 @@ async fn insert_price_plan(
         .recorded_at(recorded_at)
         .effective_at(input.effective_at)
         .is_current(true)
-        .schedule_json(schedule_json)
+        .schedule_json(input.schedule.map(toasty::Json))
         .exec(&mut *tx)
         .await?;
     for rule in input.rules {
-        let conditions_json =
-            serde_json::to_string(&rule.conditions).map_err(|_| StoreError::Internal)?;
         ModelPriceRule::create()
             .price_plan_id(plan.id)
             .item_code(rule.item.as_str())
             .unit_code("token")
             .unit_size(1_000_000_i64)
-            .conditions_json(conditions_json)
+            .conditions_json(&rule.conditions)
             .unit_price(rule.unit_price)
             .exec(&mut *tx)
             .await?;
@@ -141,6 +149,13 @@ async fn price_view(
         .order_by(ModelPriceRule::fields().id().asc())
         .exec(executor)
         .await?;
+    price_view_with_rules(plan, rows)
+}
+
+fn price_view_with_rules(
+    plan: ModelPricePlan,
+    rows: Vec<ModelPriceRule>,
+) -> StoreResult<PricePlanView> {
     let mut rules = Vec::with_capacity(rows.len());
     for row in rows {
         if row.unit_code != "token" || row.unit_size != 1_000_000 {
@@ -148,8 +163,7 @@ async fn price_view(
         }
         rules.push(PriceRule {
             item: PriceItem::parse(&row.item_code)?,
-            conditions: serde_json::from_str(&row.conditions_json)
-                .map_err(|_| StoreError::Internal)?,
+            conditions: row.conditions_json.0,
             unit_price: row.unit_price,
         });
     }
@@ -162,12 +176,7 @@ async fn price_view(
         source_url: plan.source_url,
         recorded_at: plan.recorded_at,
         effective_at: plan.effective_at,
-        schedule: plan
-            .schedule_json
-            .as_deref()
-            .map(serde_json::from_str::<PriceSchedule>)
-            .transpose()
-            .map_err(|_| StoreError::Internal)?,
+        schedule: plan.schedule_json.map(|schedule| schedule.0),
         rules,
     })
 }
@@ -177,21 +186,30 @@ async fn price_view(
 pub(super) async fn backfill_legacy_prices(tx: &mut Transaction<'_>) -> StoreResult<()> {
     let current: HashSet<_> = ModelPricePlan::all()
         .filter(ModelPricePlan::fields().is_current().eq(true))
+        .select((
+            ModelPricePlan::fields().provider_id(),
+            ModelPricePlan::fields().upstream_model_id(),
+        ))
         .exec(&mut *tx)
         .await?
         .into_iter()
-        .map(|plan| (plan.provider_id, plan.upstream_model_id))
         .collect();
     type LegacyPrices = (Option<String>, Option<String>);
     let mut groups: BTreeMap<(i64, String), Vec<LegacyPrices>> = BTreeMap::new();
-    for mapping in ModelMapping::all().exec(&mut *tx).await? {
+    for (provider_id, upstream_model_id, input, output) in ModelMapping::all()
+        .select((
+            ModelMapping::fields().provider_id(),
+            ModelMapping::fields().upstream_model_id(),
+            ModelMapping::fields().input_price_per_million(),
+            ModelMapping::fields().output_price_per_million(),
+        ))
+        .exec(&mut *tx)
+        .await?
+    {
         groups
-            .entry((mapping.provider_id, mapping.upstream_model_id))
+            .entry((provider_id, upstream_model_id))
             .or_default()
-            .push((
-                mapping.input_price_per_million,
-                mapping.output_price_per_million,
-            ));
+            .push((input, output));
     }
     for ((provider_id, upstream_model_id), prices) in groups {
         if current.contains(&(provider_id, upstream_model_id.clone())) {

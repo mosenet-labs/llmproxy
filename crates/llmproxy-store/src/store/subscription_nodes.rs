@@ -25,7 +25,7 @@ fn view(row: SubscriptionNode) -> StoreResult<SubscriptionNodeView> {
         name: row.name,
         provider_name: row.provider_name,
         backend: row.backend,
-        models: serde_json::from_str(&row.models_json).map_err(|_| StoreError::Internal)?,
+        models: row.models_json.0,
         concurrency: row.concurrency,
         enabled: row.enabled,
         provider_id: row.provider_id,
@@ -71,8 +71,6 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let models =
-            serde_json::to_string(&registration.models).map_err(|_| StoreError::Internal)?;
         let row = if let Some(mut row) = SubscriptionNode::filter_by_node_id(&registration.node_id)
             .first()
             .exec(&mut tx)
@@ -91,7 +89,7 @@ impl ProviderStore {
                 ));
             }
             row.update()
-                .models_json(models)
+                .models_json(&registration.models)
                 .concurrency(registration.concurrency as u64)
                 .updated_at(now()?)
                 .exec(&mut tx)
@@ -108,7 +106,7 @@ impl ProviderStore {
                 .provider_name(None)
                 .config_version(0_u64)
                 .backend(&registration.backend)
-                .models_json(models)
+                .models_json(&registration.models)
                 .concurrency(registration.concurrency as u64)
                 .encrypted_node_key(self.cipher.encrypt(&registration.node_key)?)
                 .enabled(false)

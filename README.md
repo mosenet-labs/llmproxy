@@ -38,4 +38,4 @@ Gemini 原生接入：在 Providers 中选择 Gemini，上游地址填写 `https
 | Provider 与模型控制台 | [Provider 管理](docs/07-provider-console.md) · [多协议 Provider 与模型探测](docs/13-provider-interfaces-and-model-discovery.md) · [模型映射与 Models 控制台](docs/14-model-mapping.md) · [Model Routes](docs/18-model-routes.md) · [模型参考价格规则](docs/16-model-pricing.md) · [节假日日历](docs/17-holiday-calendar.md) · [异步操作与一次性通知](docs/09-console-async-actions.md) |
 | 可观测性 | [访问日志](docs/04-access-logging.md) · [网关连接诊断](docs/08-gateway-observability.md) · [统一遥测](docs/10-shared-telemetry.md) |
 | 控制台实时更新 | [共享 WebSocket 设计](docs/32-console-shard-connections-design.md) · [Shard connections 任务](docs/33-console-shard-connections-tasks.md) |
-| 工程维护 | [模块职责整理](docs/15-module-structure.md) |
+| 工程维护 | [模块职责整理](docs/15-module-structure.md) · [Toasty 0.11.0 存储优化](docs/15-module-structure.md#toasty-0110-存储优化) |

@@ -267,6 +267,27 @@ async fn find(executor: &mut dyn Executor, id: i64) -> StoreResult<Provider> {
         .ok_or(StoreError::NotFound)
 }
 
+async fn load_providers(
+    executor: &mut dyn Executor,
+    ids: impl IntoIterator<Item = i64>,
+) -> StoreResult<HashMap<i64, Provider>> {
+    let ids: HashSet<_> = ids.into_iter().collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(Provider::all()
+        .filter(
+            Provider::fields()
+                .id()
+                .in_list(ids.into_iter().collect::<Vec<_>>()),
+        )
+        .exec(executor)
+        .await?
+        .into_iter()
+        .map(|provider| (provider.id, provider))
+        .collect())
+}
+
 async fn find_mapping(executor: &mut dyn Executor, id: i64) -> StoreResult<ModelMapping> {
     ModelMapping::filter_by_id(id)
         .first()
@@ -348,10 +369,11 @@ async fn check_unique_alias(
     own_id: Option<i64>,
 ) -> StoreResult<()> {
     if let Some(existing) = ModelMapping::filter_by_alias(alias)
+        .select(ModelMapping::fields().id())
         .first()
         .exec(executor)
         .await?
-        && Some(existing.id) != own_id
+        && Some(existing) != own_id
     {
         return Err(StoreError::Conflict("模型标识已存在".into()));
     }
@@ -371,10 +393,11 @@ async fn check_unique_name(
     own_id: Option<i64>,
 ) -> StoreResult<()> {
     if let Some(existing) = Provider::filter_by_name(name)
+        .select(Provider::fields().id())
         .first()
         .exec(executor)
         .await?
-        && Some(existing.id) != own_id
+        && Some(existing) != own_id
     {
         return Err(StoreError::Conflict(
             "已存在同名 Provider，请使用其他名称".into(),

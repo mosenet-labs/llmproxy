@@ -11,7 +11,8 @@ pub(crate) struct SubscriptionNode {
     pub provider_name: Option<String>,
     pub config_version: u64,
     pub backend: String,
-    pub models_json: String,
+    #[column(type = text)]
+    pub models_json: toasty::Json<Vec<String>>,
     pub concurrency: u64,
     pub encrypted_node_key: String,
     pub enabled: bool,
@@ -64,8 +65,9 @@ pub(crate) struct RouteBinding {
 #[derive(toasty::Model)]
 #[table = "model_mappings"]
 pub(crate) struct ModelMapping {
-    /// 类型化思考配置的序列化文本；空值兼容旧模型。
-    pub thinking_json: Option<String>,
+    /// 沿用 TEXT 存储和 SQL NULL，兼容旧模型。
+    #[column(type = text)]
+    pub thinking_json: Option<toasty::Json<llmproxy_core::thinking::Config>>,
     #[key]
     #[auto]
     pub id: i64,
@@ -125,7 +127,8 @@ pub(crate) struct ModelPricePlan {
     pub recorded_at: i64,
     pub effective_at: Option<i64>,
     pub is_current: bool,
-    pub schedule_json: Option<String>,
+    #[column(type = text)]
+    pub schedule_json: Option<toasty::Json<crate::PriceSchedule>>,
 }
 
 #[derive(toasty::Model)]
@@ -138,7 +141,8 @@ pub(crate) struct ModelPriceRule {
     pub item_code: String,
     pub unit_code: String,
     pub unit_size: i64,
-    pub conditions_json: String,
+    #[column(type = text)]
+    pub conditions_json: toasty::Json<crate::PriceConditions>,
     pub unit_price: String,
 }
 
@@ -225,10 +229,8 @@ impl ModelMapping {
     pub fn thinking(&self) -> StoreResult<llmproxy_core::thinking::Config> {
         let config: llmproxy_core::thinking::Config = self
             .thinking_json
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|_| StoreError::Internal)?
+            .as_ref()
+            .map(|config| config.0.clone())
             .unwrap_or_default();
         config
             .validate(&self.protocols())

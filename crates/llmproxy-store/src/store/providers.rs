@@ -95,15 +95,21 @@ impl ProviderStore {
         check_version(&provider, version)?;
         check_unique_name(&mut tx, &input.name, Some(id)).await?;
         if ModelMapping::all()
+            .filter(ModelMapping::fields().provider_id().eq(id))
+            .select((
+                ModelMapping::fields().openai_chat(),
+                ModelMapping::fields().openai_responses(),
+                ModelMapping::fields().anthropic_messages(),
+                ModelMapping::fields().gemini(),
+            ))
             .exec(&mut tx)
             .await?
             .iter()
-            .any(|mapping| {
-                mapping.provider_id == id
-                    && mapping
-                        .protocols()
-                        .into_iter()
-                        .any(|protocol| input.paths.get(protocol).is_none())
+            .any(|(chat, responses, messages, gemini)| {
+                (*chat && input.paths.openai_chat.is_none())
+                    || (*responses && input.paths.openai_responses.is_none())
+                    || (*messages && input.paths.anthropic_messages.is_none())
+                    || (*gemini && input.paths.gemini.is_none())
             })
         {
             return Err(StoreError::Conflict(
@@ -229,10 +235,12 @@ impl ProviderStore {
         let provider = find(&mut tx, id).await?;
         check_version(&provider, version)?;
         if ModelMapping::all()
+            .filter(ModelMapping::fields().provider_id().eq(id))
+            .select(ModelMapping::fields().id())
+            .first()
             .exec(&mut tx)
             .await?
-            .iter()
-            .any(|mapping| mapping.provider_id == id)
+            .is_some()
         {
             return Err(StoreError::Conflict(
                 "此 Provider 仍有模型映射，请先删除模型".into(),

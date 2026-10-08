@@ -1,4 +1,5 @@
 mod history;
+mod orm;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -552,6 +553,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
         reopened.get(messages.id).await.unwrap().messages_auth,
         MessagesAuth::Bearer
     );
+    orm::exercise(&store, url).await;
 }
 
 /// SQLite 和独立 PG schema 共用验收：跨连接、作用域、并发保存和错误主密钥。

@@ -1,11 +1,13 @@
 use super::*;
 
 async fn check_route_name_available(tx: &mut Transaction<'_>, name: &str) -> StoreResult<()> {
-    if !ModelRouteRow::all()
+    if ModelRouteRow::all()
         .filter(ModelRouteRow::fields().name().eq(name))
+        .select(ModelRouteRow::fields().id())
+        .first()
         .exec(tx)
         .await?
-        .is_empty()
+        .is_some()
     {
         return Err(StoreError::Conflict("模型标识与已有路由名称重复".into()));
     }
@@ -21,10 +23,16 @@ impl ProviderStore {
             .order_by(ModelMapping::fields().id().asc())
             .exec(&mut tx)
             .await?;
+        let providers =
+            load_providers(&mut tx, mappings.iter().map(|mapping| mapping.provider_id)).await?;
         let mut result = Vec::with_capacity(mappings.len());
         for mapping in mappings {
-            let provider = find(&mut tx, mapping.provider_id).await?;
-            result.push(mapping_view(&mapping, &provider)?);
+            result.push(mapping_view(
+                &mapping,
+                providers
+                    .get(&mapping.provider_id)
+                    .ok_or(StoreError::NotFound)?,
+            )?);
         }
         tx.commit().await?;
         Ok(result)
@@ -53,9 +61,7 @@ impl ProviderStore {
         let upstream_model_id = input.upstream_model_id.clone();
         let catalog_price = input.reference_price.clone();
         let mapping = ModelMapping::create()
-            .thinking_json(Some(
-                serde_json::to_string(&input.thinking).map_err(|_| StoreError::Internal)?,
-            ))
+            .thinking_json(toasty::Json(&input.thinking))
             .alias(input.alias)
             .provider_id(input.provider_id)
             .upstream_model_id(input.upstream_model_id)
@@ -132,9 +138,7 @@ impl ProviderStore {
             let upstream_model_id = input.upstream_model_id.clone();
             let catalog_price = input.reference_price.clone();
             let mapping = ModelMapping::create()
-                .thinking_json(Some(
-                    serde_json::to_string(&input.thinking).map_err(|_| StoreError::Internal)?,
-                ))
+                .thinking_json(toasty::Json(&input.thinking))
                 .alias(input.alias)
                 .provider_id(provider_id)
                 .upstream_model_id(input.upstream_model_id)
@@ -206,9 +210,7 @@ impl ProviderStore {
         }
         mapping
             .update()
-            .thinking_json(Some(
-                serde_json::to_string(&input.thinking).map_err(|_| StoreError::Internal)?,
-            ))
+            .thinking_json(toasty::Json(&input.thinking))
             .alias(input.alias)
             .provider_id(input.provider_id)
             .upstream_model_id(input.upstream_model_id)
@@ -244,9 +246,11 @@ impl ProviderStore {
         check_mapping_version(&mapping, version)?;
         let references = ModelRouteTargetRow::all()
             .filter(ModelRouteTargetRow::fields().model_id().eq(id))
+            .select(ModelRouteTargetRow::fields().id())
+            .first()
             .exec(&mut tx)
             .await?;
-        if !references.is_empty() {
+        if references.is_some() {
             return Err(StoreError::Conflict(
                 "此模型仍被模型路由使用，请先从路由中移除".into(),
             ));
@@ -262,19 +266,28 @@ impl ProviderStore {
         self.bindings(&mut tx, false).await?;
         let mut routes = Vec::new();
         let mut route_names = HashSet::new();
+        let mut target_groups = routes::route_target_groups(&mut tx).await?;
+        let mapping_rows = ModelMapping::all().exec(&mut tx).await?;
+        let providers = load_providers(
+            &mut tx,
+            mapping_rows.iter().map(|mapping| mapping.provider_id),
+        )
+        .await?;
+        let mappings: HashMap<_, _> = mapping_rows
+            .iter()
+            .map(|mapping| (mapping.id, mapping))
+            .collect();
         for route in ModelRouteRow::all().exec(&mut tx).await? {
             let protocol = routes::protocol_from_str(&route.protocol)?;
             let provider_protocol = routes::protocol_from_str(&route.provider_protocol)?;
             route_names.insert((route.name.clone(), protocol));
-            let targets = ModelRouteTargetRow::all()
-                .filter(ModelRouteTargetRow::fields().route_id().eq(route.id))
-                .order_by(ModelRouteTargetRow::fields().position().asc())
-                .exec(&mut tx)
-                .await?;
+            let targets = target_groups.remove(&route.id).unwrap_or_default();
             let mut candidates = Vec::with_capacity(targets.len());
-            for target in targets {
-                let mapping = find_mapping(&mut tx, target.model_id).await?;
-                let provider = find(&mut tx, mapping.provider_id).await?;
+            for target in &targets {
+                let mapping = mappings.get(&target.model_id).ok_or(StoreError::NotFound)?;
+                let provider = providers
+                    .get(&mapping.provider_id)
+                    .ok_or(StoreError::NotFound)?;
                 candidates.push((target, mapping, provider));
             }
             let selected = candidates.iter().find(|(target, mapping, provider)| {
@@ -312,8 +325,10 @@ impl ProviderStore {
                 protocol,
             });
         }
-        for mapping in ModelMapping::all().exec(&mut tx).await? {
-            let provider = find(&mut tx, mapping.provider_id).await?;
+        for mapping in &mapping_rows {
+            let provider = providers
+                .get(&mapping.provider_id)
+                .ok_or(StoreError::NotFound)?;
             for protocol in mapping.protocols() {
                 if route_names.contains(&(mapping.alias.clone(), protocol)) {
                     continue;
@@ -321,7 +336,7 @@ impl ProviderStore {
                 let resolved = if provider.enabled {
                     Some(
                         self.active_provider(
-                            &provider,
+                            provider,
                             protocol,
                             provider
                                 .paths()

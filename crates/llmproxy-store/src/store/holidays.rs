@@ -28,13 +28,11 @@ impl ProviderStore {
         let count = dates.len();
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
-        for row in HolidayDateRow::all()
+        HolidayDateRow::all()
             .filter(HolidayDateRow::fields().year().eq(year))
+            .delete()
             .exec(&mut tx)
-            .await?
-        {
-            row.delete().exec(&mut tx).await?;
-        }
+            .await?;
         let imported_at = now()?;
         for item in dates {
             HolidayDateRow::create()
