@@ -12,14 +12,24 @@ use topcoat::{
     view::{View, view},
 };
 
+use topcoat_ant_design::{UiLanguage, popconfirm, popconfirm_trigger_attributes};
+const TEXT_LINK: &str =
+    "border-0 bg-transparent p-0 text-sm whitespace-nowrap text-primary hover:text-primary-hover";
+
+#[derive(Deserialize)]
+pub struct NodeQuery {
+    error: Option<String>,
+}
+
 #[page]
-pub async fn nodes(cx: &Cx) -> Result<impl View> {
+pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
     let nodes = state
         .store
         .subscription_nodes()
         .await
         .map_err(|error| bad_request(error.to_string()))?;
+    let providers = state.store.list().await?;
     let presence = state.subscriptions.lock().unwrap().clone();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -35,6 +45,14 @@ pub async fn nodes(cx: &Cx) -> Result<impl View> {
         })
         .count();
     Ok(view! {
+        if let Some(error) = &query.error {
+            <p
+                class="rounded border border-red-200 bg-red-50 p-4 text-red-700"
+                role="alert"
+            >
+                (error)
+            </p>
+        }
         <div class=(super::providers::PAGE_HEADING)>
             <div>
                 <h1>"订阅节点"</h1>
@@ -92,7 +110,12 @@ pub async fn nodes(cx: &Cx) -> Result<impl View> {
                     for node in &nodes {
                         <tr>
                             <td>
-                                <form method="post" action="/ui/subscriptions/name">
+                                <strong>(node.name.clone())</strong>
+                                <form
+                                    class="mt-2 flex items-center gap-3"
+                                    method="post"
+                                    action="/ui/subscriptions/name"
+                                >
                                     <input
                                         type="hidden"
                                         name="csrf"
@@ -111,14 +134,12 @@ pub async fn nodes(cx: &Cx) -> Result<impl View> {
                                     <input
                                         class="rounded border border-border px-2 py-1 mr-2"
                                         name="name"
-                                        value=(node.name.clone())
-                                        required=(true)
+                                        value=(node.provider_name.clone().unwrap_or_default())
+                                        placeholder="Provider 名称（可选）"
                                         maxlength="128"
-                                        aria-label="节点名称"
+                                        aria-label="Provider 名称"
                                     >
-                                    <button class=(super::providers::BUTTON) type="submit">
-                                        "保存名称"
-                                    </button>
+                                    <button class=(TEXT_LINK) type="submit">"保存"</button>
                                 </form>
                                 <p
                                     class="mt-1 text-xs text-muted"
@@ -158,42 +179,21 @@ pub async fn nodes(cx: &Cx) -> Result<impl View> {
                             <td>
                                 (node
                                     .provider_id
-                                    .map(|id| id.to_string())
+                                    .and_then(
+                                        |id| providers.iter().find(|provider| provider.id == id),
+                                    )
+                                    .map(|provider| provider.name.clone())
                                     .unwrap_or_else(|| "未关联".into()))
                             </td>
-                            <td>
-                                <form method="post" action="/ui/subscriptions/enabled">
-                                    <input
-                                        type="hidden"
-                                        name="csrf"
-                                        value=(state.csrf.clone())
-                                    >
-                                    <input
-                                        type="hidden"
-                                        name="node_id"
-                                        value=(node.node_id.clone())
-                                    >
-                                    <input
-                                        type="hidden"
-                                        name="version"
-                                        value=(node.version.to_string())
-                                    >
-                                    <input
-                                        type="hidden"
-                                        name="enabled"
-                                        value=((!node.enabled).to_string())
-                                    >
-                                    <button
-                                        class=(super::providers::BUTTON)
-                                        type="submit"
-                                        disabled=(!configured)
-                                    >
-                                        (if node.enabled { "停用" } else { "允许加入" })
-                                    </button>
-                                </form>
+                            <td class="whitespace-nowrap [&>a]:ml-4">
+                                node_action(
+                                    node: node,
+                                    csrf: &state.csrf,
+                                    configured: configured
+                                )
                                 if node.enabled {
                                     <a
-                                        class=(super::providers::BUTTON)
+                                        class=(TEXT_LINK)
                                         href=(format!(
                                             "/ui/subscriptions/models?node_id={}",
                                             node.node_id,
@@ -239,11 +239,13 @@ pub async fn set_enabled(
         port: state.port,
         key,
     };
-    state
+    let result = state
         .store
         .set_subscription_enabled(&input.node_id, input.version, input.enabled, &target)
-        .await
-        .map_err(|error| bad_request(error.to_string()))?;
+        .await;
+    if let Err(error) = result {
+        return Ok(node_error(error));
+    }
     if input.enabled {
         Ok(see_other(format!(
             "/ui/subscriptions/models?node_id={}",
@@ -268,11 +270,13 @@ pub async fn rename(
     Form(input): Form<Rename>,
 ) -> Result<topcoat::router::error::SeeOther> {
     check_csrf(cx, &input.csrf)?;
-    app_context::<AppState>(cx)
+    let result = app_context::<AppState>(cx)
         .store
         .rename_subscription(&input.node_id, input.version, &input.name)
-        .await
-        .map_err(|error| bad_request(error.to_string()))?;
+        .await;
+    if let Err(error) = result {
+        return Ok(node_error(error));
+    }
     Ok(see_other("/ui/subscriptions"))
 }
 
@@ -436,4 +440,52 @@ mod tests {
             Form::<Vec<(String, String)>>::from_bytes(b"csrf=test&node_id=node").unwrap();
         assert!(import_fields(fields).models.is_empty());
     }
+}
+
+fn node_error(error: llmproxy_store::StoreError) -> topcoat::router::error::SeeOther {
+    let query: String = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("error", &error.to_string())
+        .finish();
+    see_other(format!("/ui/subscriptions?{query}"))
+}
+
+#[topcoat::view::component]
+async fn node_action(
+    cx: &Cx,
+    node: &llmproxy_store::SubscriptionNodeView,
+    csrf: &str,
+    configured: bool,
+) -> Result<impl View> {
+    let id = format!("disable-node-{}", node.node_id);
+    let trigger = popconfirm_trigger_attributes(cx, &id);
+    let title = format!("确认停用「{}」？", node.name);
+    Ok(view! {
+        if node.enabled {
+            <button class=(TEXT_LINK) type="button" (trigger)>"停用"</button>
+            popconfirm(
+                id: id.as_str(),
+                title: title.as_str(),
+                language: UiLanguage::ChineseSimplified,
+                <form method="post" action="/ui/subscriptions/enabled">
+                    <input type="hidden" name="csrf" value=(csrf)>
+                    <input type="hidden" name="node_id" value=(&node.node_id)>
+                    <input type="hidden" name="version" value=(node.version)>
+                    <input type="hidden" name="enabled" value="false">
+                    <button class="gr-button gr-button-danger" type="submit">
+                        "确认停用"
+                    </button>
+                </form>
+            )
+        } else {
+            <form class="inline-block" method="post" action="/ui/subscriptions/enabled">
+                <input type="hidden" name="csrf" value=(csrf)>
+                <input type="hidden" name="node_id" value=(&node.node_id)>
+                <input type="hidden" name="version" value=(node.version)>
+                <input type="hidden" name="enabled" value="true">
+                <button class=(TEXT_LINK) type="submit" disabled=(!configured)>
+                    "允许加入"
+                </button>
+            </form>
+        }
+    })
 }

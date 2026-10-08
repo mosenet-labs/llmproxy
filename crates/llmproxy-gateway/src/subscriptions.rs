@@ -229,11 +229,13 @@ impl Hub {
                     .await
                 }
                 ("poll", "GET", []) => {
-                    let mut receiver = connection.receiver.lock().await;
+                    // 排队获取接收锁也计入长轮询期限，避免并发轮询串行累加超时。
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
                     let work = loop {
                         let work = tokio::select! { _=connection.closed.cancelled()=>None,
-                        result=tokio::time::timeout_at(deadline,receiver.recv())=>result.ok().flatten() };
+                        result=tokio::time::timeout_at(deadline, async {
+                            connection.receiver.lock().await.recv().await
+                        })=>result.ok().flatten() };
                         if work.as_ref().is_none_or(|work| {
                             connection
                                 .pending

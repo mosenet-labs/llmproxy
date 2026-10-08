@@ -8,6 +8,8 @@ pub(crate) struct SubscriptionNode {
     #[key]
     pub node_id: String,
     pub name: String,
+    pub provider_name: Option<String>,
+    pub config_version: u64,
     pub backend: String,
     pub models_json: String,
     pub concurrency: u64,

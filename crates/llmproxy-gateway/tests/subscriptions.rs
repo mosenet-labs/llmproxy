@@ -185,6 +185,43 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
             .name,
         "office-node"
     );
+    let failed_edit = client
+        .post(format!("{base}/ui/subscriptions/name"))
+        .header("origin", &base)
+        .form(&[
+            ("csrf", csrf),
+            ("node_id", node.node_id.as_str()),
+            ("version", &enabled_node.version.to_string()),
+            ("name", "stale-edit"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed_edit.status(), 200);
+    assert!(failed_edit.url().path() == "/ui/subscriptions");
+    assert!(failed_edit.text().await.unwrap().contains("节点配置已变化"));
+    // 四个空闲轮询共享队列，所有请求都应在一个长轮询周期内结束。
+    let started = std::time::Instant::now();
+    let mut idle_polls = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let client = client.clone();
+        let url = format!("{base}/agents/v1/node/{}/poll", node.node_id);
+        let token = lease.token.clone();
+        idle_polls.spawn(async move {
+            client
+                .get(url)
+                .bearer_auth(token)
+                .timeout(Duration::from_secs(25))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        });
+    }
+    while let Some(result) = idle_polls.join_next().await {
+        assert_eq!(result.unwrap(), 204);
+    }
+    assert!(started.elapsed() < Duration::from_secs(25));
     let sending_client = client.clone();
     let sending_relay = relay.clone();
     let sending_key = relay_key.clone();
@@ -309,7 +346,10 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
         .text()
         .await
         .unwrap();
+    assert!(page.contains("personal node"));
     assert!(page.contains("office-node"));
+    assert!(page.contains("确认停用"));
+    assert!(!page.contains("保存名称"));
     assert!(!page.contains(&registration.node_key));
     assert!(!page.contains(&relay_key));
     assert_eq!(

@@ -67,7 +67,7 @@ async fn exercise(store: &ProviderStore) {
     );
     assert!(
         store
-            .rename_subscription(&node.node_id, node.version, " ")
+            .rename_subscription(&node.node_id, node.version, &"x".repeat(129))
             .await
             .is_err()
     );
@@ -75,15 +75,20 @@ async fn exercise(store: &ProviderStore) {
     registration.models = vec!["model-b".into()];
     let reconnect = store.register_subscription(&registration).await.unwrap();
     assert!(reconnect.enabled);
-    assert_eq!(reconnect.name, "edited");
+    assert_eq!(reconnect.name, "personal");
+    assert_eq!(reconnect.provider_name.as_deref(), Some("edited"));
+    assert_eq!(reconnect.version, node.version);
     assert_eq!(reconnect.provider_id, node.provider_id);
     assert_eq!(store.list().await.unwrap().len(), 1);
     registration.node_key = "c".repeat(64);
     assert!(store.register_subscription(&registration).await.is_err());
-    assert_eq!(store.subscription_nodes().await.unwrap()[0].name, "edited");
+    assert_eq!(
+        store.subscription_nodes().await.unwrap()[0].name,
+        "personal"
+    );
     assert!(
         store
-            .set_subscription_enabled(&node.node_id, node.version, false, &target)
+            .set_subscription_enabled(&node.node_id, node.version - 1, false, &target)
             .await
             .is_err()
     );
@@ -92,6 +97,41 @@ async fn exercise(store: &ProviderStore) {
         .await
         .unwrap();
     assert!(!store.get(node.provider_id.unwrap()).await.unwrap().enabled);
+    registration.node_id = "e".repeat(64);
+    registration.name = "office".into();
+    let other = store.register_subscription(&registration).await.unwrap();
+    store
+        .rename_subscription(&other.node_id, other.version, "edited")
+        .await
+        .unwrap();
+    let other = store.register_subscription(&registration).await.unwrap();
+    store
+        .set_subscription_enabled(&other.node_id, other.version, true, &target)
+        .await
+        .unwrap();
+    let other = store.register_subscription(&registration).await.unwrap();
+    assert_eq!(
+        store.get(other.provider_id.unwrap()).await.unwrap().name,
+        "office"
+    );
+    registration.node_id = "f".repeat(64);
+    registration.name = "edited".into();
+    let conflict = store.register_subscription(&registration).await.unwrap();
+    assert!(
+        store
+            .rename_subscription(&conflict.node_id, conflict.version, "office")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .set_subscription_enabled(&conflict.node_id, conflict.version, true, &target)
+            .await
+            .is_err()
+    );
+    let conflict = store.register_subscription(&registration).await.unwrap();
+    assert!(conflict.provider_name.is_none());
+    assert!(!conflict.enabled);
     registration.node_id = "d".repeat(64);
     registration.name.clear();
     let default_node = store.register_subscription(&registration).await.unwrap();

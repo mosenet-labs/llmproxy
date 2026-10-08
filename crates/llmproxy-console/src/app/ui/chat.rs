@@ -1154,8 +1154,15 @@ pub async fn chat_session_activity(
     })
 }
 
-// 固定三项依次为会话 ID、模型 ID、协议；数组兼容 Topcoat 的借用序列化。
-type HistoryOutcome = std::result::Result<Option<(String, String, String)>, String>;
+#[topcoat::runtime::record]
+#[derive(Clone, Debug)]
+pub struct ChatSelectionRecord {
+    pub session_id: String,
+    pub model_id: String,
+    pub protocol: String,
+}
+
+type HistoryOutcome = std::result::Result<Option<ChatSelectionRecord>, String>;
 
 /// 菜单和删除确认复用同一操作流程，失败时保留当前会话和草稿并解除忙碌状态。
 fn history_action_attributes(
@@ -1192,10 +1199,10 @@ fn history_action_attributes(
                 let next = result.unwrap();
                 if next.is_some() {
                     let next = next.unwrap();
-                    session.set(next.0);
+                    session.set(next.session_id);
                     generating.set(false);
-                    model_id.set(next.1);
-                    protocol.set(next.2);
+                    model_id.set(next.model_id);
+                    protocol.set(next.protocol);
                     draft.set("".to_owned());
                     session_archived.set(false);
                     archived_only.set(false);
@@ -1258,12 +1265,10 @@ pub async fn change_chat_history(
         .change_history(&current, &target, action)
         .await
         .map(|next| {
-            next.map(|(id, selection)| {
-                (
-                    id,
-                    selection.model_id,
-                    selection.protocol.as_str().to_owned(),
-                )
+            next.map(|(id, selection)| ChatSelectionRecord {
+                session_id: id,
+                model_id: selection.model_id,
+                protocol: selection.protocol.as_str().to_owned(),
             })
         })
         .map_err(|error| error.to_string()))

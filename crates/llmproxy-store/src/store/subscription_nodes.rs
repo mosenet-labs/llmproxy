@@ -5,28 +5,31 @@ use llmproxy_core::subscription::Registration;
 async fn provider_name(
     tx: &mut dyn Executor,
     name: &str,
-    node_id: &str,
+    custom: Option<&str>,
     own_id: Option<i64>,
 ) -> StoreResult<String> {
-    let name = match check_unique_name(tx, name, own_id).await {
-        Ok(()) => name.to_owned(),
-        Err(StoreError::Conflict(_)) => format!("{}-{}", name, &node_id[..6]),
-        Err(error) => return Err(error),
-    };
-    check_unique_name(tx, &name, own_id).await?;
-    Ok(name)
+    if let Some(custom) = custom {
+        match check_unique_name(tx, custom, own_id).await {
+            Ok(()) => return Ok(custom.to_owned()),
+            Err(StoreError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    check_unique_name(tx, name, own_id).await?;
+    Ok(name.to_owned())
 }
 
 fn view(row: SubscriptionNode) -> StoreResult<SubscriptionNodeView> {
     Ok(SubscriptionNodeView {
         node_id: row.node_id,
         name: row.name,
+        provider_name: row.provider_name,
         backend: row.backend,
         models: serde_json::from_str(&row.models_json).map_err(|_| StoreError::Internal)?,
         concurrency: row.concurrency,
         enabled: row.enabled,
         provider_id: row.provider_id,
-        version: row.version,
+        version: row.config_version,
     })
 }
 
@@ -102,6 +105,8 @@ impl ProviderStore {
                 } else {
                     registration.name.trim().to_owned()
                 })
+                .provider_name(None)
+                .config_version(0_u64)
                 .backend(&registration.backend)
                 .models_json(models)
                 .concurrency(registration.concurrency as u64)
@@ -124,8 +129,10 @@ impl ProviderStore {
         name: &str,
     ) -> StoreResult<()> {
         let name = name.trim();
-        if name.is_empty() || name.len() > 128 {
-            return Err(StoreError::Validation("名称须为 1–128 字节".into()));
+        if name.len() > 128 {
+            return Err(StoreError::Validation(
+                "Provider 名称最多 128 字节，可留空".into(),
+            ));
         }
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
@@ -135,11 +142,12 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        if node.version != version {
+        if node.config_version != version {
             return Err(StoreError::Conflict("节点配置已变化，请刷新".into()));
         }
+        let custom = (!name.is_empty()).then_some(name);
+        let display_name = provider_name(&mut tx, &node.name, custom, node.provider_id).await?;
         if let Some(id) = node.provider_id {
-            let display_name = provider_name(&mut tx, name, node_id, Some(id)).await?;
             let mut provider = find(&mut tx, id).await?;
             provider
                 .update()
@@ -148,8 +156,10 @@ impl ProviderStore {
                 .exec(&mut tx)
                 .await?;
         }
+        let config_version = node.config_version + 1;
         node.update()
-            .name(name)
+            .provider_name(custom.map(str::to_owned))
+            .config_version(config_version)
             .updated_at(now()?)
             .exec(&mut tx)
             .await?;
@@ -184,11 +194,12 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        if node.version != version {
+        if node.config_version != version {
             return Err(StoreError::Conflict("节点配置已变化，请刷新".into()));
         }
         let provider_id = if let Some(id) = node.provider_id {
-            let display_name = provider_name(&mut tx, &node.name, node_id, Some(id)).await?;
+            let display_name =
+                provider_name(&mut tx, &node.name, node.provider_name.as_deref(), Some(id)).await?;
             let mut provider = find(&mut tx, id).await?;
             provider
                 .update()
@@ -209,7 +220,8 @@ impl ProviderStore {
             }
             Some(id)
         } else if enabled {
-            let name = provider_name(&mut tx, &node.name, node_id, None).await?;
+            let name =
+                provider_name(&mut tx, &node.name, node.provider_name.as_deref(), None).await?;
             let provider = Provider::create()
                 .name(name)
                 .openai_chat_path(None)
@@ -236,7 +248,9 @@ impl ProviderStore {
         } else {
             None
         };
+        let config_version = node.config_version + 1;
         node.update()
+            .config_version(config_version)
             .enabled(enabled)
             .provider_id(provider_id)
             .updated_at(now()?)

@@ -171,6 +171,6 @@ python3 crates/llmproxy-subscription-agent/codex/verify_runtime.py \
 
 ### 节点名称与模型导入
 
-`--name` 为可选参数；首次注册未提供名称时，服务端使用 `node-` 加节点随机身份的 6 位短 hash，例如 `node-a83f2c`。名称可以在订阅节点页面编辑，并同步更新关联 Provider；agent 重连不会覆盖服务端名称。
+`--name` 为可选参数；首次注册未提供名称时，服务端使用 `node-` 加节点随机身份的 6 位短 hash，例如 `node-a83f2c`。原始名称保持不变。订阅节点页面可单独设置可选的 Provider 名称：优先使用该名称，未填写或被占用时尝试原始名称；两者都被占用时报错，不自动添加后缀。agent 重连不会覆盖 Provider 名称，也不会令编辑配置版本失效。
 
 `--models gpt-6-astra,gpt-6-sol,gpt-6-luna` 可以声明多个模型。允许节点加入服务后，页面查询该 Provider 的模型列表，勾选需要导入的模型。已关联的节点也可点击“导入模型”补充导入；已导入模型不会重复创建。模型导入后仍需配置 Model Routes。

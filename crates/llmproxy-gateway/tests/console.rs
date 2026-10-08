@@ -1105,12 +1105,12 @@ async fn exercise_http(database_url: &str) {
     assert!(models.contains("In: $0.15/M"));
     assert!(models.contains("Out: $0.60/M"));
     let price_rules = serde_json::json!([
-        {"item":"input","conditions":{"time_band":"peak"},"unit_price":"0.30"},
-        {"item":"input","conditions":{"time_band":"off_peak"},"unit_price":"0.15"},
-        {"item":"output","conditions":{"time_band":"peak"},"unit_price":"1.20"},
-        {"item":"output","conditions":{"time_band":"off_peak"},"unit_price":"0.60"}
+        {"t":"Record","v":{"item":"input","time_band":"peak","cache_ttl_seconds":"","prompt_tokens_min":"","prompt_tokens_max":"","unit_price":"0.30"}},
+        {"t":"Record","v":{"item":"input","time_band":"off_peak","cache_ttl_seconds":"","prompt_tokens_min":"","prompt_tokens_max":"","unit_price":"0.15"}},
+        {"t":"Record","v":{"item":"output","time_band":"peak","cache_ttl_seconds":"","prompt_tokens_min":"","prompt_tokens_max":"","unit_price":"1.20"}},
+        {"t":"Record","v":{"item":"output","time_band":"off_peak","cache_ttl_seconds":"","prompt_tokens_min":"","prompt_tokens_max":"","unit_price":"0.60"}}
     ]);
-    let windows = serde_json::json!([{"weekday":1,"start":"01:00","end":"04:00"}]);
+    let windows = serde_json::json!({"t":"Vec","bits":64,"v":[{"t":"Record","v":{"weekday":"1","start":"01:00","end":"04:00"}}]});
     let price_form = serde_json::json!([
         csrf,
         provider.id.to_string(),
@@ -1121,8 +1121,8 @@ async fn exercise_http(database_url: &str) {
         true,
         "UTC",
         false,
-        price_rules.to_string(),
-        windows.to_string()
+        serde_json::json!({"t":"Vec","bits":64,"v":price_rules}),
+        windows
     ]);
     let response = client
         .post(format!(
@@ -1144,7 +1144,7 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(plan.rules.len(), 4);
     assert!(!plan.schedule.as_ref().unwrap().china_holidays_off_peak);
     let preview = |date: &str, holiday_override: bool| {
-        serde_json::json!(["UTC", windows.to_string(), holiday_override, date])
+        serde_json::json!(["UTC", windows, holiday_override, date])
     };
     let response = client
         .post(format!(

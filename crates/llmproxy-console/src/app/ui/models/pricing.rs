@@ -6,6 +6,118 @@ use llmproxy_store::{
 };
 use rust_decimal::Decimal;
 
+#[topcoat::runtime::record]
+#[derive(Clone)]
+pub struct PriceRuleRecord {
+    pub item: String,
+    pub time_band: String,
+    pub cache_ttl_seconds: String,
+    pub prompt_tokens_min: String,
+    pub prompt_tokens_max: String,
+    pub unit_price: String,
+}
+
+impl From<PriceRule> for PriceRuleRecord {
+    fn from(rule: PriceRule) -> Self {
+        Self {
+            item: rule.item.as_str().to_owned(),
+            time_band: match rule.conditions.time_band {
+                Some(TimeBand::Peak) => "peak",
+                Some(TimeBand::OffPeak) => "off_peak",
+                None => "",
+            }
+            .to_owned(),
+            cache_ttl_seconds: rule
+                .conditions
+                .cache_ttl_seconds
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            prompt_tokens_min: rule
+                .conditions
+                .prompt_tokens_min
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            prompt_tokens_max: rule
+                .conditions
+                .prompt_tokens_max
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            unit_price: rule.unit_price,
+        }
+    }
+}
+
+impl TryFrom<PriceRuleRecord> for PriceRule {
+    type Error = StoreError;
+
+    fn try_from(rule: PriceRuleRecord) -> std::result::Result<Self, Self::Error> {
+        let invalid = || StoreError::Validation("价格规则格式无效".into());
+        Ok(Self {
+            item: match rule.item.as_str() {
+                "input" => PriceItem::Input,
+                "input_cache_write" => PriceItem::InputCacheWrite,
+                "input_cache_read" => PriceItem::InputCacheRead,
+                "output" => PriceItem::Output,
+                _ => return Err(invalid()),
+            },
+            conditions: PriceConditions {
+                time_band: match rule.time_band.as_str() {
+                    "" => None,
+                    "peak" => Some(TimeBand::Peak),
+                    "off_peak" => Some(TimeBand::OffPeak),
+                    _ => return Err(invalid()),
+                },
+                cache_ttl_seconds: (!rule.cache_ttl_seconds.is_empty())
+                    .then(|| rule.cache_ttl_seconds.parse())
+                    .transpose()
+                    .map_err(|_| invalid())?,
+                prompt_tokens_min: (!rule.prompt_tokens_min.is_empty())
+                    .then(|| rule.prompt_tokens_min.parse())
+                    .transpose()
+                    .map_err(|_| invalid())?,
+                prompt_tokens_max: (!rule.prompt_tokens_max.is_empty())
+                    .then(|| rule.prompt_tokens_max.parse())
+                    .transpose()
+                    .map_err(|_| invalid())?,
+            },
+            unit_price: rule.unit_price,
+        })
+    }
+}
+
+#[topcoat::runtime::record]
+#[derive(Clone)]
+pub struct PriceWindowRecord {
+    pub weekday: String,
+    pub start: String,
+    pub end: String,
+}
+
+impl From<WeeklyPeakWindow> for PriceWindowRecord {
+    fn from(window: WeeklyPeakWindow) -> Self {
+        Self {
+            weekday: window.weekday.to_string(),
+            start: window.start,
+            end: window.end,
+        }
+    }
+}
+
+impl TryFrom<PriceWindowRecord> for WeeklyPeakWindow {
+    type Error = StoreError;
+
+    fn try_from(window: PriceWindowRecord) -> std::result::Result<Self, Self::Error> {
+        Ok(Self {
+            weekday: window
+                .weekday
+                .parse()
+                .map_err(|_| StoreError::Validation("峰时窗口格式无效".into()))?,
+            start: window.start,
+            end: window.end,
+        })
+    }
+}
+
 pub(super) struct PriceEditor {
     open: Signal<bool>,
     busy: Signal<bool>,
@@ -24,8 +136,8 @@ pub(super) struct PriceEditor {
     timezone: Signal<String>,
     china_holidays_off_peak: Signal<bool>,
     matrix_mode: Signal<bool>,
-    rules_json: Signal<String>,
-    windows_json: Signal<String>,
+    rules_data: Signal<Vec<PriceRuleRecord>>,
+    windows_data: Signal<Vec<PriceWindowRecord>>,
     preview_at: Signal<String>,
     preview_result: Signal<String>,
     rules_revision: Signal<f64>,
@@ -52,8 +164,8 @@ impl PriceEditor {
             timezone: signal(cx, || "UTC".to_owned()),
             china_holidays_off_peak: signal(cx, || false),
             matrix_mode: signal(cx, || false),
-            rules_json: signal(cx, || "[]".to_owned()),
-            windows_json: signal(cx, || "[]".to_owned()),
+            rules_data: signal(cx, Vec::<PriceRuleRecord>::new),
+            windows_data: signal(cx, Vec::<PriceWindowRecord>::new),
             preview_at: signal(cx, current_china_time),
             preview_result: signal(cx, String::new),
             rules_revision: signal(cx, || 0.0),
@@ -289,12 +401,12 @@ pub(super) fn price_trigger(
         },
         |plan| plan.rules.clone(),
     );
-    let rules_json = serde_json::to_string(&rules).expect("price rules are serializable");
+    let rules_data: Vec<PriceRuleRecord> = rules.iter().cloned().map(Into::into).collect();
     let matrix_mode = matrix_rule_indices(&rules).is_some();
     let windows = plan
         .and_then(|plan| plan.schedule.as_ref())
         .map_or_else(Vec::new, |schedule| schedule.peak_windows.clone());
-    let windows_json = serde_json::to_string(&windows).expect("price windows are serializable");
+    let windows_data: Vec<PriceWindowRecord> = windows.into_iter().map(Into::into).collect();
     let preview_at = current_china_time();
     let PriceEditor {
         open,
@@ -314,8 +426,8 @@ pub(super) fn price_trigger(
         timezone: selected_timezone,
         china_holidays_off_peak: selected_holidays,
         matrix_mode: selected_matrix,
-        rules_json: selected_rules,
-        windows_json: selected_windows,
+        rules_data: selected_rules,
+        windows_data: selected_windows,
         preview_at: selected_preview_at,
         preview_result: selected_preview_result,
         rules_revision,
@@ -340,8 +452,8 @@ pub(super) fn price_trigger(
             selected_timezone.set(timezone.to_owned());
             selected_holidays.set(china_holidays_off_peak);
             selected_matrix.set(matrix_mode);
-            selected_rules.set(rules_json.to_owned());
-            selected_windows.set(windows_json.to_owned());
+            selected_rules.set(rules_data.clone());
+            selected_windows.set(windows_data.clone());
             selected_preview_at.set(preview_at.to_owned());
             selected_preview_result.set("".to_owned());
             rules_revision.increment();
@@ -354,31 +466,33 @@ pub(super) fn price_trigger(
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/add-price-rule")]
-pub async fn add_price_rule(json: String) -> Result<String> {
-    let mut rules: Vec<PriceRule> = serde_json::from_str(&json)?;
+pub async fn add_price_rule(mut rules: Vec<PriceRuleRecord>) -> Result<Vec<PriceRuleRecord>> {
     if rules.len() < 100 {
-        rules.push(blank_rule());
+        rules.push(blank_rule().into());
     }
-    Ok(serde_json::to_string(&rules)?)
+    Ok(rules)
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/remove-price-rule")]
-pub async fn remove_price_rule(json: String, index: usize) -> Result<String> {
-    let mut rules: Vec<PriceRule> = serde_json::from_str(&json)?;
+pub async fn remove_price_rule(
+    mut rules: Vec<PriceRuleRecord>,
+    index: usize,
+) -> Result<Vec<PriceRuleRecord>> {
     if index < rules.len() {
         rules.remove(index);
     }
-    Ok(serde_json::to_string(&rules)?)
+    Ok(rules)
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/add-price-window")]
-pub async fn add_price_window(json: String) -> Result<String> {
-    let mut windows: Vec<WeeklyPeakWindow> = serde_json::from_str(&json)?;
+pub async fn add_price_window(
+    mut windows: Vec<PriceWindowRecord>,
+) -> Result<Vec<PriceWindowRecord>> {
     if windows.len() < 100 {
         for weekday in 1..=7 {
             for (start, end) in [("09:00", "12:00"), ("14:00", "18:00")] {
                 let used = windows.iter().any(|window| {
-                    window.weekday == weekday
+                    window.weekday == weekday.to_string()
                         && if start == "09:00" {
                             window.start.as_str() < "12:00"
                         } else {
@@ -386,54 +500,56 @@ pub async fn add_price_window(json: String) -> Result<String> {
                         }
                 });
                 if !used {
-                    windows.push(WeeklyPeakWindow {
-                        weekday,
+                    windows.push(PriceWindowRecord {
+                        weekday: weekday.to_string(),
                         start: start.into(),
                         end: end.into(),
                     });
-                    return Ok(serde_json::to_string(&windows)?);
+                    return Ok(windows);
                 }
             }
         }
-        windows.push(WeeklyPeakWindow {
-            weekday: 1,
+        windows.push(PriceWindowRecord {
+            weekday: "1".into(),
             start: "00:00".into(),
             end: "01:00".into(),
         });
     }
-    Ok(serde_json::to_string(&windows)?)
+    Ok(windows)
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/remove-price-window")]
-pub async fn remove_price_window(json: String, index: usize) -> Result<String> {
-    let mut windows: Vec<WeeklyPeakWindow> = serde_json::from_str(&json)?;
+pub async fn remove_price_window(
+    mut windows: Vec<PriceWindowRecord>,
+    index: usize,
+) -> Result<Vec<PriceWindowRecord>> {
     if index < windows.len() {
         windows.remove(index);
     }
-    Ok(serde_json::to_string(&windows)?)
+    Ok(windows)
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/deepseek-peak-windows")]
-pub async fn deepseek_peak_windows() -> Result<String> {
+pub async fn deepseek_peak_windows() -> Result<Vec<PriceWindowRecord>> {
     let windows: Vec<_> = (1..=5)
         .flat_map(|weekday| {
             [("09:00", "12:00"), ("14:00", "18:00")]
                 .into_iter()
-                .map(move |(start, end)| WeeklyPeakWindow {
-                    weekday,
+                .map(move |(start, end)| PriceWindowRecord {
+                    weekday: weekday.to_string(),
                     start: start.into(),
                     end: end.into(),
                 })
         })
         .collect();
-    Ok(serde_json::to_string(&windows)?)
+    Ok(windows)
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/preview-price-band")]
 pub async fn preview_price_band(
     cx: &Cx,
     timezone: String,
-    windows_json: String,
+    windows_data: Vec<PriceWindowRecord>,
     china_holidays_off_peak: bool,
     preview_at: String,
 ) -> Result<Outcome> {
@@ -456,8 +572,10 @@ pub async fn preview_price_band(
         };
         let schedule = PriceSchedule {
             timezone,
-            peak_windows: serde_json::from_str(&windows_json)
-                .map_err(|_| StoreError::Validation("峰时窗口格式无效".into()))?,
+            peak_windows: windows_data
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<std::result::Result<Vec<WeeklyPeakWindow>, _>>()?,
             china_holidays_off_peak,
         };
         let band = resolve_time_band(
@@ -499,18 +617,22 @@ pub async fn save_price_plan(
     use_schedule: bool,
     timezone: String,
     china_holidays_off_peak: bool,
-    rules_json: String,
-    windows_json: String,
+    rules_data: Vec<PriceRuleRecord>,
+    windows_data: Vec<PriceWindowRecord>,
 ) -> Result<Outcome> {
     check_csrf(cx, &csrf)?;
     let result: std::result::Result<String, StoreError> = async {
         let provider_id = provider_id
             .parse::<i64>()
             .map_err(|_| StoreError::Validation("Provider ID 无效".into()))?;
-        let rules = serde_json::from_str::<Vec<PriceRule>>(&rules_json)
-            .map_err(|_| StoreError::Validation("价格规则格式无效".into()))?;
-        let windows = serde_json::from_str::<Vec<WeeklyPeakWindow>>(&windows_json)
-            .map_err(|_| StoreError::Validation("峰时窗口格式无效".into()))?;
+        let rules = rules_data
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<std::result::Result<Vec<PriceRule>, _>>()?;
+        let windows = windows_data
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<std::result::Result<Vec<WeeklyPeakWindow>, _>>()?;
         let store = &app_context::<AppState>(cx).store;
         let provider = store.get(provider_id).await?;
         let effective_at = if effective_at.is_empty() {
@@ -549,7 +671,7 @@ pub async fn save_price_plan(
 
 fn rule_field(
     cx: &Cx,
-    rules: &Signal<String>,
+    rules: &Signal<Vec<PriceRuleRecord>>,
     error: &Signal<String>,
     index: usize,
     field: &str,
@@ -559,7 +681,7 @@ fn rule_field(
         @input=$(|_event: Event| {
             let previous = rules.get();
             let next = raw!(
-                "(() => { const rows = JSON.parse(String(${rules}.get())); const value = String(${_event}.target.value.dehydrate()); const field = ${field}.dehydrate(); const row = rows[Number(${index}.toString())]; if (field === 'item' || field === 'unit_price') row[field] = value; else row.conditions[field] = value === '' ? null : (field === 'time_band' ? value : Number(value)); return cx.hydrate(JSON.stringify(rows)); })()",
+                "(() => { const payload = ${rules}.get().dehydrate(); const rows = payload.v; const value = String(${_event}.target.value.dehydrate()); const field = ${field}.dehydrate(); rows[Number(${index}.toString())].v[field] = value; return cx.hydrate(payload); })()",
                 previous,
             );
             rules.set(next);
@@ -570,7 +692,7 @@ fn rule_field(
 
 fn window_field(
     cx: &Cx,
-    windows: &Signal<String>,
+    windows: &Signal<Vec<PriceWindowRecord>>,
     error: &Signal<String>,
     preview_result: &Signal<String>,
     index: usize,
@@ -581,7 +703,7 @@ fn window_field(
         @input=$(|_event: Event| {
             let previous = windows.get();
             let next = raw!(
-                "(() => { const rows = JSON.parse(String(${windows}.get())); const field = ${field}.dehydrate(); const value = String(${_event}.target.value.dehydrate()); rows[Number(${index}.toString())][field] = field === 'weekday' ? Number(value) : value; return cx.hydrate(JSON.stringify(rows)); })()",
+                "(() => { const payload = ${windows}.get().dehydrate(); const rows = payload.v; const field = ${field}.dehydrate(); const value = String(${_event}.target.value.dehydrate()); rows[Number(${index}.toString())].v[field] = value; return cx.hydrate(payload); })()",
                 previous,
             );
             windows.set(next);
@@ -595,12 +717,16 @@ fn window_field(
 pub async fn price_rule_rows(
     cx: &Cx,
     revision: f64,
-    rules: Signal<String>,
+    rules: Signal<Vec<PriceRuleRecord>>,
     error: Signal<String>,
     rerender: Signal<f64>,
 ) -> Result<impl View> {
     let _ = revision;
-    let rows: Vec<PriceRule> = serde_json::from_str(&rules.get_untracked())?;
+    let rows: Vec<PriceRule> = rules
+        .get_untracked()
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<std::result::Result<_, _>>()?;
     let message = error.get_untracked();
     Ok(view! {
         <div class="overflow-x-auto rounded-md border border-border">
@@ -742,11 +868,15 @@ pub async fn price_rule_rows(
 pub async fn price_matrix_rows(
     cx: &Cx,
     revision: f64,
-    rules: Signal<String>,
+    rules: Signal<Vec<PriceRuleRecord>>,
     error: Signal<String>,
 ) -> Result<impl View> {
     let _ = revision;
-    let rows: Vec<PriceRule> = serde_json::from_str(&rules.get_untracked())?;
+    let rows: Vec<PriceRule> = rules
+        .get_untracked()
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<std::result::Result<_, _>>()?;
     let labels = matrix_rule_indices(&rows).map_or_else(Vec::new, |indices| {
         vec![
             ("输入 · 缓存命中", indices[0], indices[1]),
@@ -796,13 +926,17 @@ pub async fn price_matrix_rows(
 pub async fn price_peak_windows(
     cx: &Cx,
     revision: f64,
-    windows: Signal<String>,
+    windows: Signal<Vec<PriceWindowRecord>>,
     error: Signal<String>,
     preview_result: Signal<String>,
     rerender: Signal<f64>,
 ) -> Result<impl View> {
     let _ = revision;
-    let rows: Vec<WeeklyPeakWindow> = serde_json::from_str(&windows.get_untracked())?;
+    let rows: Vec<WeeklyPeakWindow> = windows
+        .get_untracked()
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<std::result::Result<_, _>>()?;
     let grouped = grouped_weekday_windows(&rows);
     Ok(view! {
         if let Some(days) = grouped {
@@ -997,8 +1131,8 @@ pub(super) async fn price_editor(
         timezone,
         china_holidays_off_peak,
         matrix_mode,
-        rules_json,
-        windows_json,
+        rules_data,
+        windows_data,
         preview_at,
         preview_result,
         rules_revision,
@@ -1017,9 +1151,15 @@ pub(super) async fn price_editor(
     };
     let mut output = blank_rule();
     output.item = PriceItem::Output;
-    let blank_rules_json = serde_json::to_string(&vec![blank_rule(), output])?;
-    let blank_matrix_json =
-        serde_json::to_string(&matrix_rules(std::array::from_fn(|_| String::new())))?;
+    let blank_rules_data: Vec<PriceRuleRecord> = vec![blank_rule(), output]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let blank_matrix_data: Vec<PriceRuleRecord> =
+        matrix_rules(std::array::from_fn(|_| String::new()))
+            .into_iter()
+            .map(Into::into)
+            .collect();
     let close = native_dialog_close_attributes(cx, "price-dialog");
     Ok(view! {
         native_dialog(
@@ -1049,8 +1189,8 @@ pub(super) async fn price_editor(
                         use_schedule.get(),
                         timezone.get(),
                         china_holidays_off_peak.get(),
-                        rules_json.get(),
-                        windows_json.get(),
+                        rules_data.get(),
+                        windows_data.get(),
                     ).await;
                     busy.set(false);
                     if result.is_ok() {
@@ -1161,7 +1301,7 @@ pub(super) async fn price_editor(
                             type="button"
                             :hidden=$(matrix_mode.get())
                             @click=$(async |_event: Event| {
-                                rules_json.set(add_price_rule(rules_json.get()).await);
+                                rules_data.set(add_price_rule(rules_data.get()).await);
                                 error.set("".to_owned());
                                 rules_revision.increment();
                             })
@@ -1172,7 +1312,7 @@ pub(super) async fn price_editor(
                     <div class="mt-3" :hidden=$(matrix_mode.get())>
                         price_rule_rows(
                             revision: $(rules_revision.get()),
-                            rules: rules_json.clone(),
+                            rules: rules_data.clone(),
                             error: error.clone(),
                             rerender: rules_revision.clone()
                         )
@@ -1186,7 +1326,7 @@ pub(super) async fn price_editor(
                             !use_schedule.get()
                         })
                         @click=$(|_event: Event| {
-                            rules_json.set(blank_matrix_json.to_owned());
+                            rules_data.set(blank_matrix_data.clone());
                             matrix_mode.set(true);
                             rules_revision.increment();
                             error.set("".to_owned());
@@ -1197,7 +1337,7 @@ pub(super) async fn price_editor(
                     <div class="mt-3" :hidden=$(!matrix_mode.get())>
                         price_matrix_rows(
                             revision: $(rules_revision.get()),
-                            rules: rules_json.clone(),
+                            rules: rules_data.clone(),
                             error: error.clone()
                         )
                     </div>
@@ -1221,12 +1361,15 @@ pub(super) async fn price_editor(
                                 class=(BUTTON)
                                 type="button"
                                 @click=$(async |_event: Event| {
-                                    windows_json.set(deepseek_peak_windows().await);
+                                    windows_data.set(deepseek_peak_windows().await);
                                     timezone.set("Asia/Shanghai".to_owned());
                                     china_holidays_off_peak.set(true);
                                     use_schedule.set(true);
-                                    if rules_json.get() == blank_rules_json {
-                                        rules_json.set(blank_matrix_json.to_owned());
+                                    if raw!(
+                                        "cx.hydrate(JSON.stringify(${rules_data}.get().dehydrate()) === JSON.stringify(${blank_rules_data}.dehydrate()))",
+                                        false,
+                                    ) {
+                                        rules_data.set(blank_matrix_data.clone());
                                         matrix_mode.set(true);
                                         rules_revision.increment();
                                     }
@@ -1297,7 +1440,7 @@ pub(super) async fn price_editor(
                                         class=(BUTTON)
                                         type="button"
                                         @click=$(async |_event: Event| {
-                                            windows_json.set(add_price_window(windows_json.get()).await);
+                                            windows_data.set(add_price_window(windows_data.get()).await);
                                             preview_result.set("".to_owned());
                                             error.set("".to_owned());
                                             windows_revision.increment();
@@ -1312,7 +1455,7 @@ pub(super) async fn price_editor(
                                 <div class="max-h-80 overflow-y-auto pr-1">
                                     price_peak_windows(
                                         revision: $(windows_revision.get()),
-                                        windows: windows_json.clone(),
+                                        windows: windows_data.clone(),
                                         error: error.clone(),
                                         preview_result: preview_result.clone(),
                                         rerender: windows_revision.clone()
@@ -1341,7 +1484,7 @@ pub(super) async fn price_editor(
                                         preview_result.set("判定中…".to_owned());
                                         let result = preview_price_band(
                                             timezone.get(),
-                                            windows_json.get(),
+                                            windows_data.get(),
                                             china_holidays_off_peak.get(),
                                             preview_at.get(),
                                         ).await;
@@ -1380,7 +1523,7 @@ pub(super) async fn price_editor(
                         type="submit"
                         :disabled=$(if busy.get() {
                             true
-                        } else if rules_json.get() == "[]" {
+                        } else if rules_data.get().is_empty() {
                             true
                         } else {
                             !error.get().is_empty()
@@ -1397,6 +1540,48 @@ pub(super) async fn price_editor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn price_records_preserve_conditions_and_reject_invalid_input() {
+        let rule = PriceRule {
+            item: PriceItem::InputCacheWrite,
+            conditions: PriceConditions {
+                time_band: Some(TimeBand::OffPeak),
+                cache_ttl_seconds: Some(300),
+                prompt_tokens_min: Some(100),
+                prompt_tokens_max: Some(u64::MAX),
+            },
+            unit_price: "0.000001".into(),
+        };
+        let record = PriceRuleRecord::from(rule.clone());
+        assert_eq!(PriceRule::try_from(record.clone()).unwrap(), rule);
+        let mut invalid = record.clone();
+        invalid.item = "unknown".into();
+        assert!(PriceRule::try_from(invalid).is_err());
+        let mut invalid = record.clone();
+        invalid.time_band = "unknown".into();
+        assert!(PriceRule::try_from(invalid).is_err());
+        let mut invalid = record;
+        invalid.prompt_tokens_max = "18446744073709551616".into();
+        assert!(PriceRule::try_from(invalid).is_err());
+        let window = WeeklyPeakWindow {
+            weekday: 7,
+            start: "09:00".into(),
+            end: "12:00".into(),
+        };
+        assert_eq!(
+            WeeklyPeakWindow::try_from(PriceWindowRecord::from(window.clone())).unwrap(),
+            window
+        );
+        assert!(
+            WeeklyPeakWindow::try_from(PriceWindowRecord {
+                weekday: "-1".into(),
+                start: "09:00".into(),
+                end: "12:00".into()
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn price_labels_use_currency_symbols_without_rounding() {

@@ -1,5 +1,14 @@
 use super::*;
 
+#[topcoat::runtime::record]
+#[derive(Clone)]
+pub struct ExistingModel {
+    pub id: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub alias: String,
+}
+
 pub(super) struct Editor {
     thinking_support: Signal<String>,
     thinking_mode: Signal<String>,
@@ -778,7 +787,7 @@ pub async fn model_draft(
     selected: Signal<String>,
     draft_aliases: Signal<Vec<(String, String)>>,
     bulk_alias_warning: Signal<String>,
-    existing_models: Vec<(String, String, String, String)>,
+    existing_models: Vec<ExistingModel>,
     search: Signal<String>,
     menu_open: Signal<bool>,
     manual_model_id: Signal<String>,
@@ -812,9 +821,7 @@ pub async fn model_draft(
         .filter(|model_id| {
             existing_models
                 .iter()
-                .any(|(_, saved_provider, saved_model, _)| {
-                    saved_provider == &provider_id.get() && saved_model == *model_id
-                })
+                .any(|saved| saved.provider_id == provider_id.get() && saved.model_id == **model_id)
         })
         .map(|model_id| format!("「{model_id}」"))
         .collect();
@@ -838,10 +845,7 @@ pub async fn model_draft(
                 || format!("{}/{}", provider_name.get(), model_id),
                 str::to_owned,
             );
-        if existing_models
-            .iter()
-            .any(|(_, _, _, saved)| saved == &alias)
-        {
+        if existing_models.iter().any(|saved| saved.alias == alias) {
             initial_alias_warning = format!("模型标识「{alias}」已存在，请修改后再导入");
             break;
         }
@@ -1034,7 +1038,7 @@ pub async fn model_draft(
                     $({
                         let _selected = selected.get();
                         raw!(
-                            "(() => { const saved = ${existing_models}.dehydrate().v; const selected = JSON.parse(String(${selected}.get())); const provider = String(${provider_id}.get()); const duplicates = selected.filter((modelId) => saved.some((record) => record[1] === provider && record[2] === modelId)); return duplicates.length ? '模型 ID ' + duplicates.map((modelId) => '「' + modelId + '」').join('、') + ' 已在当前 Provider 中导入；使用其他模型标识仍可继续。' : ''; })()",
+                            "(() => { const saved = ${existing_models}.dehydrate().v; const selected = JSON.parse(String(${selected}.get())); const provider = String(${provider_id}.get()); const duplicates = selected.filter((modelId) => saved.some((record) => record.v.provider_id === provider && record.v.model_id === modelId)); return duplicates.length ? '模型 ID ' + duplicates.map((modelId) => '「' + modelId + '」').join('、') + ' 已在当前 Provider 中导入；使用其他模型标识仍可继续。' : ''; })()",
                             initial_model_note.clone(),
                         )
                     })
@@ -1049,7 +1053,7 @@ pub async fn model_draft(
                 let _selected = selected.get();
                 let _aliases = draft_aliases.get();
                 raw!(
-                    "(() => { const saved = ${existing_models}.dehydrate().v; const selected = JSON.parse(String(${selected}.get())); const entries = new Map(${draft_aliases}.get().dehydrate().v); const provider = String(${provider_name}.get()); const seen = new Set(); const modelIds = new Set(); let warning = ''; for (const modelId of selected) { if (modelIds.has(modelId)) continue; modelIds.add(modelId); const current = String(entries.get(modelId) ?? '').trim() || provider + '/' + modelId; if (saved.some((record) => record[3] === current)) { warning = '模型标识「' + current + '」已存在，请修改后再导入'; break; } if (seen.has(current)) { warning = '本次导入的模型标识「' + current + '」重复'; break; } seen.add(current); } ${bulk_alias_warning}.set(cx.hydrate(warning)); return warning; })()",
+                    "(() => { const saved = ${existing_models}.dehydrate().v; const selected = JSON.parse(String(${selected}.get())); const entries = new Map(${draft_aliases}.get().dehydrate().v); const provider = String(${provider_name}.get()); const seen = new Set(); const modelIds = new Set(); let warning = ''; for (const modelId of selected) { if (modelIds.has(modelId)) continue; modelIds.add(modelId); const current = String(entries.get(modelId) ?? '').trim() || provider + '/' + modelId; if (saved.some((record) => record.v.alias === current)) { warning = '模型标识「' + current + '」已存在，请修改后再导入'; break; } if (seen.has(current)) { warning = '本次导入的模型标识「' + current + '」重复'; break; } seen.add(current); } ${bulk_alias_warning}.set(cx.hydrate(warning)); return warning; })()",
                     initial_alias_warning.clone(),
                 )
             })
@@ -1120,13 +1124,11 @@ pub(super) async fn model_editor(
     let probe_unavailable: Outcome = Err("探测请求失败，请重试".into());
     let existing_models: Vec<_> = all_models
         .iter()
-        .map(|model| {
-            (
-                model.id.to_string(),
-                model.provider_id.to_string(),
-                model.upstream_model_id.clone(),
-                model.alias.clone(),
-            )
+        .map(|model| ExistingModel {
+            id: model.id.to_string(),
+            provider_id: model.provider_id.to_string(),
+            model_id: model.upstream_model_id.clone(),
+            alias: model.alias.clone(),
         })
         .collect();
     Ok(view! {
@@ -1287,7 +1289,7 @@ pub(super) async fn model_editor(
                                 let _alias = alias.get();
                                 let _model_id = model_id.get();
                                 raw!(
-                                    "(() => { const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); if (!current) return ''; const ownId = String(${id}.get()); return ${existing_models}.dehydrate().v.some((record) => record[0] !== ownId && record[3] === current) ? '模型标识「' + current + '」已存在，请修改后再保存' : ''; })()",
+                                    "(() => { const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); if (!current) return ''; const ownId = String(${id}.get()); return ${existing_models}.dehydrate().v.some((record) => record.v.id !== ownId && record.v.alias === current) ? '模型标识「' + current + '」已存在，请修改后再保存' : ''; })()",
                                     String::new(),
                                 )
                             })
@@ -1488,7 +1490,7 @@ pub(super) async fn model_editor(
                             !bulk_alias_warning.get().is_empty()
                         } else {
                             raw!(
-                                "(() => { const saved = ${existing_models}.dehydrate().v; const ownId = String(${id}.get()); const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); return saved.some((record) => record[0] !== ownId && record[3] === current); })()",
+                                "(() => { const saved = ${existing_models}.dehydrate().v; const ownId = String(${id}.get()); const current = String(${alias}.get()).trim() || String(${provider_name}.get()) + '/' + String(${model_id}.get()); return saved.some((record) => record.v.id !== ownId && record.v.alias === current); })()",
                                 false,
                             )
                         })

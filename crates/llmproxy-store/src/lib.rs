@@ -26,6 +26,7 @@ pub use store::ProviderStore;
 pub struct SubscriptionNodeView {
     pub node_id: String,
     pub name: String,
+    pub provider_name: Option<String>,
     pub backend: String,
     pub models: Vec<String>,
     pub concurrency: u64,

@@ -47,7 +47,6 @@ impl Remote {
             || self.url.fragment().is_some()
             || self.url.path() != "/"
             || self.registration_key.len() < 32
-            || self.name.is_empty()
             || self.name.len() > 128
         {
             return Err("远程地址、注册密钥或节点名称无效".into());
@@ -72,6 +71,9 @@ pub async fn run(
     directory.write("node.json", &identity)?;
     let client = crate::oauth::client()?;
     let mut backoff = 2;
+    let mut announced = false;
+    let mut reconnect_reported = false;
+    let mut last_reconnect_notice: Option<std::time::Instant> = None;
     loop {
         if shutdown.is_cancelled() {
             return Ok(());
@@ -115,10 +117,16 @@ pub async fn run(
             {
                 return Err("远程返回的租约无效".into());
             }
-            println!(
-                "节点已注册：{}；服务准入由远程 llmproxy 控制。",
-                identity.node_id
-            );
+            if !announced {
+                println!(
+                    "节点已注册：{}；服务准入由远程 llmproxy 控制。",
+                    &identity.node_id[..12]
+                );
+                announced = true;
+            } else if reconnect_reported {
+                println!("反向连接已恢复。");
+                reconnect_reported = false;
+            }
             backoff = 2;
             let closed = CancellationToken::new();
             let requests = Arc::new(Mutex::new(HashMap::<String, CancellationToken>::new()));
@@ -180,7 +188,13 @@ pub async fn run(
             if shutdown.is_cancelled() {
                 return Ok(());
             }
-            println!("反向连接失效，正在重连；不会重放推理请求。");
+            if last_reconnect_notice.is_none_or(|last| last.elapsed() >= Duration::from_secs(60)) {
+                eprintln!(
+                    "反向连接失效，{backoff} 秒后重连；不会重放推理请求（重复提示每分钟最多一次）。"
+                );
+                last_reconnect_notice = Some(std::time::Instant::now());
+                reconnect_reported = true;
+            }
         }
         tokio::select! {_=shutdown.cancelled()=>return Ok(()),_=tokio::time::sleep(Duration::from_secs(backoff))=>{}}
         backoff = (backoff * 2).min(30);

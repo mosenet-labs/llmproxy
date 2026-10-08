@@ -101,6 +101,16 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0020_subscription_nodes.sql",
         include_str!("../../migrations/postgresql/0020_subscription_nodes.sql"),
     ),
+    MigrationFile::new(
+        202610080001,
+        "0021_subscription_display_name.sql",
+        include_str!("../../migrations/postgresql/0021_subscription_display_name.sql"),
+    ),
+    MigrationFile::new(
+        202610080002,
+        "0022_subscription_config_version.sql",
+        include_str!("../../migrations/postgresql/0022_subscription_config_version.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -368,5 +378,15 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610070006,
         "0053_subscription_nodes.sql",
         include_str!("../../migrations/sqlite/0053_subscription_nodes.sql"),
+    ),
+    MigrationFile::new(
+        202610080001,
+        "0054_subscription_display_name.sql",
+        include_str!("../../migrations/sqlite/0054_subscription_display_name.sql"),
+    ),
+    MigrationFile::new(
+        202610080002,
+        "0055_subscription_config_version.sql",
+        include_str!("../../migrations/sqlite/0055_subscription_config_version.sql"),
     ),
 ]);
