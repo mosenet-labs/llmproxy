@@ -432,7 +432,7 @@ pub async fn provider_list(
                 data_table(
                     label: "Provider 列表",
                     attrs: attributes! {
-                        class="min-w-[900px] [&_th]:px-6! [&_th]:text-[13px]! [&_td]:px-6! [&_td]:py-4! [&_td]:text-sm! [&_.gr-tag]:text-[13px]"
+                        class="min-w-[900px] [&_th]:px-6! [&_th]:text-[13px]! [&_td]:h-auto! [&_td]:px-6! [&_td]:py-2! [&_td]:text-sm! [&_.gr-tag]:text-[13px]"
                     },
                     <thead>
                         <tr>

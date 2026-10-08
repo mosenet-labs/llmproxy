@@ -94,7 +94,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
         }
         <div class="overflow-x-auto rounded-lg border border-border bg-white">
             <table
-                class="w-full border-collapse text-left text-sm [&_th]:whitespace-nowrap [&_th]:border-b [&_th]:border-border [&_th]:bg-surface [&_th]:px-5 [&_th]:py-3 [&_th]:font-medium [&_td]:border-b [&_td]:border-border [&_td]:px-5 [&_td]:py-4"
+                class="w-full border-collapse text-left text-sm [&_th]:whitespace-nowrap [&_th]:border-b [&_th]:border-border [&_th]:bg-surface [&_th]:px-5 [&_th]:py-3 [&_th]:font-medium [&_td]:border-b [&_td]:border-border [&_td]:px-5 [&_td]:py-2"
             >
                 <thead>
                     <tr>
@@ -115,7 +115,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                             <td>
                                 <strong>(node.name.clone())</strong>
                                 <p
-                                    class="mt-1 text-xs text-muted"
+                                    class="m-0 mt-1 text-xs text-muted"
                                     title=(node.node_id.clone())
                                 >
                                     (format!(

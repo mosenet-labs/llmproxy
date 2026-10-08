@@ -163,7 +163,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                 <tr
                                     class="border-b border-border last:border-b-0 hover:bg-[#fafcff]"
                                 >
-                                    <td class="px-6 py-4">
+                                    <td class="px-6 py-2">
                                         <a
                                             class="font-mono font-medium text-heading hover:text-primary"
                                             (topcoat::runtime::link_attrs(
@@ -175,7 +175,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                             (route.name.as_str())
                                         </a>
                                     </td>
-                                    <td class="px-5 py-4">
+                                    <td class="px-5 py-2">
                                         tag(
                                             tone: TagTone::Default,
                                             (protocol_label(route.protocol))
@@ -186,7 +186,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                             (protocol_label(route.provider_protocol))
                                         )
                                     </td>
-                                    <td class="px-5 py-4 tabular-nums">
+                                    <td class="px-5 py-2 tabular-nums">
                                         (route
                                             .targets
                                             .iter()
@@ -197,8 +197,8 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                         " / "
                                         (route.targets.len())
                                     </td>
-                                    <td class="px-5 py-4 text-secondary">"顺序优先"</td>
-                                    <td class="px-5 py-4">
+                                    <td class="px-5 py-2 text-secondary">"顺序优先"</td>
+                                    <td class="px-5 py-2">
                                         tag(
                                             tone: if route_available(route) {
                                                 TagTone::Success
@@ -214,7 +214,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                             })
                                         )
                                     </td>
-                                    <td class="px-6 py-4 text-right">
+                                    <td class="px-6 py-2 text-right">
                                         <div class="flex justify-end gap-3">
                                             <a
                                                 class="text-primary hover:underline"
@@ -634,7 +634,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
                                         class="border-t border-border"
                                         hidden=(!selected)
                                     >
-                                        <td class="px-4 py-3">
+                                        <td class="px-4 py-2">
                                             <input
                                                 class="h-8 w-16 rounded border border-control-border px-2 text-sm tabular-nums"
                                                 type="number"
@@ -655,13 +655,13 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
                                                 })
                                             >
                                         </td>
-                                        <td class="px-4 py-3">
+                                        <td class="px-4 py-2">
                                             <span class="font-medium">(model.alias.as_str())</span>
                                             <span class="mt-1 block font-mono text-xs text-secondary">
                                                 (model.upstream_model_id.as_str())
                                             </span>
                                         </td>
-                                        <td class="px-4 py-3">
+                                        <td class="px-4 py-2">
                                             (model.provider_name.as_str())
                                             if !model.provider_enabled {
                                                 <span class="block text-xs text-[#d48806]">
@@ -669,14 +669,14 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
                                                 </span>
                                             }
                                         </td>
-                                        <td class="px-4 py-3">
+                                        <td class="px-4 py-2">
                                             <div class="flex flex-wrap gap-1">
                                                 for protocol in &model.protocols {
                                                     tag(tone: TagTone::Default, (protocol_label(*protocol)))
                                                 }
                                             </div>
                                         </td>
-                                        <td class="px-4 py-3">
+                                        <td class="px-4 py-2">
                                             <button
                                                 class="border-0 bg-transparent p-0 text-[#cf1322] hover:underline"
                                                 type="button"

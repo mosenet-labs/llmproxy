@@ -391,7 +391,7 @@ pub async fn model_workspace(
                 data_table(
                     label: "模型列表",
                     attrs: attributes! {
-                        class="min-w-[960px] [&_th]:px-5! [&_td]:px-5! [&_td]:py-4! [&_td:nth-child(5)]:py-2!"
+                        class="min-w-[960px] [&_th]:px-5! [&_td]:h-auto! [&_td]:px-5! [&_td]:py-2!"
                     },
                     <thead>
                         <tr>
