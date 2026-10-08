@@ -298,6 +298,18 @@ impl Gateway {
     pub fn logs(&self) -> String {
         fs::read_to_string(self.directory.join("gateway.log")).unwrap_or_default()
     }
+
+    #[cfg(unix)]
+    pub fn request_shutdown(&self) {
+        assert!(
+            Command::new("kill")
+                .arg("-TERM")
+                .arg(self.child.id().to_string())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }
 
 impl Drop for Gateway {

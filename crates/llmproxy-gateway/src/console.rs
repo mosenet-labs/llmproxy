@@ -1,4 +1,5 @@
 //! In-process transport adapter; Pingora owns the only listening socket.
+mod websocket;
 use std::time::Duration;
 
 use http_body_util::BodyExt;
@@ -21,6 +22,9 @@ pub async fn serve(console: &Console, session: &mut Session) -> Result<()> {
         session.respond_error(403).await?;
         llmproxy_console::observability::transport_failure(Some(403));
         return Ok(());
+    }
+    if session.req_header().headers.contains_key("upgrade") {
+        return websocket::serve(console, session).await;
     }
     let parts = session.req_header().as_owned_parts();
     let head = parts.method == "HEAD";

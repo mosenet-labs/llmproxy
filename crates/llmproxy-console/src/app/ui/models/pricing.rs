@@ -721,6 +721,7 @@ pub async fn price_rule_rows(
     error: Signal<String>,
     rerender: Signal<f64>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _ = revision;
     let rows: Vec<PriceRule> = rules
         .get_untracked()
@@ -871,6 +872,7 @@ pub async fn price_matrix_rows(
     rules: Signal<Vec<PriceRuleRecord>>,
     error: Signal<String>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _ = revision;
     let rows: Vec<PriceRule> = rules
         .get_untracked()
@@ -931,6 +933,7 @@ pub async fn price_peak_windows(
     preview_result: Signal<String>,
     rerender: Signal<f64>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _ = revision;
     let rows: Vec<WeeklyPeakWindow> = windows
         .get_untracked()

@@ -29,6 +29,14 @@
 
 Topcoat 0.10.0 允许为 procedure 和 shard 指定路径；控制台将它们直接注册在 `/ui/_topcoat/runtime/*`，页面局部重渲染则向当前页面 URL 发起带 `X-Topcoat-Runtime` 的 POST。runtime 脚本原样嵌入，无需替换其中的 URL。框架字体路由仍固定在 `/_topcoat/fonts/*`，因此仅将对外的 `/ui/_topcoat/fonts/*` 请求映射到该内部路由；FontResolver 负责生成对外 URL。页面和资源都在 `/ui` 下。
 
+## 共享 WebSocket
+
+`console/websocket.rs` 使用 16 KiB 的进程内双向流，让 Hyper HTTP/1.1 `with_upgrades` 生成 Topcoat 所需的 `OnUpgrade`。Pingora 发送合法 `101` 并持续双向转发，保留升级握手头；两个方向的桥接队列各最多一个块，关闭时释放传输任务。Console 克隆共享 Router 与 AppState，没有内部 TCP listener。
+
+聊天实时组件和模型编辑子 shard 在同一文档内共用一个运行时连接；没有 connected 内容时框架可关闭连接，导航到需要连接的内容时重新建立。Provider 列表和节假日工作区保留 HTTP。普通首屏、procedure 和代理 HTTP/SSE 保留现有路径。控制台回环限制仍在升级前执行，路径无关的 ConnectionGuard 在 RuntimeLayer 前校验 Host、Origin 和 `/ui` 范围，防止握手跳过页面层保护。
+
+短暂断线由框架退避重连，只重启 render，不重复提交写操作。WebSocket 持续不可用时，设置 `LLMPROXY_UI_WEBSOCKET=false` 并重启服务、刷新页面，使用明确的 HTTP 模式；未设置默认启用，不自动回退。设计及边界见[文档 32](32-console-shard-connections-design.md)，测试记录及剩余专项验收见[任务清单 33](33-console-shard-connections-tasks.md)。
+
 ## 配置收敛
 
 ```dotenv

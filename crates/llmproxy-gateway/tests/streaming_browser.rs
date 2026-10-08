@@ -286,7 +286,12 @@ async fn browser_streaming_fixture() {
             .await;
         upstreams.push(upstream);
     }
-    let gateway = Gateway::database(&database.url, MASTER_KEY);
+    let websocket = std::env::var("LLMPROXY_UI_WEBSOCKET").unwrap_or_else(|_| "true".into());
+    let gateway = Gateway::database_with_environment(
+        &database.url,
+        MASTER_KEY,
+        &[("LLMPROXY_UI_WEBSOCKET", &websocket)],
+    );
     println!("BROWSER http://{}/ui/chat", gateway.address);
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},

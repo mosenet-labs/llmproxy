@@ -76,14 +76,14 @@ bash scripts/fmt.sh --check
 
 控制台内部页面链接使用 `link_attrs` 实现无刷新导航，默认 Intent 预取。聊天页面初始化可能创建会话，因此入口设置 Never；订阅状态的显式刷新也使用 Never，避免复用提前读取的状态。聊天恢复脚本在全部页面加载，并观察导航插入的工作区，每个工作区只触发一次恢复。
 
-模型候选使用 `#[record]` 和 `Signal<Vec<ModelCandidate>>` 直接传输；别名与聊天草稿使用 `Signal<Vec<(String, String)>>`，模型重复检查直接捕获元组集合，历史操作返回类型化元组。捕获的 record 仅含已公开的模型 ID 和参考价格，不包含 Provider 密钥；写入仍经过服务端验证。
+模型候选使用 `#[record]` 和 `Signal<Vec<ModelCandidate>>` 直接传输；别名与聊天草稿使用 `Signal<Vec<(String, String)>>`，模型重复检查捕获具名 `ExistingModel` Records，历史操作返回 `ChatSelectionRecord`。价格规则和峰时窗口使用类型化 Records 列表；金额和整数输入保留字符串精度，在服务端转换与校验。业务 record 不包含已保存的 Provider 密钥；写入仍经过服务端验证。
 
 逐项适用性：
 
 - 客户端导航、预取、record、元组、格式化/检查、CLI 版本和 default-run 已接入。
 - runtime 脚本继续由 `runtime::script()` 生成，包含 `data-topcoat-usize-bits`；项目未使用依赖浮点字符串长度的表达式。
 - 模块路由未使用 `path_param!` 声明动态模块，无需替换为 `module_param!`。
-- 当前 Pingora HTTP 适配器不提供 Hyper WebSocket upgrade，聊天继续通过 HTTP 流式 shard 更新。共享 WebSocket 的运行时改进随依赖升级获得，但不能在此适配器上直接调用 `connected(cx)`；连接渲染上限显式保持框架默认 64。
+- Pingora 通过有界进程内 Hyper 流提供 WebSocket upgrade，仍只有一个 TCP 监听端口。聊天、模型工作区、候选、草稿和价格子 shard 已启用共享连接，连接同时 render 上限为 64。短暂断线使用框架退避重连；不支持 WebSocket 的环境可设置 `LLMPROXY_UI_WEBSOCKET=false` 后重启并刷新页面，继续使用 HTTP 增量 shard。该模式在启动时选择，不提供自动切换；仅接受 `true`、`false`，未设置默认 `true`。设计见[文档 32](32-console-shard-connections-design.md)，验收和剩余专项测试见[清单 33](33-console-shard-connections-tasks.md)。
 - 本项目使用独立组件库而非 Topcoat UI registry，不运行 `ui add --all`，以免引入另一套组件和覆盖现有样式。
 - Cargo 子命令修复、流式开发刷新、宏补全、thiserror 兼容和确定性宏输出由框架升级获得，无需业务代码模拟。
 - 框架 `docs/` 与 `llms.txt` 是上游文档变化；项目保留现有文档目录和 AGENTS.md。

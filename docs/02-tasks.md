@@ -301,3 +301,19 @@ P0 应通过 `cargo fmt --check`、`cargo test --workspace` 和 `cargo check --w
 - [x] H7：双数据库、HTTP、浏览器与完整回归验收。
 
 验收：SQLite 与已配置 PostgreSQL 的隔离 schema 通过；四协议 32 个来源用量组合、重启续聊、配置删除、取消部分统计和保存重试通过。浏览器验证生成中刷新／停止、同会话换模型、逐轮模型用量及分组汇总。工作区 343 项测试通过、11 项既有环境／人工用例忽略；Clippy、格式和 diff 检查通过。正文在生成结束时保存，进程意外退出前的内存片段不做中途检查点。
+
+
+## 控制台共享 WebSocket 与 Shard connections
+
+设计见[文档 32](32-console-shard-connections-design.md)，逐项交付和验收见[任务清单 33](33-console-shard-connections-tasks.md)。
+
+- [x] WS0：记录单端口约束、升级桥接设计、迁移顺序与验收标准。
+- [x] WS1：验证 Pingora 与 Hyper 进程内升级桥接，完成同端口双向连接试验。
+- [x] WS2：实现有界生产桥接、访问保护、关闭清理与 HTTP 兼容。
+- [x] WS3：验证重连并明确 WebSocket 不可用时的 HTTP 使用路径。
+- [x] WS4：迁移聊天消息、停止按钮、用量和会话状态，验证共享连接与会话隔离。
+- [x] WS5：迁移模型嵌套工作区，验证子 shard 独立更新，评估 Provider 与日历收益。
+- [ ] WS6：64 render、导航、断线、EOF/停机、慢读与同端口 SSE 核心回归通过；持续资源压测和截断帧资源计数待专项验收。
+- [x] WS7：完成浏览器与工作区核心验收，同步运行文档和实际回退方式，列出未覆盖的专项测试。
+
+共享连接默认启用；`LLMPROXY_UI_WEBSOCKET=false` 在重启及页面刷新后选择 HTTP 模式。没有自动 HTTP 回退。详细测试证据及尚未覆盖的专项场景见清单 33。

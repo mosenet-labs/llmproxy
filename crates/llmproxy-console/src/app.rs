@@ -2,7 +2,10 @@ use llmproxy_store::ProviderStore;
 use topcoat::{
     Result,
     context::{Cx, app_context},
-    router::{Body, Next, error::forbidden, layer, request::headers, response::Response},
+    router::{
+        Body, Layer, LayerFuture, Next, Path, error::forbidden, layer, request::headers,
+        response::Response,
+    },
 };
 
 pub(crate) mod chat_service;
@@ -16,6 +19,7 @@ pub fn route_builder() -> topcoat::router::RouterBuilder {
 }
 
 pub struct AppState {
+    pub websocket: bool,
     pub subscriptions: crate::SubscriptionPresence,
     pub store: ProviderStore,
     pub prober: llmproxy_probe::ModelProber,
@@ -30,6 +34,24 @@ pub struct AppState {
 
 #[layer("/")]
 pub async fn protect(cx: &Cx, body: Body, next: Next<'_>) -> Result<Response> {
+    validate_origin(cx)?;
+    let mut response = next.run(cx, body).await?;
+    response
+        .headers_mut()
+        .insert("cache-control", "no-store".parse()?);
+    response
+        .headers_mut()
+        .insert("x-content-type-options", "nosniff".parse()?);
+    response
+        .headers_mut()
+        .insert("x-frame-options", "DENY".parse()?);
+    response
+        .headers_mut()
+        .insert("referrer-policy", "same-origin".parse()?);
+    Ok(response)
+}
+
+fn validate_origin(cx: &Cx) -> Result<()> {
     let state = app_context::<AppState>(cx);
     let request_headers = headers(cx);
     let authority = request_headers
@@ -48,20 +70,25 @@ pub async fn protect(cx: &Cx, body: Body, next: Next<'_>) -> Result<Response> {
             return Err(forbidden().into());
         }
     }
-    let mut response = next.run(cx, body).await?;
-    response
-        .headers_mut()
-        .insert("cache-control", "no-store".parse()?);
-    response
-        .headers_mut()
-        .insert("x-content-type-options", "nosniff".parse()?);
-    response
-        .headers_mut()
-        .insert("x-frame-options", "DENY".parse()?);
-    response
-        .headers_mut()
-        .insert("referrer-policy", "same-origin".parse()?);
-    Ok(response)
+    Ok(())
+}
+
+// RuntimeLayer accepts a handshake before dispatching normal page guards.
+async fn protect_connection(cx: &Cx, body: Body, next: Next<'_>) -> Result<Response> {
+    let socket = headers(cx).contains_key("sec-websocket-protocol")
+        || topcoat::runtime::connected_untracked(cx);
+    if socket {
+        validate_origin(cx)?;
+        let path = topcoat::router::request::uri(cx).path();
+        if !app_context::<AppState>(cx).websocket || !(path == "/ui" || path.starts_with("/ui/")) {
+            return Err(forbidden().into());
+        }
+    }
+    next.run(cx, body).await
+}
+
+pub(crate) fn request_connection(cx: &Cx) -> bool {
+    app_context::<AppState>(cx).websocket && topcoat::runtime::connected(cx)
 }
 
 pub(crate) fn check_csrf(cx: &Cx, supplied: &str) -> Result<()> {
@@ -75,4 +102,16 @@ pub(crate) fn check_csrf(cx: &Cx, supplied: &str) -> Result<()> {
         return Err(forbidden().into());
     }
     Ok(())
+}
+
+pub(crate) struct ConnectionGuard;
+
+impl Layer for ConnectionGuard {
+    fn path(&self) -> Option<&Path> {
+        None
+    }
+
+    fn handle<'a>(&'a self, cx: &'a Cx, body: Body, next: Next<'a>) -> LayerFuture<'a> {
+        Box::pin(protect_connection(cx, body, next))
+    }
 }

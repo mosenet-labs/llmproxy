@@ -16,11 +16,14 @@ use topcoat_ant_design::RouterBuilderUiExt;
 
 pub use topcoat::router::{Body, request::Request, response::Response};
 
+pub use topcoat::runtime::RUNTIME_PROTOCOL;
+
 pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
 pub type SubscriptionPresence = std::sync::Arc<
     std::sync::Mutex<std::collections::HashMap<String, llmproxy_core::subscription::Presence>>,
 >;
 
+#[derive(Clone)]
 pub struct Console {
     history_auth: String,
     router: Router,
@@ -49,7 +52,13 @@ impl Console {
         let csrf = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let history_auth = app::chat_service::new_id()?;
         let subscriptions = SubscriptionPresence::default();
+        let websocket = match std::env::var("LLMPROXY_UI_WEBSOCKET").as_deref() {
+            Ok("true") | Err(std::env::VarError::NotPresent) => true,
+            Ok("false") => false,
+            _ => return Err(io::Error::other("LLMPROXY_UI_WEBSOCKET 须为 true 或 false").into()),
+        };
         let state = app::AppState {
+            websocket,
             subscriptions: subscriptions.clone(),
             history_auth: history_auth.clone(),
             store,
@@ -131,6 +140,7 @@ impl Console {
             .route(assets::runtime_js)
             .route(assets::chat_resume_js)
             .runtime()
+            .layer(app::ConnectionGuard)
             .prefetch(PrefetchMode::Intent)
             .max_runs_per_connection(64)
             .topcoat_ant_design()

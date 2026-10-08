@@ -793,6 +793,7 @@ pub async fn model_draft(
     manual_model_id: Signal<String>,
     supported_protocols: Signal<String>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let manual_open = signal(cx, || false);
     let protocols = supported_protocols.get();
     let supports_chat = protocols

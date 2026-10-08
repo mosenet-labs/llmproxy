@@ -15,7 +15,9 @@ llmproxy-core = { path = "../llmproxy-core" }
 llmproxy-store = { path = "../llmproxy-store" }
 llmproxy-console = { path = "../llmproxy-console" }
 http-body-util = "0.1.3"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+hyper = { version = "1.11.1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 pingora = { version = "0.9.0", features = ["proxy", "rustls"] }
 pingora-http = "0.9.0"
 async-trait = "0.1.92"
@@ -41,3 +43,6 @@ opentelemetry_sdk = { version = "0.33.0", features = ["testing"] }
 toasty = { version = "0.10.0", default-features = false, features = ["postgresql"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["form"] }
 url = "2.5.8"
+
+tokio-tungstenite = "0.29.0"
+futures-util = "0.3.34"

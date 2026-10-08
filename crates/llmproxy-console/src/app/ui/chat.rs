@@ -645,6 +645,7 @@ pub async fn chat_stop_button(
     refresh: Signal<usize>,
     generating: Signal<bool>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
     let room_id = session.get();
@@ -684,7 +685,7 @@ pub async fn chat_stop_button(
                     </button>
                 }
             }?;
-            // GET 首屏立即完成；浏览器的 POST shard 通过 HTTP 增量等待广播。
+            // GET 首屏立即完成；浏览器 POST shard 通过共享连接或 HTTP 等待广播。
             if topcoat::router::request::original_method(cx)
                     != topcoat::router::Method::POST
                 || !busy {
@@ -741,6 +742,7 @@ pub async fn chat_protocol_picker(
     busy: Signal<bool>,
     selection_error: Signal<String>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let state = app_context::<AppState>(cx);
     let csrf = state.csrf.clone();
     let (_, protocols, _, _) = chat_target(&state.store, &model_id.get())
@@ -813,6 +815,7 @@ pub async fn chat_session_list(
     session_archived: Signal<bool>,
     error: Signal<String>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
     let mut aliases: HashMap<_, _> = state
@@ -1086,7 +1089,7 @@ async fn chat_session_item(
             busy: &busy,
             open: Some(&confirm_open),
             language: UiLanguage::ChineseSimplified,
-            attrs: attributes! { class="w-[min(420px,calc(100%_-_32px))]!" },
+            attrs: attributes! { class="chat-delete-dialog w-[min(420px,calc(100%_-_32px))]!" },
             <p class="m-0 break-words px-6 py-5 text-[13px] text-secondary">
                 (format!("「{title}」的对话内容与用量记录将永久删除。"))
             </p>
@@ -1120,6 +1123,7 @@ pub async fn chat_session_activity(
     running: Signal<bool>,
     refresh: Signal<usize>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _revision = refresh.get();
     let room = app_context::<AppState>(cx).chat_sessions.get(&id);
     Ok(live! {
@@ -1280,6 +1284,7 @@ pub async fn chat_history(
     session: Signal<String>,
     refresh: Signal<usize>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
     let service = ChatService {
@@ -1643,6 +1648,7 @@ pub async fn chat_thinking_picker(
     busy: Signal<bool>,
     selection_error: Signal<String>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
     let room = state
@@ -1786,6 +1792,7 @@ pub async fn chat_usage(
     refresh: Signal<usize>,
     open: Signal<bool>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
     let room = ChatService {

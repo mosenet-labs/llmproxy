@@ -119,6 +119,7 @@ pub async fn model_workspace(
     failure: Signal<String>,
     refresh: Signal<f64>,
 ) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let _ = revision;
     let draft_query = signal(cx, String::new);
     let draft_protocol = signal(cx, String::new);
@@ -561,6 +562,7 @@ pub async fn model_workspace(
 
 #[shard("/ui/_topcoat/runtime/shards/model-candidates")]
 pub async fn model_candidates(cx: &Cx, provider_id: String, open: bool) -> Result<impl View> {
+    crate::app::request_connection(cx);
     let state = app_context::<AppState>(cx);
     let result: std::result::Result<Vec<ModelCandidate>, String> =
         if !open || provider_id.is_empty() {
