@@ -1659,7 +1659,10 @@ pub async fn chat_thinking_picker(
     })
     .check(current)
     .err();
-    let choice = signal(cx, || current.as_str().to_owned());
+    // 会话或已保存偏好变化后，不能复用浏览器携带的旧控件值。
+    let choice = signal(&cx.keyed((session.get(), current.as_str())), || {
+        current.as_str().to_owned()
+    });
     let csrf = state.csrf.clone();
     Ok(view! {
         <div class="mt-3" data-thinking-support=(support.as_str())>

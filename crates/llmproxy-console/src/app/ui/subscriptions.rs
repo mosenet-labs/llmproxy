@@ -9,6 +9,7 @@ use topcoat::{
         error::{bad_request, see_other},
         page, route,
     },
+    runtime::{Event, signal},
     view::{View, view},
 };
 
@@ -98,6 +99,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                 <thead>
                     <tr>
                         <th>"节点"</th>
+                        <th>"别名"</th>
                         <th>"后端"</th>
                         <th>"连接"</th>
                         <th>"后端状态"</th>
@@ -107,40 +109,11 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                     </tr>
                 </thead>
                 <tbody>
+                    #[key(node.node_id.clone())]
                     for node in &nodes {
                         <tr>
                             <td>
                                 <strong>(node.name.clone())</strong>
-                                <form
-                                    class="mt-2 flex items-center gap-3"
-                                    method="post"
-                                    action="/ui/subscriptions/name"
-                                >
-                                    <input
-                                        type="hidden"
-                                        name="csrf"
-                                        value=(state.csrf.clone())
-                                    >
-                                    <input
-                                        type="hidden"
-                                        name="node_id"
-                                        value=(node.node_id.clone())
-                                    >
-                                    <input
-                                        type="hidden"
-                                        name="version"
-                                        value=(node.version.to_string())
-                                    >
-                                    <input
-                                        class="rounded border border-border px-2 py-1 mr-2"
-                                        name="name"
-                                        value=(node.provider_name.clone().unwrap_or_default())
-                                        placeholder="Provider 名称（可选）"
-                                        maxlength="128"
-                                        aria-label="Provider 名称"
-                                    >
-                                    <button class=(TEXT_LINK) type="submit">"保存"</button>
-                                </form>
                                 <p
                                     class="mt-1 text-xs text-muted"
                                     title=(node.node_id.clone())
@@ -153,6 +126,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                                     ))
                                 </p>
                             </td>
+                            <td>node_alias(node: node, csrf: &state.csrf)</td>
                             <td>(node.backend.clone())</td>
                             <td>
                                 (if presence
@@ -487,5 +461,66 @@ async fn node_action(
                 </button>
             </form>
         }
+    })
+}
+
+#[topcoat::view::component]
+async fn node_alias(
+    cx: &Cx,
+    node: &llmproxy_store::SubscriptionNodeView,
+    csrf: &str,
+) -> Result<impl View> {
+    let editing = signal(cx, || false);
+    let original = node.provider_name.clone().unwrap_or_default();
+    let draft = signal(cx, || original.clone());
+    Ok(view! {
+        <div
+            class="flex items-center gap-3 [&[hidden]]:hidden"
+            :hidden=$(editing.get())
+        >
+            <span class="max-w-48 truncate" title=(original.clone())>
+                (if original.is_empty() { "—" } else { original.as_str() })
+            </span>
+            <button
+                class=(TEXT_LINK)
+                type="button"
+                @click=$(|_event: Event| {
+                    draft.set(original.clone());
+                    editing.set(true);
+                })
+            >
+                "编辑"
+            </button>
+        </div>
+        <form
+            class="flex items-center gap-3 [&[hidden]]:hidden"
+            :hidden=$(!editing.get())
+            method="post"
+            action="/ui/subscriptions/name"
+        >
+            <input type="hidden" name="csrf" value=(csrf)>
+            <input type="hidden" name="node_id" value=(&node.node_id)>
+            <input type="hidden" name="version" value=(node.version)>
+            <input
+                class="h-8 w-48 rounded border border-border px-2 focus:border-primary focus:outline-none"
+                name="name"
+                :value=$(draft.get())
+                @input=$(|event: Event| draft.set(event.target.value))
+                placeholder="别名（可选）"
+                maxlength="128"
+                aria-label="Provider 别名"
+            >
+            <button class=(TEXT_LINK) type="submit">"保存"</button>
+            <button
+                class=(TEXT_LINK)
+                type="button"
+                @click=$(|_event: Event| {
+                    draft.set(original.clone());
+                    editing.set(false);
+                })
+            >
+                "取消"
+            </button>
+        </form>
     })
 }
