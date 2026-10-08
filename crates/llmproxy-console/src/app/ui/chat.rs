@@ -474,12 +474,12 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                                                 </option>
                                             }
                                         )
-                                        chat_stop_button(
-                                            session: $(session),
-                                            refresh: $(refresh),
-                                            generating: $(generating)
-                                        )
                                     </div>
+                                    chat_stop_button(
+                                        session: $(session),
+                                        refresh: $(refresh),
+                                        generating: $(generating)
+                                    )
                                 )
                             </fieldset>
                         </div>
@@ -675,13 +675,13 @@ pub async fn chat_stop_button(
                 if busy {
                     <button
                         type="button"
-                        class="ml-3 rounded-md border border-border px-3 py-1 text-[12px] text-secondary"
+                        class="gr-chat-send-button chat-stop-button"
                         aria-label="停止生成"
                         @click=$(async |_event: Event| {
                             let _stopped = stop_chat(csrf.clone(), session.get()).await;
                         })
                     >
-                        "停止生成"
+                        <span class="sr-only">"停止生成"</span>
                     </button>
                 }
             }?;
