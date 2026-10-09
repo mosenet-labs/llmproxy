@@ -86,12 +86,14 @@ pub(super) async fn pagination(
     );
     Ok(view! {
         table_pagination(summary: summary.as_str(), label: label, attrs: attributes! { class="border-t border-border [&_nav]:flex-wrap" },
+            <div class="shrink-0">
             table_page_size_select(id: id, label: "每页记录数", attrs: attributes! { cx =>
                 :value=$(page_size.get())
                 @change=$(|event: Event| { page_size.set(event.target.value); page.set(1); })
             },
                 <option value="10">"10"</option><option value="15">"15"</option><option value="30">"30"</option><option value="50">"50"</option><option value="100">"100"</option>
             )
+            </div>
             <button type="button" :disabled=(current == 1) @click=$(|_event: Event| page.set(previous))>"上一页"</button>
             for number in pages {
                 if number == 0 { <span aria-hidden="true">"…"</span> }

@@ -231,16 +231,10 @@ pub async fn model_workspace(
             success: &success,
             refresh: &refresh
         )
-        <section
-            class="mb-6 flex min-h-20 items-center justify-between gap-6 max-[640px]:flex-col max-[640px]:items-start max-[640px]:gap-4"
-        >
+        <section class=(super::providers::PAGE_HEADING)>
             <div>
-                <h1
-                    class="m-0 text-[28px] font-semibold leading-[1.35] text-heading max-[640px]:text-2xl"
-                >
-                    "Models"
-                </h1>
-                <p class="mt-2 mb-0 text-sm text-secondary">
+                <h1 class="sr-only">"Models"</h1>
+                <p>
                     "从 Provider 导入模型到系统，再在资源组中选择需要开放的模型。导入不会自动加入任何组。"
                 </p>
             </div>
@@ -543,6 +537,7 @@ pub async fn model_workspace(
                     summary: summary.as_str(),
                     label: "模型列表分页",
                     attrs: attributes! { class="border-t border-border [&_nav]:flex-wrap" },
+                    <div class="shrink-0">
                     table_page_size_select(
                         id: "models-page-size",
                         label: "每页记录数",
@@ -560,6 +555,7 @@ pub async fn model_workspace(
                         <option value="50">"50"</option>
                         <option value="100">"100"</option>
                     )
+                    </div>
                     <button
                         type="button"
                         :disabled=(current_page == 1)

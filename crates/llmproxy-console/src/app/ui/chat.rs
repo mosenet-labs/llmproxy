@@ -363,14 +363,10 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
             </aside>
             <div class="flex min-h-0 min-w-0 flex-1 flex-col">
                 <header
-                    class="relative z-20 flex h-16 shrink-0 items-center justify-between gap-3 border-b border-[#eef0f3] px-7 max-[640px]:px-4"
+                    class="relative z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-[#eef0f3] px-7 max-[640px]:px-4"
                 >
                     <div class="shrink-0">
-                        <h1
-                            class="m-0 text-[16px] font-semibold leading-5 text-heading"
-                        >
-                            "Chat"
-                        </h1>
+                        <h1 class="sr-only">"Chat"</h1>
                         <p class="m-0 text-[11px] text-muted max-[640px]:hidden">
                             "通过网关与已接入模型对话"
                         </p>

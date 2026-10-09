@@ -39,7 +39,7 @@ async fn group_heading(cx: &Cx, group: &GroupView, is_keys: bool) -> Result<impl
     Ok(view! {
         <header class=(super::providers::PAGE_HEADING)>
             <div>
-                <h1>(if is_keys { "Keys" } else { "模型" })</h1>
+                <h1 class="sr-only">(if is_keys { "Keys" } else { "模型" })</h1>
                 <p>"所属资源组："<strong class="text-heading" data-current-group=(group.id.to_string())>(group.name.as_str())</strong>
                     if !group.enabled { <span class="ml-2">"（已停用）"</span> }
                 </p>
@@ -133,7 +133,7 @@ async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
         <section class="w-full min-w-0">
             <header class=(super::providers::PAGE_HEADING)>
                 <div>
-                    <h1>"资源组"</h1>
+                    <h1 class="sr-only">"资源组"</h1>
                     <p>"模型和路由可加入多个组；虚拟 Key 只属于一个组，按组授权调用。"</p>
                 </div>
                 <button class=(class!(BUTTON, PRIMARY)) type="button" (new_group)>

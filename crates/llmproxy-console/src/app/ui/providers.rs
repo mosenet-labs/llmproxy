@@ -43,7 +43,7 @@ pub(crate) use actions::{preview_models, provider_action, save_provider};
 use editor::{EditorSignals, editor_trigger, provider_editor};
 
 // Complete class names let Tailwind discover styles in Rust at build time.
-pub(super) const PAGE_HEADING: &str = "mb-6 flex min-h-20 items-center justify-between gap-6 max-[640px]:min-h-0 max-[640px]:flex-col max-[640px]:items-start max-[640px]:gap-4 [&_h1]:m-0 [&_h1]:text-[28px] [&_h1]:font-semibold [&_h1]:leading-[1.35] max-[640px]:[&_h1]:text-2xl [&_p]:mt-2 [&_p]:mb-0 [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-secondary";
+pub(super) const PAGE_HEADING: &str = "mb-4 flex items-center justify-between gap-4 max-[640px]:flex-col max-[640px]:items-start max-[640px]:gap-3 [&_p]:m-0 [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-secondary";
 pub(super) const BUTTON: &str = "inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-control-border bg-white px-4 text-sm font-medium leading-5 text-heading hover:border-primary-hover hover:text-primary";
 const PRIMARY_BUTTON: &str = "border-primary! bg-primary! text-white! shadow-sm hover:border-primary-hover! hover:bg-primary-hover!";
 const TEXT_LINK: &str = "border-0 bg-transparent p-0 text-sm leading-[22px] whitespace-nowrap text-primary hover:text-primary-hover";
@@ -273,7 +273,7 @@ pub async fn provider_list(
         provider_editor(editor: &editor, controls: &controls)
         <section class=(PAGE_HEADING)>
             <div>
-                <h1>"Providers"</h1>
+                <h1 class="sr-only">"Providers"</h1>
                 <p>"管理上游连接、协议路径与凭据。"</p>
             </div>
             <button

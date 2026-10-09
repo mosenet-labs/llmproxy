@@ -57,7 +57,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
         }
         <div class=(super::providers::PAGE_HEADING)>
             <div>
-                <h1>"订阅节点"</h1>
+                <h1 class="sr-only">"订阅节点"</h1>
                 <p>
                     "查看个人订阅代理的连接与后端状态，并决定是否提供代理服务。"
                 </p>
@@ -297,7 +297,7 @@ pub async fn import_models(cx: &Cx, Form(query): Form<ModelQuery>) -> Result<imp
         Err("导入结果未确认，请检查 Models 列表后重试".into());
     Ok(view! {
         <div class=(super::providers::PAGE_HEADING)>
-            <div><h1>"导入订阅模型"</h1></div>
+            <h1 class="m-0 text-base font-semibold">"导入订阅模型"</h1>
         </div>
         <p>
             (provider.name)

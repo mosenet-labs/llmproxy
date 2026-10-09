@@ -54,7 +54,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
     Ok(view! {
         <section class=(PAGE_HEADING)>
             <div>
-                <h1>"Model Routes"</h1>
+                <h1 class="sr-only">"Model Routes"</h1>
                 <p>
                     "使用系统中已导入的模型配置路由，再到资源组中添加。新建路由不会自动加入任何组。"
                 </p>
@@ -344,7 +344,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
                 >
                     "← 返回 Model Routes"
                 </a>
-                <h1>(title)</h1>
+                <h1 class="mb-2 mt-0 text-base font-semibold">(title)</h1>
                 <p>
                     "路由名称是客户端请求中的 model；客户端与 Provider 协议可分别选择。跨协议目前只支持非流式 JSON。"
                 </p>

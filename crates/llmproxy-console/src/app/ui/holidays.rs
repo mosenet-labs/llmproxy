@@ -52,12 +52,10 @@ pub async fn holidays(cx: &Cx) -> Result<impl View> {
             tone: NotificationTone::Error,
             language: UiLanguage::ChineseSimplified
         )
-        <section class="mb-6 flex flex-wrap items-center justify-between gap-4">
+        <section class=(super::providers::PAGE_HEADING)>
             <div>
-                <h1 class="m-0 text-[28px] font-semibold leading-[1.35] text-heading">
-                    "节假日"
-                </h1>
-                <p class="mt-2 mb-0 text-sm text-secondary">
+                <h1 class="sr-only">"节假日"</h1>
+                <p>
                     "按国务院办公厅通知展示完整放假区间与调休上班日。"
                 </p>
             </div>
