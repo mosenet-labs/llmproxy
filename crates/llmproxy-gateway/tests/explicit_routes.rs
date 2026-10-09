@@ -565,7 +565,7 @@ fn stalled_upstream_request_write_is_504_without_retry() {
     let gateway = Gateway::start([provider; 3]);
     let mut stream = gateway.connect();
     let prefix = br#"{"model":"test-responses","input":""#;
-    write!(stream, "POST {} HTTP/1.1\r\nHost: client.invalid\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", PATHS[1], 128 * 1024 * 1024 + prefix.len()).unwrap();
+    write!(stream, "POST {} HTTP/1.1\r\nAuthorization: Bearer {}\r\nHost: client.invalid\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", PATHS[1], gateway.api_key, 128 * 1024 * 1024 + prefix.len()).unwrap();
     stream.write_all(prefix).unwrap();
     let mut writer = stream.try_clone().unwrap();
     let sending = thread::spawn(move || {

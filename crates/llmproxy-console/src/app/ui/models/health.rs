@@ -186,7 +186,11 @@ pub async fn model_health(
     let checks = if id.is_empty() {
         Vec::new()
     } else {
-        state.store.model_health_checks(id.parse::<i64>()?).await?
+        app_context::<AppState>(cx)
+            .store
+            .clone()
+            .model_health_checks(id.parse::<i64>()?)
+            .await?
     };
     Ok(view! {
         if !checks.is_empty() {
@@ -409,6 +413,7 @@ pub async fn save_health_check(
         };
         app_context::<AppState>(cx)
             .store
+            .clone()
             .save_health_check(
                 id,
                 protocol,

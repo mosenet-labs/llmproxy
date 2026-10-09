@@ -96,7 +96,7 @@ pub(crate) async fn chat_reply(
     let builder = if let Some((key, auth)) = history_request {
         builder
             .header(llmproxy_store::chat_history::REQUEST_HEADER, key)
-            .header(llmproxy_store::chat_history::AUTH_HEADER, auth)
+            .bearer_auth(auth)
     } else {
         builder
     };

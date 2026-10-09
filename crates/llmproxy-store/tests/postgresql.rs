@@ -474,6 +474,17 @@ async fn exercise_store(url: &str, sqlite: bool) {
         })
         .await
         .unwrap();
+    assert!(mapping.group_ids.is_empty());
+    assert!(route.group_ids.is_empty());
+    assert!(store.load_model_routes().await.unwrap().is_empty());
+    store
+        .set_group_resources(
+            store.list_groups().await.unwrap()[0].version,
+            vec![mapping.id],
+            vec![route.id],
+        )
+        .await
+        .unwrap();
     let loaded = store.load_model_routes().await.unwrap();
     assert_eq!(loaded.len(), 2);
     assert!(loaded.iter().all(|r| r.thinking == thinking));
@@ -495,10 +506,21 @@ async fn exercise_store(url: &str, sqlite: bool) {
             .await,
         Err(StoreError::Conflict(_))
     ));
+    let duplicate = store.create_model(mapping_input.clone()).await.unwrap();
     assert!(matches!(
-        store.create_model(mapping_input.clone()).await,
+        store
+            .set_group_resources(
+                store.list_groups().await.unwrap()[0].version,
+                vec![mapping.id, duplicate.id],
+                vec![route.id]
+            )
+            .await,
         Err(StoreError::Conflict(_))
     ));
+    store
+        .delete_model(duplicate.id, duplicate.version)
+        .await
+        .unwrap();
     let updated = store
         .update_model(
             mapping.id,

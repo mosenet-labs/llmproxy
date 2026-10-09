@@ -213,7 +213,7 @@ pub async fn provider_list(
     let applied_q = signal(cx, || q);
     let applied_protocol = signal(cx, || protocol);
     let applied_state = signal(cx, || state);
-    let all = app_context::<AppState>(cx).store.list().await?;
+    let all = app_context::<AppState>(cx).store.clone().list().await?;
     let query = ListQuery {
         q: applied_q.get(),
         protocol: applied_protocol.get(),
@@ -246,6 +246,7 @@ pub async fn provider_list(
     } else {
         app_context::<AppState>(cx)
             .store
+            .clone()
             .get(edit_id.parse::<i64>()?)
             .await?
             .into()

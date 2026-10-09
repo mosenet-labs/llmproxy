@@ -1,6 +1,7 @@
 // Topcoat shards and procedures receive their signal fields as separate arguments.
 #![expect(clippy::too_many_arguments)]
 
+use super::table::page_numbers;
 use std::collections::HashSet;
 
 use llmproxy_core::protocol::Protocol;
@@ -66,26 +67,6 @@ fn protocol_label(protocol: Protocol) -> &'static str {
     }
 }
 
-fn page_numbers(current: usize, total: usize) -> Vec<usize> {
-    let mut visible = vec![
-        1,
-        current.saturating_sub(1).max(1),
-        current,
-        current.saturating_add(1).min(total),
-        total,
-    ];
-    visible.sort_unstable();
-    visible.dedup();
-    let mut result = Vec::new();
-    for number in visible {
-        if result.last().is_some_and(|previous| number > previous + 1) {
-            result.push(0);
-        }
-        result.push(number);
-    }
-    result
-}
-
 #[page]
 pub async fn models(cx: &Cx) -> Result<impl View> {
     let refresh = signal(cx, || 0.0);
@@ -132,9 +113,17 @@ pub async fn model_workspace(
     let page = signal(cx, || 1usize);
     let page_size = signal(cx, || "10".to_owned());
     let state = app_context::<AppState>(cx);
-    let all = state.store.list_models().await?;
-    let price_plans = state.store.list_current_price_plans().await?;
-    let all_providers = state.store.list().await?;
+    let all = app_context::<AppState>(cx)
+        .store
+        .clone()
+        .list_all_models()
+        .await?;
+    let price_plans = app_context::<AppState>(cx)
+        .store
+        .clone()
+        .list_current_price_plans()
+        .await?;
+    let all_providers = app_context::<AppState>(cx).store.clone().list().await?;
     let providers: Vec<_> = all_providers
         .iter()
         .filter(|provider| provider.enabled)
@@ -185,7 +174,11 @@ pub async fn model_workspace(
     let mut health_enabled = HashSet::new();
     let mut health_states = std::collections::HashMap::new();
     for model in &page_models {
-        let checks = state.store.model_health_checks(model.id).await?;
+        let checks = app_context::<AppState>(cx)
+            .store
+            .clone()
+            .model_health_checks(model.id)
+            .await?;
         if checks.iter().any(|check| check.config.enabled) {
             health_enabled.insert(model.id);
         }
@@ -248,7 +241,7 @@ pub async fn model_workspace(
                     "Models"
                 </h1>
                 <p class="mt-2 mb-0 text-sm text-secondary">
-                    "管理具体上游模型；模型标识可直接用于请求，也可在 Model Routes 中创建新的对外模型名。"
+                    "从 Provider 导入模型到系统，再在资源组中选择需要开放的模型。导入不会自动加入任何组。"
                 </p>
             </div>
             <button
@@ -265,7 +258,7 @@ pub async fn model_workspace(
             aria-label="模型列表"
         >
             <div
-                class="flex items-center justify-between gap-4 px-6 py-5 max-[640px]:px-4"
+                class="flex flex-wrap items-center justify-between gap-4 px-6 py-5 max-[640px]:px-4"
             >
                 <h2 class="m-0 text-base font-semibold">
                     "模型列表"
@@ -275,16 +268,18 @@ pub async fn model_workspace(
                         (all.len())
                     </span>
                 </h2>
+                <div class="flex min-w-0 flex-wrap items-center gap-4">
                 <a
                     class="text-[13px] text-primary hover:underline"
                     (topcoat::runtime::link_attrs(
                         cx,
-                        "/ui/routes",
+                        "/ui/groups",
                         topcoat::runtime::prefetch_mode(cx),
                     ))
                 >
-                    "管理 Model Routes →"
+                    "管理组资源 →"
                 </a>
+                </div>
             </div>
             <form
                 class="flex flex-wrap items-center gap-3 border-t border-border px-6 py-4 max-[640px]:px-4 [&_select]:h-9 [&_select]:min-w-[150px] [&_select]:text-sm max-[640px]:[&_select]:min-w-0 max-[640px]:[&_select]:flex-1"
@@ -606,13 +601,17 @@ pub async fn model_workspace(
 #[shard("/ui/_topcoat/runtime/shards/model-candidates")]
 pub async fn model_candidates(cx: &Cx, provider_id: String, open: bool) -> Result<impl View> {
     crate::app::request_connection(cx);
-    let state = app_context::<AppState>(cx);
     let result: std::result::Result<Vec<ModelCandidate>, String> =
         if !open || provider_id.is_empty() {
             Ok(Vec::new())
         } else {
             match provider_id.parse::<i64>() {
-                Ok(id) => match state.store.probe_enabled_target(id).await {
+                Ok(id) => match app_context::<AppState>(cx)
+                    .store
+                    .clone()
+                    .probe_enabled_target(id)
+                    .await
+                {
                     Ok(target) => query_models(target).await,
                     Err(error) => Err(error.to_string()),
                 },

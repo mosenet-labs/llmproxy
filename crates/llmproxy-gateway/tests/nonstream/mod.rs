@@ -94,6 +94,7 @@ impl Database {
                 .await
                 .unwrap();
         }
+        crate::support::assign_catalog(&self.store).await;
     }
 }
 

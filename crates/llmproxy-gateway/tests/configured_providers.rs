@@ -547,6 +547,7 @@ async fn configured_gemini_nonstream_capabilities() {
                         gateway.address,
                         path(source, &alias)
                     ))
+                    .bearer_auth(&gateway.api_key)
                     .header("content-type", "application/json")
                     .body(serde_json::to_vec(&request).unwrap())
                     .send()
@@ -668,7 +669,7 @@ async fn configured_gemini_native_capabilities() {
                 _ => fixtures::reasoning_request(source, &alias),
             };
             let result = async {
-                let response = client.post(format!("http://{}{}", gateway.address, path(source, &alias)))
+                let response = client.post(format!("http://{}{}", gateway.address, path(source, &alias))).bearer_auth(&gateway.api_key)
                     .header("content-type", "application/json").body(serde_json::to_vec(&body).unwrap()).send().await.map_err(|_| "连接或读取超时")?;
                 if !response.status().is_success() {return Err(provider_failure(response).await);}
                 let bytes = response.bytes().await.map_err(|_| "读取响应失败")?;
@@ -765,7 +766,7 @@ async fn configured_messages_cache_creation_and_hit() {
         body["system"] = serde_json::json!([{"type":"text","text":prefix,"cache_control":{"type":"ephemeral","ttl":ttl}}]);
         for attempt in 0..2 {
             let result = async {
-                let response = client.post(format!("http://{}{}", gateway.address, path(Protocol::AnthropicMessages, &alias)))
+                let response = client.post(format!("http://{}{}", gateway.address, path(Protocol::AnthropicMessages, &alias))).bearer_auth(&gateway.api_key)
                     .header("content-type", "application/json").body(serde_json::to_vec(&body).unwrap()).send().await.map_err(|_| "请求超时")?;
                 if !response.status().is_success() {return Err(provider_failure(response).await);}
                 let bytes = response.bytes().await.map_err(|_| "读取响应失败")?;
@@ -830,6 +831,7 @@ async fn configured_gemini_image_output() {
             gateway.address,
             path(Protocol::Gemini, &alias)
         ))
+        .bearer_auth(&gateway.api_key)
         .header("content-type", "application/json")
         .body(serde_json::to_vec(&body).unwrap())
         .send()
@@ -950,7 +952,7 @@ async fn configured_provider_nonstream_matrix() {
                         "http://{}{}",
                         gateway.address,
                         path(source, &alias)
-                    ))
+                    )).bearer_auth(&gateway.api_key)
                     .header("content-type", "application/json")
                     .body(
                         serde_json::to_vec(&request).unwrap(),
@@ -980,7 +982,7 @@ async fn configured_provider_nonstream_matrix() {
                     } else { call.arguments.clone() };
                     if arguments["q"] != "test" { return Err("函数参数未保留".into()); }
                     let next = fixtures::tool_result_request(source, &alias, &request, &ir, call)?;
-                    let response = client.post(format!("http://{}{}", gateway.address, path(source, &alias)))
+                    let response = client.post(format!("http://{}{}", gateway.address, path(source, &alias))).bearer_auth(&gateway.api_key)
                         .header("content-type", "application/json")
                         .body(serde_json::to_vec(&next).unwrap()).send().await.map_err(|_| "工具结果回传连接失败")?;
                     if !response.status().is_success() { return Err(format!("工具结果回传 HTTP {}", response.status().as_u16())); }

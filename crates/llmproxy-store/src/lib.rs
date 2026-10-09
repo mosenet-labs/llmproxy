@@ -253,6 +253,7 @@ pub struct ModelMappingInput {
 
 #[derive(Clone, Debug)]
 pub struct ModelMappingView {
+    pub group_ids: Vec<i64>,
     /// 实际 Provider／模型的思考能力与启用参数。
     pub thinking: llmproxy_core::thinking::Config,
     pub id: i64,
@@ -289,6 +290,7 @@ pub struct ModelRouteTargetView {
 
 #[derive(Clone, Debug)]
 pub struct ModelRouteView {
+    pub group_ids: Vec<i64>,
     pub id: i64,
     pub name: String,
     pub protocol: Protocol,
@@ -309,4 +311,51 @@ pub struct ModelRoute {
     pub enabled: bool,
     pub provider: Option<ActiveProvider>,
     pub protocol: Protocol,
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupView {
+    pub id: i64,
+    pub name: String,
+    pub enabled: bool,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct VirtualKeyInput {
+    pub name: String,
+    pub all_routes: bool,
+    pub route_ids: Vec<i64>,
+    pub model_ids: Vec<i64>,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VirtualKeyView {
+    pub id: i64,
+    pub group_id: i64,
+    pub name: String,
+    pub prefix: String,
+    pub all_routes: bool,
+    pub route_ids: Vec<i64>,
+    pub model_ids: Vec<i64>,
+    pub enabled: bool,
+    pub revoked: bool,
+    pub expires_at: Option<i64>,
+    pub version: u64,
+}
+
+/// 一次性返回的明文密钥，不实现 Debug/Serialize。
+pub struct CreatedVirtualKey {
+    pub view: VirtualKeyView,
+    pub secret: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CallIdentity {
+    pub group_id: i64,
+    pub key_id: i64,
+    pub all_routes: bool,
+    pub route_ids: Vec<i64>,
+    pub model_ids: Vec<i64>,
 }

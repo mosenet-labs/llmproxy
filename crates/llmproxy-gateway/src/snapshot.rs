@@ -11,6 +11,7 @@ use llmproxy_core::{
 };
 use llmproxy_store::{DatabaseConfig, ModelRoute, ProviderStore, StoreError};
 use tokio::{runtime::Builder, sync::oneshot, time};
+use tokio_util::sync::CancellationToken;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -81,6 +82,9 @@ impl ResolvedProvider {
 #[derive(Default)]
 pub struct ProviderSnapshot {
     models: HashMap<(Protocol, String), Arc<ResolvedModel>>,
+    groups: HashMap<i64, ProviderSnapshot>,
+    route_ids: HashMap<(Protocol, String), i64>,
+    model_ids: HashMap<(Protocol, String), i64>,
 }
 
 pub struct ResolvedModel {
@@ -108,7 +112,21 @@ impl ProviderSnapshot {
     }
 
     fn select(&self, protocol: Protocol, alias: &str) -> Option<Arc<ResolvedModel>> {
-        let exact = self.models.get(&(protocol, alias.to_owned()));
+        self.select_allowed(protocol, alias, |_| true)
+    }
+
+    fn select_allowed(
+        &self,
+        protocol: Protocol,
+        alias: &str,
+        allowed: impl Fn(Protocol) -> bool,
+    ) -> Option<Arc<ResolvedModel>> {
+        let get = |kind| {
+            self.models
+                .get(&(kind, alias.to_owned()))
+                .filter(|_| allowed(kind))
+        };
+        let exact = get(protocol);
         // Explicitly disabled configuration must not be bypassed by bridging.
         if let Some(model) = exact
             && (model.provider.is_none() || !model.blocked)
@@ -117,14 +135,10 @@ impl ProviderSnapshot {
         }
         PROTOCOLS
             .iter()
-            .filter_map(|kind| self.models.get(&(*kind, alias.to_owned())))
+            .filter_map(|kind| get(*kind))
             .find(|model| model.provider.is_some() && !model.blocked)
             .or(exact)
-            .or_else(|| {
-                PROTOCOLS
-                    .iter()
-                    .find_map(|kind| self.models.get(&(*kind, alias.to_owned())))
-            })
+            .or_else(|| PROTOCOLS.iter().find_map(|kind| get(*kind)))
             .cloned()
     }
 
@@ -156,18 +170,57 @@ impl ProviderSnapshot {
             .collect()
     }
 
+    fn allows(&self, identity: &llmproxy_store::CallIdentity, key: &(Protocol, String)) -> bool {
+        identity.all_routes
+            || if let Some(id) = self.route_ids.get(key) {
+                identity.route_ids.contains(id)
+            } else {
+                self.model_ids
+                    .get(key)
+                    .is_some_and(|id| identity.model_ids.contains(id))
+            }
+    }
+
     async fn load(store: &ProviderStore) -> Result<Self, ()> {
-        let routes = store.load_model_routes().await.map_err(|_| ())?;
-        let ids: HashSet<_> = routes.iter().filter_map(|route| route.model_id).collect();
-        let mut unavailable = HashSet::new();
-        for id in ids {
-            for check in store.model_health_checks(id).await.map_err(|_| ())? {
-                if check.status.blocks_calls() {
-                    unavailable.insert((id, check.protocol));
+        let mut root = Self::default();
+        for group in store.list_groups().await.map_err(|_| ())? {
+            if !group.enabled {
+                continue;
+            }
+            let scoped = store.for_group(group.id);
+            let routes = scoped.load_model_routes().await.map_err(|_| ())?;
+            let ids: HashSet<_> = routes.iter().filter_map(|route| route.model_id).collect();
+            let mut unavailable = HashSet::new();
+            for id in ids {
+                for check in scoped.model_health_checks(id).await.map_err(|_| ())? {
+                    if check.status.blocks_calls() {
+                        unavailable.insert((id, check.protocol));
+                    }
                 }
             }
+            let mut snapshot = Self::from_database(routes, &unavailable).map_err(|_| ())?;
+            snapshot.route_ids = scoped
+                .list_routes()
+                .await
+                .map_err(|_| ())?
+                .into_iter()
+                .map(|route| ((route.protocol, route.name), route.id))
+                .collect();
+            snapshot.model_ids = scoped
+                .list_models()
+                .await
+                .map_err(|_| ())?
+                .into_iter()
+                .flat_map(|model| {
+                    model
+                        .protocols
+                        .into_iter()
+                        .map(move |protocol| ((protocol, model.alias.clone()), model.id))
+                })
+                .collect();
+            root.groups.insert(group.id, snapshot);
         }
-        Self::from_database(routes, &unavailable).map_err(|_| ())
+        Ok(root)
     }
 
     fn from_database(
@@ -251,6 +304,7 @@ impl ProviderSnapshots {
         }
     }
 
+    #[cfg(test)]
     pub fn select(&self, protocol: Protocol, alias: &str) -> Option<Arc<ResolvedModel>> {
         self.current
             .read()
@@ -258,11 +312,63 @@ impl ProviderSnapshots {
             .select(protocol, alias)
     }
 
-    pub fn catalog(&self) -> Vec<CatalogModel> {
-        self.current
+    pub fn select_for(
+        &self,
+        group_id: i64,
+        identity: Option<&llmproxy_store::CallIdentity>,
+        protocol: Protocol,
+        alias: &str,
+    ) -> Result<(Arc<ResolvedModel>, Option<i64>), u16> {
+        let current = self
+            .current
             .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .catalog()
+            .unwrap_or_else(|error| error.into_inner());
+        let snapshot = current
+            .groups
+            .get(&group_id)
+            .or_else(|| (group_id == 1 && current.groups.is_empty()).then_some(current.as_ref()))
+            .ok_or(404u16)?;
+        if identity.is_none() {
+            return snapshot
+                .select(protocol, alias)
+                .map(|model| (model, None))
+                .ok_or(404);
+        }
+        let identity = identity.unwrap();
+        let allowed = |key: &(Protocol, String)| snapshot.allows(identity, key);
+        if !snapshot.models.keys().any(|key| key.1 == alias) {
+            return Err(404);
+        }
+        let model = snapshot
+            .select_allowed(protocol, alias, |kind| allowed(&(kind, alias.to_owned())))
+            .ok_or(403u16)?;
+        let route_id = snapshot
+            .models
+            .iter()
+            .find(|(_, candidate)| Arc::ptr_eq(candidate, &model))
+            .and_then(|(key, _)| snapshot.route_ids.get(key))
+            .copied();
+        Ok((model, route_id))
+    }
+
+    pub fn catalog_for(&self, identity: &llmproxy_store::CallIdentity) -> Vec<CatalogModel> {
+        let current = self
+            .current
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(snapshot) = current.groups.get(&identity.group_id) else {
+            return Vec::new();
+        };
+        ProviderSnapshot {
+            models: snapshot
+                .models
+                .iter()
+                .filter(|(key, _)| snapshot.allows(identity, key))
+                .map(|(key, model)| (key.clone(), model.clone()))
+                .collect(),
+            ..Default::default()
+        }
+        .catalog()
     }
 
     fn replace(&self, snapshot: ProviderSnapshot) {
@@ -309,10 +415,15 @@ impl ProviderSnapshots {
         let snapshots = Self::new(initial);
         let background = snapshots.clone();
         let gateway_store = store.clone();
-        let (stop, mut stopping) = oneshot::channel();
+        let stop = CancellationToken::new();
+        let stopping = stop.clone();
+        let stopped = CancellationToken::new();
+        let finished = stopped.clone();
+        let (shutdown, shutting_down) = oneshot::channel();
         let thread = thread::Builder::new()
             .name("provider-snapshot-refresh".to_owned())
             .spawn(move || {
+                let _finished = finished.clone().drop_guard();
                 runtime.block_on(async move {
                     let mut interval = time::interval_at(
                         time::Instant::now() + REFRESH_INTERVAL,
@@ -329,7 +440,8 @@ impl ProviderSnapshots {
                                 .map_err(|_| ())
                         };
                         let loaded = tokio::select! {
-                            _ = &mut stopping => break,
+                            biased;
+                            _ = stopping.cancelled() => break,
                             loaded = next_snapshot => loaded,
                         };
                         match loaded {
@@ -349,13 +461,24 @@ impl ProviderSnapshots {
                             }
                         }
                     }
+                    tracing::info!(
+                        component = "gateway",
+                        event_kind = "runtime",
+                        "provider snapshot refresh stopped"
+                    );
+                    finished.cancel();
+                    // Toasty's pooled connection workers run on this runtime too.
+                    // Keep them alive until HTTP and console runtimes have stopped.
+                    let _ = shutting_down.await;
                 });
             })
             .map_err(|_| "cannot start provider snapshot refresh")?;
         Ok((
             snapshots,
             DatabaseRefresh {
-                stop: Some(stop),
+                stop,
+                stopped,
+                shutdown: Some(shutdown),
                 thread: Some(thread),
             },
             gateway_store,
@@ -364,14 +487,46 @@ impl ProviderSnapshots {
 }
 
 pub struct DatabaseRefresh {
-    stop: Option<oneshot::Sender<()>>,
+    stop: CancellationToken,
+    stopped: CancellationToken,
+    shutdown: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl DatabaseRefresh {
+    pub fn shutdown_signal(&self) -> impl pingora::server::ShutdownSignalWatch + use<> {
+        DatabaseShutdown {
+            stop: self.stop.clone(),
+            stopped: self.stopped.clone(),
+        }
+    }
+}
+
+#[cfg(unix)]
+struct DatabaseShutdown {
+    stop: CancellationToken,
+    stopped: CancellationToken,
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl pingora::server::ShutdownSignalWatch for DatabaseShutdown {
+    async fn recv(&self) -> pingora::server::ShutdownSignal {
+        use pingora::server::UnixShutdownSignalWatch;
+
+        let signal = UnixShutdownSignalWatch.recv().await;
+        self.stop.cancel();
+        self.stopped.cancelled().await;
+        signal
+    }
 }
 
 impl Drop for DatabaseRefresh {
     fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+        self.stop.cancel();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
         }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -385,6 +540,40 @@ mod tests {
 
     use super::{ProviderSnapshot, ProviderSnapshots, ResolvedModel, ResolvedProvider};
     use llmproxy_core::protocol::{MessagesAuth, Protocol};
+
+    #[test]
+    fn stopping_refresh_keeps_database_workers_alive_until_services_exit() {
+        let directory = std::env::temp_dir().join(format!(
+            "llmproxy-refresh-shutdown-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = llmproxy_store::DatabaseConfig::from_values(
+            &format!("sqlite:{}", directory.join("providers.sqlite3").display()),
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        )
+        .unwrap();
+        let (_, refresh, store) = ProviderSnapshots::database(&config).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            refresh.stop.cancel();
+            tokio::time::timeout(super::DATABASE_TIMEOUT, refresh.stopped.cancelled())
+                .await
+                .expect("snapshot refresh must stop before service runtimes shut down");
+            assert!(!refresh.thread.as_ref().unwrap().is_finished());
+            assert_eq!(store.list_groups().await.unwrap().len(), 1);
+        });
+        drop(store);
+        drop(runtime);
+        drop(refresh);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn provider(host: &str, secret: &str) -> ResolvedProvider {
         ResolvedProvider {

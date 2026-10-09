@@ -10,7 +10,11 @@
 bash scripts/dev.sh up
 ```
 
-默认监听 `127.0.0.1:3200`。打开 `http://127.0.0.1:3200/ui/providers` 新增并启用 Provider，配置其支持的协议、上游路径和模型探测接口（默认 `/models`）；然后到 `/ui/models` 添加具体模型并设置至少一个协议。模型标识可直接用于客户端请求。到 `/ui/routes` 可创建新的对外模型名，添加不同 Provider 的候选模型并调整顺序。OpenAI 和 Anthropic 请求在请求体顶层 `model` 字段填写模型标识或路由名称，网关将其改写成所选上游模型 ID；Gemini 请求在路径中填写。控制台保存后，新请求约一秒内使用新配置；没有模型和路由时服务可启动，但代理请求不会自动选择 Provider。
+默认监听 `127.0.0.1:3200`。打开 `http://127.0.0.1:3200/ui/providers` 新增并启用 Provider，配置其支持的协议、上游路径和模型探测接口（默认 `/models`）；然后到 `/ui/models` 添加具体模型并设置至少一个协议。导入仅保存到系统列表，不会自动加入任何组。选择模型或路由加入资源组后，才可用该组虚拟 Key 调用。到 `/ui/routes` 可创建新的对外模型名，添加不同 Provider 的候选模型并调整顺序。OpenAI 和 Anthropic 请求在请求体顶层 `model` 字段填写模型标识或路由名称，网关将其改写成所选上游模型 ID；Gemini 请求在路径中填写。控制台保存后，新请求约一秒内使用新配置；没有模型和路由时服务可启动，但代理请求不会自动选择 Provider。
+
+在 `/ui/groups` 管理全部资源组，点击组列表的“模型”和“Keys”分别进入 `/ui/groups/{group_id}/models` 与 `/ui/groups/{group_id}/keys`。Provider 全局共享；Models 和 Model Routes 维护全系统资源列表，不显示分组切换；虚拟 Key 按组管理，组内页面明确显示所属组，通过 URL 固定组上下文；Chat 在工作区选择组。资源组页面管理所有组，不显示切组器；左侧只保留资源组入口，组内页面的面包屑为“控制台 / 资源组 / 模型”或“控制台 / 资源组 / Keys”。模型导入、路由新建及旧库升级均不自动加入 `default` 或其他组；不同组可使用相同模型或路由名称；在组内模型页点击“添加模型或路由”，搜索、勾选系统中已有的模型和路由加入组，同一资源可加入多个组。路由可引用系统已导入的模型，不会自动开放候选模型别名。虚拟 Key 仅属于一个组。**模型调用和 `/models`、`/v1/models` 列表均要求虚拟 Key**，升级后现有外部客户端须配置新 Key。完整 Key 只在创建时展示一次；指定模式可分别勾选本组 Models 和 Model Routes，未选择资源则无调用权限；全部模式开放组内模型与路由（包含未来加入组的资源）。Key 停用、撤销或过期，以及组停用，会立即拒绝新请求。控制台 Chat 使用服务端内部认证。
+
+OpenAI 客户端使用 `Authorization: Bearer <虚拟 Key>`，Anthropic 客户端使用 `x-api-key: <虚拟 Key>`，Gemini 客户端使用 `x-goog-api-key: <虚拟 Key>`。模型接口仅接受这三种标准认证头，不支持自定义认证头或 URL 参数认证；多个认证头必须提供相同凭据。Provider 的上游 Key 仍由服务器管理。设计和任务见[组隔离与虚拟 Key](docs/38-groups-and-virtual-keys.md)、[任务清单](docs/39-groups-and-virtual-keys-tasks.md)。
 
 Gemini 原生接入：在 Providers 中选择 Gemini，上游地址填写 `https://generativelanguage.googleapis.com`，Gemini 上游模型路径前缀填写 `/v1beta/models`，模型列表路径填写 `/v1beta/models`，API Key 使用 Google AI Studio 的 Gemini API Key。保存后在 Models 中关联 Gemini 模型。客户端路径中的 `{model}` 使用模型标识或 Model Route 名称；请求体和响应保持 Gemini 原生格式。
 

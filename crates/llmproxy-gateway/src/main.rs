@@ -42,7 +42,13 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     service.add_tcp(&listen);
     observability::listening(&listen);
     server.add_service(service);
+    #[cfg(unix)]
+    let run_args = pingora::server::RunArgs {
+        shutdown_signal: Box::new(_refresh.shutdown_signal()),
+    };
+    #[cfg(not(unix))]
+    let run_args = Default::default();
     // run_forever exits the process directly, skipping the telemetry guard.
-    server.run(Default::default());
+    server.run(run_args);
     Ok(())
 }

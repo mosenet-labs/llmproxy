@@ -83,6 +83,7 @@ async fn thinking_picker_does_not_reuse_another_conversations_client_value() {
         .select_chat(&enabled, &selection, Choice::Enabled)
         .await
         .unwrap();
+    support::assign_catalog(&database.store).await;
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     let client = reqwest::Client::new();
     let base = format!("http://{}/ui", gateway.address);

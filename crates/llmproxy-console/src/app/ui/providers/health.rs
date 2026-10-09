@@ -49,14 +49,7 @@ pub async fn provider_health(cx: &Cx, provider_id: i64, enabled: bool) -> Result
         loop {
             let mut checks = Vec::new();
             if enabled {
-                for model in state
-                    .store
-                    .list_models()
-                    .await?
-                    .into_iter()
-                    .filter(|model| model.provider_id == provider_id) {
-                    checks.extend(state.store.model_health_checks(model.id).await?);
-                }
+                checks = state.store.provider_health_checks(provider_id).await?;
             }
             let (label, tone) = status(&checks);
             let token = emit! {

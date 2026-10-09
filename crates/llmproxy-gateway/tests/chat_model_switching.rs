@@ -211,6 +211,7 @@ impl Fixture {
                 .await
                 .unwrap();
         }
+        support::assign_catalog(&database.store).await;
         let gateway = Gateway::database(&database.url, MASTER_KEY);
         Self {
             gateway,
@@ -358,9 +359,23 @@ async fn history_records_source_usage_in_all_directions_and_survives_restart() {
                     .1
                     .recv_timeout(DEADLINE)
                     .unwrap();
-                assert!(!request.headers.iter().any(|(key, _)| {
-                    key.eq_ignore_ascii_case(llmproxy_store::chat_history::AUTH_HEADER)
-                }));
+                let (auth_header, provider_key) = match target {
+                    Protocol::OpenAiChat | Protocol::OpenAiResponses => {
+                        ("authorization", "Bearer stream-key")
+                    }
+                    Protocol::AnthropicMessages => ("x-api-key", "stream-key"),
+                    Protocol::Gemini => ("x-goog-api-key", "stream-key"),
+                };
+                assert_eq!(
+                    support::values(&request.headers, auth_header),
+                    [provider_key]
+                );
+                assert!(
+                    !request
+                        .headers
+                        .iter()
+                        .any(|(key, _)| { key.eq_ignore_ascii_case("x-llmproxy-history-auth") })
+                );
                 assert!(!request.headers.iter().any(|(key, _)| {
                     key.eq_ignore_ascii_case(llmproxy_store::chat_history::REQUEST_HEADER)
                 }));
@@ -380,6 +395,7 @@ async fn history_records_source_usage_in_all_directions_and_survives_restart() {
         upstreams,
     } = fixture;
     drop(gateway);
+    support::assign_catalog(&database.store).await;
     fixture = Fixture {
         gateway: Gateway::database(&database.url, MASTER_KEY),
         database,
@@ -627,7 +643,8 @@ async fn history_keeps_partial_usage_on_stop_and_rejects_forged_association() {
             fixture.gateway.address,
             Protocol::OpenAiChat.upstream_path()
         ))
-        .header(llmproxy_store::chat_history::AUTH_HEADER, "forged")
+        .bearer_auth(&fixture.gateway.api_key)
+        .header("x-llmproxy-history-auth", "forged")
         .header(llmproxy_store::chat_history::REQUEST_HEADER, &record.id)
         .json(&fixtures::request(
             Protocol::OpenAiChat,
@@ -704,6 +721,7 @@ async fn history_keeps_partial_usage_on_stop_and_rejects_forged_association() {
         upstreams,
     } = fixture;
     drop(gateway);
+    support::assign_catalog(&database.store).await;
     fixture = Fixture {
         gateway: Gateway::database(&database.url, MASTER_KEY),
         database,
@@ -1143,6 +1161,7 @@ async fn thinking_switches_all_sixteen_directions_and_keeps_native_streaming() {
                         fixture.gateway.address,
                         nonstream::path(source, &alias)
                     ))
+                    .bearer_auth(&fixture.gateway.api_key)
                     .header(HEADER, choice.as_str())
                     .json(&body)
                     .send()
@@ -1222,6 +1241,7 @@ async fn thinking_switches_all_sixteen_directions_and_keeps_native_streaming() {
         };
         let mut response = client
             .post(format!("http://{}{}", fixture.gateway.address, path))
+            .bearer_auth(&fixture.gateway.api_key)
             .header(HEADER, "enabled")
             .json(&body)
             .send()
@@ -1260,6 +1280,7 @@ async fn thinking_switches_all_sixteen_directions_and_keeps_native_streaming() {
                 "http://{}/v1/chat/completions",
                 fixture.gateway.address
             ))
+            .bearer_auth(&fixture.gateway.api_key)
             .header(HEADER, choice)
             .json(&fixtures::request(Protocol::OpenAiChat, alias, "rejected"))
             .send()
@@ -1269,10 +1290,12 @@ async fn thinking_switches_all_sixteen_directions_and_keeps_native_streaming() {
         assert!(response.text().await.unwrap().contains("思考"));
     }
     for headers in [vec!["invalid"], vec!["enabled", "disabled"]] {
-        let mut builder = client.post(format!(
-            "http://{}/v1/chat/completions",
-            fixture.gateway.address
-        ));
+        let mut builder = client
+            .post(format!(
+                "http://{}/v1/chat/completions",
+                fixture.gateway.address
+            ))
+            .bearer_auth(&fixture.gateway.api_key);
         for value in headers {
             builder = builder.header(HEADER, value);
         }
@@ -1317,6 +1340,7 @@ async fn enabled_gemini_summaries_reach_all_clients_in_both_modes() {
             };
             let response = client
                 .post(format!("http://{}{}", fixture.gateway.address, path))
+                .bearer_auth(&fixture.gateway.api_key)
                 .header(HEADER, "enabled")
                 .json(&body)
                 .send()
@@ -1545,6 +1569,7 @@ async fn chat_health_blocks_confirmed_failures_and_preserves_selection_and_provi
         })
         .await
         .unwrap();
+    support::assign_catalog(&fixture.database.store).await;
     let rejected = procedure(
         &client,
         &base,

@@ -390,6 +390,7 @@ async fn live_run_capacity_cancellation_and_slow_reader_are_isolated() {
     body["stream"] = json!(true);
     let response = client
         .post(format!("http://{}/v1/chat/completions", gateway.address))
+        .bearer_auth(&gateway.api_key)
         .json(&body)
         .send()
         .await

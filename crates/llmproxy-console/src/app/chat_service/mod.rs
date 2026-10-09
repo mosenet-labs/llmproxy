@@ -36,17 +36,20 @@ impl ChatService<'_> {
     pub async fn create(&self, selection: Selection) -> topcoat::Result<String> {
         let id = new_id()?;
         let room = self.store.create_chat_conversation(&id, &selection).await?;
-        self.sessions.restore(&room, &[]);
+        self.sessions.restore(self.store.group_id(), &room, &[]);
         Ok(id)
     }
     /// 活跃会话复用内存，空闲历史首次访问从数据库恢复。
     pub async fn load(&self, id: &str) -> topcoat::Result<Arc<ChatSession>> {
         if let Some(room) = self.sessions.get(id) {
+            if room.group_id != self.store.group_id() {
+                return Err(topcoat::router::error::forbidden().into());
+            }
             return Ok(room);
         }
         let room = self.store.get_chat_conversation(id).await?;
         let turns = self.store.chat_turns(id).await?;
-        Ok(self.sessions.restore(&room, &turns))
+        Ok(self.sessions.restore(self.store.group_id(), &room, &turns))
     }
     /// 页面初始化恢复最近会话，没有记录时创建首个会话。
     pub async fn initial(&self, fallback: Selection) -> topcoat::Result<(String, Selection)> {

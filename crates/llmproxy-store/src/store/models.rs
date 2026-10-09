@@ -1,8 +1,17 @@
 use super::*;
 
-async fn check_route_name_available(tx: &mut Transaction<'_>, name: &str) -> StoreResult<()> {
+pub(super) async fn check_route_name_available(
+    tx: &mut Transaction<'_>,
+    name: &str,
+    group_id: i64,
+) -> StoreResult<()> {
     if ModelRouteRow::all()
         .filter(ModelRouteRow::fields().name().eq(name))
+        .filter(
+            ModelRouteRow::fields()
+                .id()
+                .in_list(groups::route_ids(tx, group_id).await?),
+        )
         .select(ModelRouteRow::fields().id())
         .first()
         .exec(tx)
@@ -15,11 +24,34 @@ async fn check_route_name_available(tx: &mut Transaction<'_>, name: &str) -> Sto
 }
 
 impl ProviderStore {
+    /// Call entries explicitly selected for this group (Chat and gateway scope).
     pub async fn list_models(&self) -> StoreResult<Vec<ModelMappingView>> {
+        self.models_in_group(Some(self.group_id)).await
+    }
+
+    /// System catalog, including resources that have not been selected for any group.
+    pub async fn list_all_models(&self) -> StoreResult<Vec<ModelMappingView>> {
+        self.models_in_group(None).await
+    }
+
+    async fn models_in_group(&self, group: Option<i64>) -> StoreResult<Vec<ModelMappingView>> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
-        let mappings = ModelMapping::all()
+        let mut memberships = groups::model_group_map(&mut tx).await?;
+        let mut query = ModelMapping::all();
+        if let Some(id) = group {
+            query = query.filter(
+                ModelMapping::fields().id().in_list(
+                    memberships
+                        .iter()
+                        .filter(|(_, groups)| groups.contains(&id))
+                        .map(|(model, _)| *model)
+                        .collect::<Vec<_>>(),
+                ),
+            );
+        }
+        let mappings = query
             .order_by(ModelMapping::fields().id().asc())
             .exec(&mut tx)
             .await?;
@@ -27,24 +59,28 @@ impl ProviderStore {
             load_providers(&mut tx, mappings.iter().map(|mapping| mapping.provider_id)).await?;
         let mut result = Vec::with_capacity(mappings.len());
         for mapping in mappings {
-            result.push(mapping_view(
+            let mut view = mapping_view(
                 &mapping,
                 providers
                     .get(&mapping.provider_id)
                     .ok_or(StoreError::NotFound)?,
-            )?);
+            )?;
+            view.group_ids = memberships.remove(&mapping.id).unwrap_or_default();
+            result.push(view);
         }
         tx.commit().await?;
         Ok(result)
     }
 
+    /// Read catalog configuration independently of group call permissions.
     pub async fn get_model(&self, id: i64) -> StoreResult<ModelMappingView> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
         let mapping = find_mapping(&mut tx, id).await?;
         let provider = find(&mut tx, mapping.provider_id).await?;
-        let view = mapping_view(&mapping, &provider)?;
+        let mut view = mapping_view(&mapping, &provider)?;
+        view.group_ids = groups::model_groups(&mut tx, mapping.id).await?;
         tx.commit().await?;
         Ok(view)
     }
@@ -56,8 +92,6 @@ impl ProviderStore {
         self.bindings(&mut tx, true).await?;
         let provider = find(&mut tx, input.provider_id).await?;
         check_mapping_provider(&provider, &input)?;
-        check_unique_alias(&mut tx, &input.alias, None).await?;
-        check_route_name_available(&mut tx, &input.alias).await?;
         let upstream_model_id = input.upstream_model_id.clone();
         let catalog_price = input.reference_price.clone();
         let mapping = ModelMapping::create()
@@ -129,12 +163,6 @@ impl ProviderStore {
             let label = input.upstream_model_id.clone();
             check_mapping_provider(&provider, &input)
                 .map_err(|error| StoreError::Validation(format!("「{label}」：{error}")))?;
-            check_unique_alias(&mut tx, &input.alias, None)
-                .await
-                .map_err(|error| StoreError::Conflict(format!("「{label}」：{error}")))?;
-            check_route_name_available(&mut tx, &input.alias)
-                .await
-                .map_err(|error| StoreError::Conflict(format!("「{label}」：{error}")))?;
             let upstream_model_id = input.upstream_model_id.clone();
             let catalog_price = input.reference_price.clone();
             let mapping = ModelMapping::create()
@@ -165,7 +193,8 @@ impl ProviderStore {
                 pricing::seed_catalog_price(&mut tx, provider_id, &upstream_model_id, price)
                     .await?;
             }
-            saved.push(mapping_view(&mapping, &provider)?);
+            let view = mapping_view(&mapping, &provider)?;
+            saved.push(view);
         }
         tx.commit().await?;
         Ok(saved)
@@ -204,9 +233,9 @@ impl ProviderStore {
                 ));
             }
         }
-        check_unique_alias(&mut tx, &input.alias, Some(id)).await?;
-        if input.alias != mapping.alias {
-            check_route_name_available(&mut tx, &input.alias).await?;
+        for group_id in groups::model_groups(&mut tx, id).await? {
+            check_unique_alias(&mut tx, &input.alias, group_id, Some(id)).await?;
+            check_route_name_available(&mut tx, &input.alias, group_id).await?;
         }
         mapping
             .update()
@@ -233,7 +262,8 @@ impl ProviderStore {
             .updated_at(now()?)
             .exec(&mut tx)
             .await?;
-        let view = mapping_view(&mapping, &provider)?;
+        let mut view = mapping_view(&mapping, &provider)?;
+        view.group_ids = groups::model_groups(&mut tx, mapping.id).await?;
         tx.commit().await?;
         Ok(view)
     }
@@ -254,6 +284,9 @@ impl ProviderStore {
             return Err(StoreError::Conflict(
                 "此模型仍被模型路由使用，请先从路由中移除".into(),
             ));
+        }
+        for group_id in groups::model_groups(&mut tx, id).await? {
+            Self::touch_group(&mut tx, group_id).await?;
         }
         mapping.delete().exec(&mut tx).await?;
         tx.commit().await?;
@@ -277,7 +310,15 @@ impl ProviderStore {
             .iter()
             .map(|mapping| (mapping.id, mapping))
             .collect();
-        for route in ModelRouteRow::all().exec(&mut tx).await? {
+        for route in ModelRouteRow::all()
+            .filter(
+                ModelRouteRow::fields()
+                    .id()
+                    .in_list(groups::route_ids(&mut tx, self.group_id).await?),
+            )
+            .exec(&mut tx)
+            .await?
+        {
             let protocol = routes::protocol_from_str(&route.protocol)?;
             let provider_protocol = routes::protocol_from_str(&route.provider_protocol)?;
             route_names.insert((route.name.clone(), protocol));
@@ -326,7 +367,11 @@ impl ProviderStore {
                 protocol,
             });
         }
-        for mapping in &mapping_rows {
+        let member_ids = groups::model_ids(&mut tx, self.group_id).await?;
+        for mapping in mapping_rows
+            .iter()
+            .filter(|mapping| member_ids.contains(&mapping.id))
+        {
             let provider = providers
                 .get(&mapping.provider_id)
                 .ok_or(StoreError::NotFound)?;
@@ -368,6 +413,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         let mapping = find_mapping(&mut tx, id).await?;
+        self.require_model_member(&mut tx, mapping.id).await?;
         if !mapping.protocols().contains(&protocol) {
             return Err(StoreError::Validation("模型未配置所选协议".into()));
         }

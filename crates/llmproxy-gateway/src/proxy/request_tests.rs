@@ -19,6 +19,8 @@ const ALL: [Protocol; 4] = [
 
 fn context(source: Protocol, target: Protocol, stream: bool) -> RequestContext {
     RequestContext {
+        identity: None,
+        group_id: 1,
         history: None,
         thinking: Default::default(),
         thinking_error: None,
@@ -60,6 +62,7 @@ fn header() -> RequestHeader {
         ("authorization", "Bearer client"),
         ("x-api-key", "client"),
         ("x-goog-api-key", "client"),
+        ("x-llmproxy-history-auth", "legacy-client"),
         ("accept", "text/event-stream"),
         ("accept-encoding", "gzip"),
         ("content-type", "application/octet-stream"),
@@ -88,6 +91,7 @@ fn four_by_four_http_metadata_matches_target_and_stream_intent() {
                 let ctx = context(source, target, stream);
                 let mut header = header();
                 request::filter(&mut header, &ctx).unwrap();
+                assert!(!header.headers.contains_key("x-llmproxy-history-auth"));
                 let expected = if target == Protocol::Gemini {
                     format!(
                         "/v1beta/models/a%2Fb%20%3F:{}{}",

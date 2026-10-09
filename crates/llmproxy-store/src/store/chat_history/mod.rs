@@ -45,6 +45,13 @@ fn conversation(cipher: &KeyCipher, row: ChatConversationRow) -> StoreResult<Con
     })
 }
 impl ProviderStore {
+    fn chat_owner(&self) -> String {
+        if self.group_id == 1 {
+            chat_history::OWNER.into()
+        } else {
+            format!("group:{}", self.group_id)
+        }
+    }
     /// PostgreSQL 锁定会话行；SQLite 写事务使用 IMMEDIATE。
     async fn chat_row(
         &self,
@@ -64,7 +71,7 @@ impl ProviderStore {
             .exec(&mut *tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        if row.owner != chat_history::OWNER {
+        if row.owner != self.chat_owner() {
             return Err(StoreError::NotFound);
         }
         Ok(row)
@@ -87,7 +94,7 @@ impl ProviderStore {
         let timestamp = now()?;
         let row = ChatConversationRow::create()
             .id(key)
-            .owner(chat_history::OWNER)
+            .owner(self.chat_owner())
             .title(self.cipher.encrypt_bound("", &associated(key, "title"))?)
             .selection_json(json(selection)?)
             .thinking("default")
@@ -127,11 +134,7 @@ impl ProviderStore {
         let mut tx = self.transaction(&mut connection, false).await?;
         self.verify_tool_key(&mut tx).await?;
         let rows = ChatConversationRow::all()
-            .filter(
-                ChatConversationRow::fields()
-                    .owner()
-                    .eq(chat_history::OWNER),
-            )
+            .filter(ChatConversationRow::fields().owner().eq(self.chat_owner()))
             .filter(ChatConversationRow::fields().archived().eq(archived))
             .order_by(ChatConversationRow::fields().updated_at().desc())
             .order_by(ChatConversationRow::fields().id().desc())
@@ -154,7 +157,7 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        if row.owner != chat_history::OWNER {
+        if row.owner != self.chat_owner() {
             return Err(StoreError::NotFound);
         }
         tx.commit().await?;
@@ -477,17 +480,15 @@ impl ProviderStore {
             .exec(&mut connection)
             .await?
             .ok_or(StoreError::NotFound)?;
+        drop(connection);
+        self.get_chat_conversation(&row.conversation_id).await?;
         self.turn(row)
     }
     /// 启动恢复单个本地服务遗留的轮次，不自动重新调用 Provider。
     pub async fn recover_chat_history(&self) -> StoreResult<()> {
         let mut connection = self.connection().await?;
         let rows = ChatConversationRow::all()
-            .filter(
-                ChatConversationRow::fields()
-                    .owner()
-                    .eq(chat_history::OWNER),
-            )
+            .filter(ChatConversationRow::fields().owner().eq(self.chat_owner()))
             .exec(&mut connection)
             .await?;
         drop(connection);

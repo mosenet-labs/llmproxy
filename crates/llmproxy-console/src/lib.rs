@@ -48,7 +48,9 @@ impl Console {
         listen: SocketAddr,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         store.list().await?;
-        store.recover_chat_history().await?;
+        for group in store.list_groups().await? {
+            store.for_group(group.id).recover_chat_history().await?;
+        }
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|_| io::Error::other("无法生成安全随机令牌"))?;
         let csrf = random.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -71,7 +73,6 @@ impl Console {
             port: listen.port(),
             telemetry,
             chat_sessions: std::sync::Arc::new(app::chat_sessions::ChatSessions::default()),
-            chat_client: reqwest::Client::builder().no_proxy().build()?,
             gateway_origin: format!(
                 "http://{}",
                 SocketAddr::new(
@@ -89,6 +90,14 @@ impl Console {
             .layer(BodyLimit::max(BODY_LIMIT))
             .layer(app::protect)
             .layer(observability::request_layer())
+            .route(app::ui::groups::legacy_keys)
+            .route(app::ui::groups::select)
+            .route(app::ui::groups::save_group)
+            .route(app::ui::groups::save_group_resources)
+            .route(app::ui::groups::remove_group_resource)
+            .route(app::ui::groups::create_key)
+            .route(app::ui::groups::change_key)
+            .route(app::ui::groups::key_workspace)
             .route(app::ui::chat::chat_history)
             .route(app::ui::chat::chat_usage)
             .route(app::ui::chat::chat_protocol_picker)

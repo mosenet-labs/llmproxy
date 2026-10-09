@@ -37,10 +37,41 @@ pub fn model_body(path: &str) -> Vec<u8> {
     format!(r#"{{"model":"{}"}}"#, ALIASES[index]).into_bytes()
 }
 const MASTER_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+static TEST_KEYS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 // Hold this through gateway startup: another test must not acquire the released
 // reservation while the child process is still initializing its listener.
 static PORT_ALLOCATION: Mutex<()> = Mutex::new(());
+
+pub async fn assign_catalog(store: &ProviderStore) {
+    let version = store
+        .list_groups()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|group| group.id == store.group_id())
+        .unwrap()
+        .version;
+    let models = store
+        .list_all_models()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|model| model.id)
+        .collect();
+    let routes = store
+        .list_all_routes()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|route| route.id)
+        .collect();
+    store
+        .set_group_resources(version, models, routes)
+        .await
+        .unwrap();
+}
 
 pub fn bind_listener(address: impl ToSocketAddrs) -> TcpListener {
     let _allocation = PORT_ALLOCATION
@@ -50,6 +81,7 @@ pub fn bind_listener(address: impl ToSocketAddrs) -> TcpListener {
 }
 
 pub struct Gateway {
+    pub api_key: String,
     child: Child,
     pub address: SocketAddr,
     directory: PathBuf,
@@ -117,6 +149,7 @@ impl TestDatabase {
                     .await
                     .map_err(|_| "map test model")?;
             }
+            assign_catalog(&store).await;
             Ok::<(), &'static str>(())
         });
         drop(runtime);
@@ -231,10 +264,50 @@ impl Gateway {
         id: usize,
         database: Option<TestDatabase>,
     ) -> Self {
+        let env_value = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let url = env_value("LLMPROXY_DATABASE_URL");
+        let master_key = env_value("LLMPROXY_MASTER_KEY");
+        let cache_url = url.clone();
+        let cached = TEST_KEYS.lock().unwrap().get(&url).cloned();
+        let api_key = cached.unwrap_or_else(|| {
+            thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let store = ProviderStore::connect(&url, &master_key).await.unwrap();
+                        store.migrate().await.unwrap();
+                        store
+                            .create_virtual_key(llmproxy_store::VirtualKeyInput {
+                                name: "Integration client".into(),
+                                all_routes: true,
+                                model_ids: vec![],
+                                route_ids: vec![],
+                                expires_at: None,
+                            })
+                            .await
+                            .unwrap()
+                            .secret
+                    })
+            })
+            .join()
+            .unwrap()
+        });
+        TEST_KEYS.lock().unwrap().insert(cache_url, api_key.clone());
         let address = reservation.local_addr().unwrap();
         drop(reservation);
         let child = command.spawn().unwrap();
         let mut gateway = Self {
+            api_key,
             child,
             address,
             directory,
@@ -289,6 +362,23 @@ impl Gateway {
     }
 
     pub fn request(&self, method: &str, path: &str, headers: &str, body: &[u8]) -> Response {
+        let mut headers = headers
+            .lines()
+            .filter(|line| {
+                !["authorization:", "x-api-key:", "x-goog-api-key:"]
+                    .iter()
+                    .any(|name| line.to_ascii_lowercase().starts_with(name))
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        if !headers.is_empty() {
+            headers.push_str("\r\n");
+        }
+        headers.push_str(&format!("Authorization: Bearer {}\r\n", self.api_key));
+        self.request_raw(method, path, &headers, body)
+    }
+
+    pub fn request_raw(&self, method: &str, path: &str, headers: &str, body: &[u8]) -> Response {
         let mut stream = self.connect();
         write!(stream, "{method} {path} HTTP/1.1\r\nHost: caller.invalid\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n", body.len()).unwrap();
         stream.write_all(body).unwrap();
@@ -301,14 +391,34 @@ impl Gateway {
 
     #[cfg(unix)]
     pub fn request_shutdown(&self) {
+        self.signal("-TERM");
+    }
+
+    #[cfg(unix)]
+    pub fn signal(&self, signal: &str) {
         assert!(
             Command::new("kill")
-                .arg("-TERM")
+                .arg(signal)
                 .arg(self.child.id().to_string())
                 .status()
                 .unwrap()
                 .success()
         );
+    }
+
+    pub fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gateway did not exit: {}",
+                self.logs()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 

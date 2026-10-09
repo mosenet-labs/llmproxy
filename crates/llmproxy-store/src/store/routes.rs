@@ -1,24 +1,56 @@
 use super::*;
 
 impl ProviderStore {
+    /// Routes explicitly selected for this group (Chat and gateway scope).
     pub async fn list_routes(&self) -> StoreResult<Vec<ModelRouteView>> {
+        self.routes_in_group(Some(self.group_id)).await
+    }
+
+    /// System route catalog, including routes not selected for any group.
+    pub async fn list_all_routes(&self) -> StoreResult<Vec<ModelRouteView>> {
+        self.routes_in_group(None).await
+    }
+
+    async fn routes_in_group(&self, group: Option<i64>) -> StoreResult<Vec<ModelRouteView>> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
-        let rows = ModelRouteRow::all()
+        let mut route_memberships = groups::route_group_map(&mut tx).await?;
+        let mut query = ModelRouteRow::all();
+        if let Some(id) = group {
+            query = query.filter(
+                ModelRouteRow::fields().id().in_list(
+                    route_memberships
+                        .iter()
+                        .filter(|(_, groups)| groups.contains(&id))
+                        .map(|(route, _)| *route)
+                        .collect::<Vec<_>>(),
+                ),
+            );
+        }
+        let rows = query
             .order_by(ModelRouteRow::fields().id().asc())
             .exec(&mut tx)
             .await?;
         let mut targets = route_target_groups(&mut tx).await?;
         let (mappings, providers) = target_models(&mut tx, targets.values().flatten()).await?;
+        let model_memberships = groups::model_group_map(&mut tx).await?;
         let mut routes = Vec::with_capacity(rows.len());
         for row in rows {
-            routes.push(route_view_with_targets(
+            let mut view = route_view_with_targets(
                 &row,
                 targets.remove(&row.id).unwrap_or_default(),
                 &mappings,
                 &providers,
-            )?);
+            )?;
+            view.group_ids = route_memberships.remove(&row.id).unwrap_or_default();
+            for target in &mut view.targets {
+                target.model.group_ids = model_memberships
+                    .get(&target.model.id)
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            routes.push(view);
         }
         tx.commit().await?;
         Ok(routes)
@@ -29,8 +61,6 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        check_unique_route_name(&mut tx, &input.name, input.protocol, None).await?;
-        check_model_alias_available(&mut tx, &input.name).await?;
         check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;
         let row = ModelRouteRow::create()
             .name(input.name)
@@ -58,9 +88,10 @@ impl ProviderStore {
         self.bindings(&mut tx, true).await?;
         let mut row = find_route(&mut tx, id).await?;
         check_route_version(&row, version)?;
-        check_unique_route_name(&mut tx, &input.name, input.protocol, Some(id)).await?;
-        if input.name != row.name {
-            check_model_alias_available(&mut tx, &input.name).await?;
+        for group_id in groups::route_groups(&mut tx, id).await? {
+            check_unique_route_name(&mut tx, &input.name, group_id, input.protocol, Some(id))
+                .await?;
+            check_model_alias_available(&mut tx, &input.name, group_id).await?;
         }
         check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;
         ModelRouteTargetRow::all()
@@ -93,6 +124,9 @@ impl ProviderStore {
             .delete()
             .exec(&mut tx)
             .await?;
+        for group_id in groups::route_groups(&mut tx, id).await? {
+            Self::touch_group(&mut tx, group_id).await?;
+        }
         row.delete().exec(&mut tx).await?;
         tx.commit().await?;
         Ok(())
@@ -114,7 +148,12 @@ async fn route_view(tx: &mut Transaction<'_>, row: &ModelRouteRow) -> StoreResul
         .exec(&mut *tx)
         .await?;
     let (mappings, providers) = target_models(tx, targets.iter()).await?;
-    route_view_with_targets(row, targets, &mappings, &providers)
+    let mut view = route_view_with_targets(row, targets, &mappings, &providers)?;
+    view.group_ids = groups::route_groups(tx, row.id).await?;
+    for target in &mut view.targets {
+        target.model.group_ids = groups::model_groups(tx, target.model.id).await?;
+    }
+    Ok(view)
 }
 
 pub(super) async fn route_target_groups(
@@ -149,6 +188,7 @@ fn route_view_with_targets(
         });
     }
     Ok(ModelRouteView {
+        group_ids: Vec::new(),
         id: row.id,
         name: row.name.clone(),
         protocol: protocol_from_str(&row.protocol)?,
@@ -249,11 +289,17 @@ async fn check_route_targets(
 pub(super) async fn check_unique_route_name(
     tx: &mut Transaction<'_>,
     name: &str,
+    group_id: i64,
     protocol: Protocol,
     own_id: Option<i64>,
 ) -> StoreResult<()> {
     let mut query = ModelRouteRow::all()
         .filter(ModelRouteRow::fields().name().eq(name))
+        .filter(
+            ModelRouteRow::fields()
+                .id()
+                .in_list(groups::route_ids(tx, group_id).await?),
+        )
         .filter(ModelRouteRow::fields().protocol().eq(protocol.as_str()));
     if let Some(id) = own_id {
         query = query.filter(ModelRouteRow::fields().id().ne(id));
@@ -280,8 +326,18 @@ pub(super) fn protocol_from_str(value: &str) -> StoreResult<Protocol> {
     }
 }
 
-async fn check_model_alias_available(tx: &mut Transaction<'_>, name: &str) -> StoreResult<()> {
-    if ModelMapping::filter_by_alias(name)
+pub(super) async fn check_model_alias_available(
+    tx: &mut Transaction<'_>,
+    name: &str,
+    group_id: i64,
+) -> StoreResult<()> {
+    if ModelMapping::all()
+        .filter(ModelMapping::fields().alias().eq(name))
+        .filter(
+            ModelMapping::fields()
+                .id()
+                .in_list(groups::model_ids(tx, group_id).await?),
+        )
         .first()
         .exec(tx)
         .await?

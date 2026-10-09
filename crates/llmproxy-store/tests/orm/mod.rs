@@ -158,6 +158,14 @@ pub async fn exercise(store: &ProviderStore, url: &str) {
     let initial = store.create_model(mapping(0, first.id)).await.unwrap();
     store.save_price_plan(price(0, first.id)).await.unwrap();
     let initial_route = store.create_route(route(0, initial.id)).await.unwrap();
+    store
+        .set_group_resources(
+            store.list_groups().await.unwrap()[0].version,
+            vec![initial.id],
+            vec![initial_route.id],
+        )
+        .await
+        .unwrap();
     let (models, model_queries) = measured(store.list_models()).await;
     let (routes, route_queries) = measured(store.list_routes()).await;
     let (resolved, resolution_queries) = measured(store.load_model_routes()).await;
@@ -180,6 +188,21 @@ pub async fn exercise(store: &ProviderStore, url: &str) {
             .unwrap();
         store.create_route(route(index, model.id)).await.unwrap();
     }
+    let route_ids = store
+        .list_all_routes()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|route| route.id)
+        .collect();
+    store
+        .set_group_resources(
+            store.list_groups().await.unwrap()[0].version,
+            ids.clone(),
+            route_ids,
+        )
+        .await
+        .unwrap();
     let (models, larger_models) = measured(store.list_models()).await;
     let models = models.unwrap();
     assert_eq!(models.iter().map(|model| model.id).collect::<Vec<_>>(), ids);
@@ -211,8 +234,9 @@ pub async fn exercise(store: &ProviderStore, url: &str) {
         ("resolution", resolution_queries, larger_resolution),
         ("prices", price_queries, larger_prices),
     ] {
+        // Include the fixed batch reads for model/route group memberships.
         assert!(
-            small > 0 && small <= 8,
+            small > 0 && small <= 10,
             "invalid query measurement: {label}={small}"
         );
         assert_eq!(small, large, "{label}: query count grew with record count");

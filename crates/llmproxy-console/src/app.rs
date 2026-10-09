@@ -28,7 +28,6 @@ pub struct AppState {
     pub port: u16,
     pub telemetry: std::sync::Arc<crate::observability::ConsoleTelemetry>,
     pub chat_sessions: std::sync::Arc<chat_sessions::ChatSessions>,
-    pub chat_client: reqwest::Client,
     pub gateway_origin: String,
 }
 
@@ -114,4 +113,26 @@ impl Layer for ConnectionGuard {
     fn handle<'a>(&'a self, cx: &'a Cx, body: Body, next: Next<'a>) -> LayerFuture<'a> {
         Box::pin(protect_connection(cx, body, next))
     }
+}
+
+/// Cookie 固定在页面与 runtime 握手的请求上下文中；切组使用完整导航。
+pub(crate) fn group_store(cx: &Cx, scope: &str) -> ProviderStore {
+    let prefix = format!("llmproxy_{scope}_group=");
+    let group = headers(cx)
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .find_map(|cookie| cookie.trim().strip_prefix(&prefix))
+                .or_else(|| {
+                    cookies
+                        .split(';')
+                        .find_map(|cookie| cookie.trim().strip_prefix("llmproxy_group="))
+                })
+        })
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+        .unwrap_or(1);
+    app_context::<AppState>(cx).store.for_group(group)
 }

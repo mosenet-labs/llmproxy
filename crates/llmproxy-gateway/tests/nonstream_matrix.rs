@@ -294,7 +294,7 @@ async fn four_by_four_nonstream_http_matrix() {
     use std::io::Write;
     let mut stream = gateway.connect();
     let alias = alias(Protocol::Gemini, Protocol::AnthropicMessages);
-    write!(stream, "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n", path(Protocol::Gemini, &alias), 8 * 1024 * 1024 + 1).unwrap();
+    write!(stream, "POST {} HTTP/1.1\r\nAuthorization: Bearer {}\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n", path(Protocol::Gemini, &alias), gateway.api_key, 8 * 1024 * 1024 + 1).unwrap();
     let response = support::Response::read(stream).unwrap();
     assert_eq!(response.status, 413);
     assert!(upstreams[2].1.try_recv().is_err());
@@ -378,6 +378,18 @@ async fn gemini_signed_tool_roundtrips_across_instances_and_restart() {
         .await;
     let mut gateway = Gateway::database(&database.url, MASTER_KEY);
     let replica = Gateway::database(&database.url, MASTER_KEY);
+    let other_key = database
+        .store
+        .create_virtual_key(llmproxy_store::VirtualKeyInput {
+            name: "Other client".into(),
+            all_routes: true,
+            model_ids: vec![],
+            route_ids: vec![],
+            expires_at: None,
+        })
+        .await
+        .unwrap()
+        .secret;
     for source in ALL.into_iter().filter(|source| *source != Protocol::Gemini) {
         let alias = alias(source, Protocol::Gemini);
         let initial = fixtures::tool_request(source, &alias);
@@ -413,10 +425,10 @@ async fn gemini_signed_tool_roundtrips_across_instances_and_restart() {
         assert!(!gateway.logs().contains("private-gemini-signature"));
         drop(gateway);
         gateway = Gateway::database(&database.url, MASTER_KEY);
-        let response = gateway.request(
+        let response = gateway.request_raw(
             "POST",
             &path(source, &alias),
-            "Content-Type: application/json\r\nAuthorization: Bearer other-client\r\n",
+            &format!("Content-Type: application/json\r\nAuthorization: Bearer {other_key}\r\n"),
             &serde_json::to_vec(&next).unwrap(),
         );
         assert_eq!(response.status, 422);
@@ -424,10 +436,13 @@ async fn gemini_signed_tool_roundtrips_across_instances_and_restart() {
         assert!(requests.try_recv().is_err());
         // 已运行的副本和重启后的原实例都能重复处理原历史。
         for active in [&replica, &gateway] {
-            let response = active.request(
+            let response = active.request_raw(
                 "POST",
                 &path(source, &alias),
-                "Content-Type: application/json\r\nAuthorization: Bearer same-client\r\n",
+                &format!(
+                    "Content-Type: application/json\r\nx-api-key: {}\r\n",
+                    active.api_key
+                ),
                 &serde_json::to_vec(&next).unwrap(),
             );
             assert_eq!(response.status, 200);
@@ -540,7 +555,7 @@ async fn buffered_client_cancellation_closes_upstream_before_response_headers() 
     let body =
         serde_json::to_vec(&fixtures::request(Protocol::OpenAiChat, &alias, "cancel")).unwrap();
     let mut client = TcpStream::connect(gateway.address).unwrap();
-    write!(client, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+    write!(client, "POST /v1/chat/completions HTTP/1.1\r\nAuthorization: Bearer {}\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", gateway.api_key, body.len()).unwrap();
     client.write_all(&body).unwrap();
     client.flush().unwrap();
     requests.recv_timeout(DEADLINE).unwrap();

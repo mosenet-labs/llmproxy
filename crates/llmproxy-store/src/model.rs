@@ -28,7 +28,6 @@ pub(crate) struct Provider {
     #[key]
     #[auto]
     pub id: i64,
-    #[unique]
     pub name: String,
     pub openai_chat_path: Option<String>,
     pub openai_responses_path: Option<String>,
@@ -71,7 +70,6 @@ pub(crate) struct ModelMapping {
     #[key]
     #[auto]
     pub id: i64,
-    #[unique]
     pub alias: String,
     pub provider_id: i64,
     pub upstream_model_id: String,
@@ -324,4 +322,62 @@ pub(crate) struct ModelHealthCheck {
     pub consecutive_failures: u64,
     #[version]
     pub version: u64,
+}
+
+#[derive(toasty::Model)]
+#[table = "groups"]
+pub(crate) struct GroupRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    #[unique]
+    pub name: String,
+    pub enabled: bool,
+    #[version]
+    pub version: u64,
+    pub updated_at: i64,
+}
+
+#[derive(toasty::Model)]
+#[table = "virtual_keys"]
+pub(crate) struct VirtualKeyRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub group_id: i64,
+    pub name: String,
+    #[unique]
+    pub digest: String,
+    pub prefix: String,
+    pub all_routes: bool,
+    #[column(type = text)]
+    pub route_ids: toasty::Json<Vec<i64>>,
+    #[column(type = text)]
+    pub model_ids: toasty::Json<Vec<i64>>,
+    pub enabled: bool,
+    pub revoked: bool,
+    pub expires_at: Option<i64>,
+    pub created_at: i64,
+    #[version]
+    pub version: u64,
+}
+
+#[derive(toasty::Model)]
+#[table = "model_group_memberships"]
+pub(crate) struct ModelGroupMembership {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub group_id: i64,
+    pub model_id: i64,
+}
+
+#[derive(toasty::Model)]
+#[table = "route_group_memberships"]
+pub(crate) struct RouteGroupMembership {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub group_id: i64,
+    pub route_id: i64,
 }

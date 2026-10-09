@@ -86,6 +86,7 @@ async fn chat_route_to_messages_provider_converts_request_and_response() {
         })
         .await
         .unwrap();
+    support::assign_catalog(&store).await;
     let gateway = Gateway::database(&url, &master_key);
     let response = gateway.request(
         "POST",
@@ -236,6 +237,7 @@ async fn chat_route_to_gemini_provider_places_model_in_url() {
         })
         .await
         .unwrap();
+    support::assign_catalog(&store).await;
     let gateway = Gateway::database(&url, &master_key);
     let response = gateway.request("POST", "/v1/chat/completions", "Content-Type: application/json\r\n", br#"{"model":"public-chat","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":32}"#);
     assert_eq!(response.status, 200);
@@ -299,6 +301,7 @@ async fn sqlite_mixed_provider_rewrites_each_protocol_to_its_configured_path() {
         })
         .await
         .unwrap();
+    support::assign_catalog(&store).await;
     let gateway = Gateway::database(&url, &master_key);
     for (downstream, upstream_path, auth) in [
         (
@@ -463,6 +466,7 @@ async fn gemini_native_requests_rewrite_model_path_and_stream_without_buffering(
         })
         .await
         .unwrap();
+    support::assign_catalog(&store).await;
     let gateway = Gateway::database(&url, &master_key);
     let body = br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#;
     let response = gateway.request(
@@ -628,6 +632,7 @@ async fn exercise_gateway(url: &str) {
         })
         .await
         .unwrap();
+    support::assign_catalog(&store).await;
     wait_for_route(&gateway, 200, Some(b"old-provider"), None).await;
     let first = old_requests.recv_timeout(DEADLINE).unwrap();
     assert_eq!(

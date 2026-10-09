@@ -23,6 +23,7 @@ use crate::{
 };
 
 mod chat_history;
+mod groups;
 mod health;
 mod holidays;
 mod migrations;
@@ -45,6 +46,7 @@ const MASTER_KEY_ERROR: StoreError = StoreError::Configuration(
 #[derive(Clone)]
 pub struct ProviderStore {
     db: Db,
+    group_id: i64,
     cipher: KeyCipher,
     backend: Backend,
     // SQLite 的同步锁等待不能阻塞持锁事务所在的 async 执行线程。
@@ -84,6 +86,10 @@ impl ProviderStore {
         let cipher = KeyCipher::new(master_key)?;
         let db = Db::builder()
             .models(toasty::models!(
+                crate::model::GroupRow,
+                crate::model::VirtualKeyRow,
+                crate::model::ModelGroupMembership,
+                crate::model::RouteGroupMembership,
                 Provider,
                 RouteBinding,
                 StoreKey,
@@ -113,6 +119,7 @@ impl ProviderStore {
         }
         Ok(Self {
             db,
+            group_id: 1,
             cipher,
             backend,
             chat_writes: Arc::default(),
@@ -301,6 +308,7 @@ async fn find_mapping(executor: &mut dyn Executor, id: i64) -> StoreResult<Model
 fn mapping_view(mapping: &ModelMapping, provider: &Provider) -> StoreResult<ModelMappingView> {
     Ok(ModelMappingView {
         thinking: mapping.thinking()?,
+        group_ids: Vec::new(),
         id: mapping.id,
         alias: mapping.alias.clone(),
         provider_id: mapping.provider_id,
@@ -368,9 +376,16 @@ fn check_mapping_provider(provider: &Provider, input: &ModelMappingInput) -> Sto
 async fn check_unique_alias(
     executor: &mut dyn Executor,
     alias: &str,
+    group_id: i64,
     own_id: Option<i64>,
 ) -> StoreResult<()> {
-    if let Some(existing) = ModelMapping::filter_by_alias(alias)
+    if let Some(existing) = ModelMapping::all()
+        .filter(ModelMapping::fields().alias().eq(alias))
+        .filter(
+            ModelMapping::fields()
+                .id()
+                .in_list(groups::model_ids(executor, group_id).await?),
+        )
         .select(ModelMapping::fields().id())
         .first()
         .exec(executor)
@@ -394,7 +409,14 @@ async fn check_unique_name(
     name: &str,
     own_id: Option<i64>,
 ) -> StoreResult<()> {
-    if let Some(existing) = Provider::filter_by_name(name)
+    // Historical providers with duplicate names keep their IDs and may be edited.
+    if let Some(id) = own_id
+        && find(executor, id).await?.name == name
+    {
+        return Ok(());
+    }
+    if let Some(existing) = Provider::all()
+        .filter(Provider::fields().name().eq(name))
         .select(Provider::fields().id())
         .first()
         .exec(executor)
@@ -592,6 +614,48 @@ mod tests {
         ),
     ]);
 
+    async fn select_conflicting_route(
+        store: &ProviderStore,
+        first: i64,
+        second: i64,
+    ) -> StoreResult<()> {
+        store
+            .set_group_resources(
+                store.list_groups().await.unwrap()[0].version,
+                vec![],
+                vec![first, second],
+            )
+            .await
+    }
+
+    async fn select_catalog(store: &ProviderStore) {
+        let group = store
+            .list_groups()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|group| group.id == store.group_id())
+            .unwrap();
+        let models = store
+            .list_all_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        let routes = store
+            .list_all_routes()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|route| route.id)
+            .collect();
+        store
+            .set_group_resources(group.version, models, routes)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn sqlite_gemini_upgrade_preserves_existing_model_routes() {
         let directory = std::env::temp_dir().join(format!(
@@ -634,6 +698,14 @@ mod tests {
             store.get_model(1).await.unwrap().upstream_model_id,
             "old-id"
         );
+        assert!(store.get_model(1).await.unwrap().group_ids.is_empty());
+        assert!(
+            store.list_all_routes().await.unwrap()[0]
+                .group_ids
+                .is_empty()
+        );
+        assert!(store.load_model_routes().await.unwrap().is_empty());
+        select_catalog(&store).await;
         assert_eq!(
             store
                 .load_model_routes()
@@ -675,6 +747,7 @@ mod tests {
             })
             .await
             .unwrap();
+        select_catalog(&store).await;
         assert!(
             store
                 .load_model_routes()
@@ -745,6 +818,9 @@ mod tests {
             .unwrap();
         assert_eq!(price.input_per_million, "0.15");
         assert_eq!(price.output_per_million, "0.60");
+        assert!(saved.group_ids.is_empty());
+        assert!(store.load_model_routes().await.unwrap().is_empty());
+        select_catalog(&store).await;
         assert_eq!(store.list_models().await.unwrap().len(), 1);
         assert!(store.list_routes().await.unwrap().is_empty());
         assert!(
@@ -759,21 +835,33 @@ mod tests {
                         && route.upstream_model_id == "upstream-model"
                 })
         );
+        let conflicting = store
+            .create_route(ModelRouteInput {
+                name: "Primary/model".into(),
+                protocol: Protocol::OpenAiChat,
+                provider_protocol: Protocol::OpenAiChat,
+                enabled: true,
+                targets: vec![crate::ModelRouteTargetInput {
+                    model_id: saved.id,
+                    enabled: true,
+                }],
+            })
+            .await
+            .unwrap();
         assert!(matches!(
             store
-                .create_route(ModelRouteInput {
-                    name: "Primary/model".into(),
-                    protocol: Protocol::OpenAiChat,
-                    provider_protocol: Protocol::OpenAiChat,
-                    enabled: true,
-                    targets: vec![crate::ModelRouteTargetInput {
-                        model_id: saved.id,
-                        enabled: true,
-                    }],
-                })
+                .set_group_resources(
+                    store.list_groups().await.unwrap()[0].version,
+                    vec![saved.id],
+                    vec![conflicting.id]
+                )
                 .await,
             Err(StoreError::Conflict(_))
         ));
+        store
+            .delete_route(conflicting.id, conflicting.version)
+            .await
+            .unwrap();
         let route = store
             .create_route(ModelRouteInput {
                 name: "public-model".into(),
@@ -800,6 +888,7 @@ mod tests {
             })
             .await
             .unwrap();
+        select_catalog(&store).await;
         assert_eq!(store.load_model_routes().await.unwrap().len(), 4);
         let cross_route = store
             .create_route(ModelRouteInput {
@@ -815,6 +904,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cross_route.provider_protocol, Protocol::OpenAiChat);
+        select_catalog(&store).await;
         let selected = store
             .load_model_routes()
             .await
@@ -828,21 +918,27 @@ mod tests {
             .delete_route(cross_route.id, cross_route.version)
             .await
             .unwrap();
-        assert!(matches!(
-            store
-                .create_route(ModelRouteInput {
-                    name: "public-model".into(),
-                    protocol: Protocol::OpenAiChat,
-                    provider_protocol: Protocol::OpenAiChat,
+        let conflicting = store
+            .create_route(ModelRouteInput {
+                name: "public-model".into(),
+                protocol: Protocol::OpenAiChat,
+                provider_protocol: Protocol::OpenAiChat,
+                enabled: true,
+                targets: vec![crate::ModelRouteTargetInput {
+                    model_id: saved.id,
                     enabled: true,
-                    targets: vec![crate::ModelRouteTargetInput {
-                        model_id: saved.id,
-                        enabled: true
-                    }],
-                })
-                .await,
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            select_conflicting_route(&store, route.id, conflicting.id).await,
             Err(StoreError::Conflict(_))
         ));
+        store
+            .delete_route(conflicting.id, conflicting.version)
+            .await
+            .unwrap();
         assert!(matches!(
             store
                 .create_route(ModelRouteInput {
@@ -874,7 +970,7 @@ mod tests {
         });
         let imported = store.create_models(batch.to_vec()).await.unwrap();
         assert_eq!(imported.len(), 2);
-        assert_eq!(store.list_models().await.unwrap().len(), 3);
+        assert_eq!(store.list_all_models().await.unwrap().len(), 3);
         let mut invalid_batch = batch.to_vec();
         invalid_batch[0].alias = "Primary/third".into();
         invalid_batch[0].upstream_model_id = "third".into();
@@ -883,11 +979,23 @@ mod tests {
             store.create_models(invalid_batch).await,
             Err(StoreError::Validation(_))
         ));
-        assert_eq!(store.list_models().await.unwrap().len(), 3);
+        assert_eq!(store.list_all_models().await.unwrap().len(), 3);
+        let duplicate = store.create_model(mapping.clone()).await.unwrap();
+        assert!(duplicate.group_ids.is_empty());
         assert!(matches!(
-            store.create_model(mapping.clone()).await,
+            store
+                .set_group_resources(
+                    store.list_groups().await.unwrap()[0].version,
+                    vec![saved.id, duplicate.id],
+                    vec![]
+                )
+                .await,
             Err(StoreError::Conflict(_))
         ));
+        store
+            .delete_model(duplicate.id, duplicate.version)
+            .await
+            .unwrap();
         let mut invalid = mapping.clone();
         invalid.alias = "another".into();
         invalid.protocols = vec![Protocol::AnthropicMessages];

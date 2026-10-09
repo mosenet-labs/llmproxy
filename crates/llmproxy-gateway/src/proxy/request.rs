@@ -15,7 +15,9 @@ const MODEL_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
 pub(super) fn filter(request: &mut RequestHeader, ctx: &RequestContext) -> Result<()> {
     request.remove_header(llmproxy_core::thinking::HEADER);
     request.remove_header(llmproxy_store::chat_history::REQUEST_HEADER);
-    request.remove_header(llmproxy_store::chat_history::AUTH_HEADER);
+    // 旧自定义认证头不再接受，也不转发给上游。
+    request.remove_header("x-llmproxy-history-auth");
+    request.remove_header("x-llmproxy-group");
     let route = ctx.route.as_ref().expect("request_filter selected route");
     let client_protocol = route.protocol;
     let provider = &route.provider;

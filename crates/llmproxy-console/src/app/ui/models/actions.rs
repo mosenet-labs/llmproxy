@@ -51,6 +51,7 @@ pub async fn load_model_candidates(
             .map_err(|_| "请选择 Provider".to_owned())?;
         let target = app_context::<AppState>(cx)
             .store
+            .clone()
             .probe_enabled_target(id)
             .await
             .map_err(|error| error.to_string())?;
@@ -74,7 +75,7 @@ pub async fn save_models(
             .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?,
     };
     check_csrf(cx, &input.csrf)?;
-    let store = &app_context::<AppState>(cx).store;
+    let store = &app_context::<AppState>(cx).store.clone();
     let result: std::result::Result<String, StoreError> = async {
         let provider_id = input
             .provider_id
@@ -132,7 +133,7 @@ pub async fn save_model(cx: &Cx, csrf: String, model_json: String) -> Result<Out
         .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?;
     input.id = input.id.filter(|id| !id.is_empty());
     input.version = input.version.filter(|v| !v.is_empty());
-    let store = &app_context::<AppState>(cx).store;
+    let store = &app_context::<AppState>(cx).store.clone();
     let result: std::result::Result<String, StoreError> = async {
         let provider_id = input
             .provider_id
@@ -215,7 +216,7 @@ pub async fn save_model(cx: &Cx, csrf: String, model_json: String) -> Result<Out
 #[procedure("/ui/_topcoat/runtime/procedures/delete-model")]
 pub async fn delete_model(cx: &Cx, csrf: String, id: String, version: String) -> Result<Outcome> {
     check_csrf(cx, &csrf)?;
-    let store = &app_context::<AppState>(cx).store;
+    let store = &app_context::<AppState>(cx).store.clone();
     let id = id.parse::<i64>()?;
     let version = version.parse::<u64>()?;
     let model = store.get_model(id).await?;
@@ -294,7 +295,10 @@ pub(super) async fn model_delete(
     refresh: &Signal<f64>,
 ) -> Result<impl View> {
     let id = format!("delete-model-{}", model.id);
-    let title = format!("确认删除「{}」？", model.alias);
+    let title = format!(
+        "确认删除「{}」？所有组都将移除此模型。仅需移出某个组，请到资源组管理。",
+        model.alias
+    );
     let trigger = popconfirm_trigger_attributes(cx, &id);
     let model_id = model.id.to_string();
     let version = model.version.to_string();

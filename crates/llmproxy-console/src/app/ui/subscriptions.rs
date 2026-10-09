@@ -9,7 +9,7 @@ use topcoat::{
         error::{bad_request, see_other},
         page, route,
     },
-    runtime::{Event, signal},
+    runtime::{Event, procedure, signal},
     view::{View, view},
 };
 
@@ -25,12 +25,13 @@ pub struct NodeQuery {
 #[page]
 pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
-    let nodes = state
+    let nodes = app_context::<AppState>(cx)
         .store
+        .clone()
         .subscription_nodes()
         .await
         .map_err(|error| bad_request(error.to_string()))?;
-    let providers = state.store.list().await?;
+    let providers = app_context::<AppState>(cx).store.clone().list().await?;
     let presence = state.subscriptions.lock().unwrap().clone();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -213,8 +214,9 @@ pub async fn set_enabled(
         port: state.port,
         key,
     };
-    let result = state
+    let result = app_context::<AppState>(cx)
         .store
+        .clone()
         .set_subscription_enabled(&input.node_id, input.version, input.enabled, &target)
         .await;
     if let Err(error) = result {
@@ -246,6 +248,7 @@ pub async fn rename(
     check_csrf(cx, &input.csrf)?;
     let result = app_context::<AppState>(cx)
         .store
+        .clone()
         .rename_subscription(&input.node_id, input.version, &input.name)
         .await;
     if let Err(error) = result {
@@ -262,6 +265,7 @@ pub struct ModelQuery {
 async fn import_provider(cx: &Cx, node_id: &str) -> Result<i64> {
     let node = app_context::<AppState>(cx)
         .store
+        .clone()
         .subscription_nodes()
         .await?
         .into_iter()
@@ -275,27 +279,54 @@ async fn import_provider(cx: &Cx, node_id: &str) -> Result<i64> {
 pub async fn import_models(cx: &Cx, Form(query): Form<ModelQuery>) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
     let id = import_provider(cx, &query.node_id).await?;
-    let provider = state.store.get(id).await?;
-    let target = state.store.probe_enabled_target(id).await?;
+    let provider = app_context::<AppState>(cx).store.clone().get(id).await?;
+    let target = app_context::<AppState>(cx)
+        .store
+        .clone()
+        .probe_enabled_target(id)
+        .await?;
     let candidates = crate::app::model_catalog::query_models(target)
         .await
         .map_err(bad_request)?;
-    let existing = state.store.list_models().await?;
+    let model_store = app_context::<AppState>(cx).store.clone();
+    let existing = model_store.list_all_models().await?;
+    let busy = signal(cx, || false);
+    let error = signal(cx, String::new);
+    let saved = signal(cx, || false);
+    let unavailable: std::result::Result<String, String> =
+        Err("导入结果未确认，请检查 Models 列表后重试".into());
     Ok(view! {
         <div class=(super::providers::PAGE_HEADING)>
             <div><h1>"导入订阅模型"</h1></div>
         </div>
         <p>
             (provider.name)
-            "：选择需要导入的模型，导入后在 Model Routes 配置路由。"
+            "：选择需要导入系统的模型，再到资源组中添加模型或路由。"
         </p>
         <form
             class="rounded-lg border border-border bg-white p-5"
+            id="subscription-model-import"
             method="post"
-            action="/ui/subscriptions/import"
+            action="/ui/subscriptions/models"
+            @submit=$(async |event: Event| {
+                event.prevent_default();
+                if busy.get() { return; }
+                busy.set(true);
+                error.set("".to_owned());
+                let _payload = raw!("cx.hydrate(new URLSearchParams(new FormData(document.getElementById('subscription-model-import'))).toString())", String::new());
+                let result = raw!("await Promise.resolve(${save_import}.call(${_payload})).catch(() => ${unavailable})", unavailable.clone());
+                busy.set(false);
+                if result.is_ok() {
+                    saved.set(true);
+                } else {
+                    error.set(result.unwrap_err());
+                }
+            })
         >
             <input type="hidden" name="csrf" value=(state.csrf.clone())>
             <input type="hidden" name="node_id" value=(query.node_id.clone())>
+            <p role="alert" class="text-danger" :hidden=$(error.get().is_empty())>$(error.get())</p>
+            <div :hidden=$(saved.get())>
             for candidate in &candidates {
                 <label class="block my-3">
                     <input
@@ -320,9 +351,11 @@ pub async fn import_models(cx: &Cx, Form(query): Form<ModelQuery>) -> Result<imp
                     }
                 </label>
             }
-            <button class=(super::providers::BUTTON) type="submit">
+            <button class=(super::providers::BUTTON) type="submit" :disabled=$(busy.get())>
                 "导入所选模型"
             </button>
+            </div>
+            <p role="status" :hidden=$(!saved.get())>"已导入系统，尚未加入任何资源组。"<a class="ml-2 text-primary" href="/ui/groups">"前往资源组添加"</a><a class="ml-2 text-primary" href="/ui/models">"查看模型列表"</a></p>
             <a class=(super::providers::BUTTON) href="/ui/subscriptions">"返回"</a>
         </form>
     })
@@ -334,20 +367,29 @@ pub struct Import {
     models: Vec<String>,
 }
 
-#[route(POST "/ui/subscriptions/import")]
-pub async fn save_import(
-    cx: &Cx,
-    Form(fields): Form<Vec<(String, String)>>,
-) -> Result<topcoat::router::error::SeeOther> {
+#[procedure("/ui/_topcoat/runtime/procedures/import-subscription-models")]
+pub async fn save_import(cx: &Cx, payload: String) -> Result<std::result::Result<String, String>> {
+    let Form(fields) = Form::<Vec<(String, String)>>::from_bytes(payload.as_bytes())?;
     let input = import_fields(fields);
     check_csrf(cx, &input.csrf)?;
-    let state = app_context::<AppState>(cx);
+    Ok(import_selected_models(cx, input)
+        .await
+        .map(|_| "模型已导入系统".to_owned())
+        .map_err(|error| error.to_string()))
+}
+
+async fn import_selected_models(cx: &Cx, input: Import) -> Result<()> {
     let id = import_provider(cx, &input.node_id).await?;
-    let provider = state.store.get(id).await?;
-    let candidates =
-        crate::app::model_catalog::query_models(state.store.probe_enabled_target(id).await?)
-            .await
-            .map_err(bad_request)?;
+    let provider = app_context::<AppState>(cx).store.clone().get(id).await?;
+    let candidates = crate::app::model_catalog::query_models(
+        app_context::<AppState>(cx)
+            .store
+            .clone()
+            .probe_enabled_target(id)
+            .await?,
+    )
+    .await
+    .map_err(bad_request)?;
     if input.models.is_empty()
         || input
             .models
@@ -359,7 +401,11 @@ pub async fn save_import(
     let mut selected = input.models;
     selected.sort();
     selected.dedup();
-    let existing = state.store.list_models().await?;
+    let existing = app_context::<AppState>(cx)
+        .store
+        .clone()
+        .list_all_models()
+        .await?;
     let mappings = selected
         .into_iter()
         .filter(|model| {
@@ -377,9 +423,13 @@ pub async fn save_import(
         })
         .collect::<Vec<_>>();
     if !mappings.is_empty() {
-        state.store.create_models(mappings).await?;
+        app_context::<AppState>(cx)
+            .store
+            .clone()
+            .create_models(mappings)
+            .await?;
     }
-    Ok(see_other("/ui/models"))
+    Ok(())
 }
 
 fn import_fields(fields: Vec<(String, String)>) -> Import {

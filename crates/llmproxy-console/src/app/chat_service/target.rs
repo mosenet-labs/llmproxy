@@ -32,6 +32,9 @@ pub(crate) async fn resolve(
     } else {
         let id = selection.parse::<i64>().map_err(|_| "请选择有效的模型")?;
         let model = store.get_model(id).await.map_err(|_| "无法读取模型配置")?;
+        if !model.group_ids.contains(&store.group_id()) {
+            return Err("模型未加入当前组".into());
+        }
         Ok((
             model.alias,
             model.protocols,
@@ -187,6 +190,9 @@ pub(crate) async fn health(
     } else {
         let id = selection.parse::<i64>().map_err(|_| "模型 ID 无效")?;
         let model = store.get_model(id).await.map_err(|_| "模型配置已不存在")?;
+        if !model.group_ids.contains(&store.group_id()) {
+            return Err("模型未加入当前组".into());
+        }
         if !model.protocols.contains(&protocol) {
             return Ok(Health {
                 blocked: true,
@@ -249,6 +255,7 @@ pub(crate) async fn reprobe(
             .ok_or("路由无启用目标")?;
         (target.model.id, route.provider_protocol)
     } else {
+        resolve(store, selection).await?;
         (
             selection.parse::<i64>().map_err(|_| "模型 ID 无效")?,
             protocol,

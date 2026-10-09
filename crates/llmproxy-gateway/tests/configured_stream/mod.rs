@@ -206,6 +206,7 @@ async fn configured_provider_stream_matrix() {
                             gateway.address,
                             path(source, &alias)
                         ))
+                        .bearer_auth(&gateway.api_key)
                         .json(&input)
                         .send()
                         .await
@@ -256,6 +257,7 @@ async fn configured_provider_stream_matrix() {
                                 continuation.address,
                                 path(source, &alias)
                             ))
+                            .bearer_auth(&continuation.api_key)
                             .json(&next)
                             .send()
                             .await

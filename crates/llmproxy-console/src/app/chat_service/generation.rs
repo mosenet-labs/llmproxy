@@ -15,14 +15,27 @@ use crate::{
 /// 取得请求快照后启动后台任务；取消信号和最终保存均归属于指定会话。
 pub(crate) fn spawn(
     state: &AppState,
+    store: llmproxy_store::ProviderStore,
     id: String,
     room: Arc<ChatSession>,
     turn: TurnRequest,
     streaming: bool,
 ) {
-    let store = state.store.clone();
     let sessions = state.chat_sessions.clone();
-    let client = state.chat_client.clone();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        history_header(&format!("Bearer {}", state.history_auth)),
+    );
+    headers.insert(
+        "x-llmproxy-group",
+        history_header(&store.group_id().to_string()),
+    );
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .default_headers(headers)
+        .build()
+        .expect("valid internal HTTP client");
     let origin = state.gateway_origin.clone();
     let history_auth = state.history_auth.clone();
     let mut cancellation = room.cancellation();
@@ -76,4 +89,8 @@ pub(crate) fn spawn(
             room.save_error(&format!("本轮回复尚未保存：{error}"));
         }
     });
+}
+
+fn history_header(value: &str) -> reqwest::header::HeaderValue {
+    value.parse().expect("server-generated header")
 }

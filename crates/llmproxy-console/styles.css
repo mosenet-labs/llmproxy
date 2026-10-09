@@ -204,3 +204,8 @@
 .chat-delete-dialog[open]::backdrop {
   animation: none;
 }
+
+/* Group credential forms use native radios and keep modal content scrollable. */
+body:has(.gr-native-dialog:modal) { overflow: hidden; }
+.gr-native-dialog:has(form[id="key-editor-form"])[open] { display: flex; flex-direction: column; }
+.group-permission input[type="radio"] { width: 16px; height: 16px; min-height: 0; padding: 0; margin: 3px 0 0; flex-shrink: 0; accent-color: var(--color-primary); }

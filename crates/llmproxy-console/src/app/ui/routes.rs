@@ -25,7 +25,11 @@ pub struct ListQuery {
 #[page]
 pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
-    let all = state.store.list_routes().await?;
+    let all = app_context::<AppState>(cx)
+        .store
+        .clone()
+        .list_all_routes()
+        .await?;
     let needle = query.q.trim().to_lowercase();
     let filtered: Vec<_> = all
         .iter()
@@ -52,7 +56,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
             <div>
                 <h1>"Model Routes"</h1>
                 <p>
-                    "为客户端协议选择 Provider 协议与候选模型，并按顺序选择第一个可用目标。"
+                    "使用系统中已导入的模型配置路由，再到资源组中添加。新建路由不会自动加入任何组。"
                 </p>
             </div>
             <a
@@ -73,6 +77,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
             <div
                 class="flex flex-wrap items-center justify-between gap-4 px-6 py-5 max-[640px]:px-4"
             >
+                <div>
                 <h2 class="m-0 text-base font-semibold">
                     "路由列表"
                     <span
@@ -81,30 +86,32 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                         (total)
                     </span>
                 </h2>
-                <span class="text-[13px] text-secondary">
-                    "客户端的 model 可使用路由名称或 Models 中的模型标识"
-                </span>
-            </div>
-            if total > 0 {
-                <form
-                    class="border-t border-border px-6 py-4 max-[640px]:px-4"
-                    method="get"
-                    action="/ui/routes"
-                    role="search"
-                >
-                    <div class="flex w-full max-w-[520px] gap-2">
-                        <input
-                            class="h-9 min-w-0 flex-1 rounded-md border border-control-border px-3 text-sm focus:border-primary"
-                            type="search"
-                            name="q"
-                            value=(query.q.as_str())
-                            placeholder="搜索路由、上游模型或 Provider"
-                            aria-label="搜索模型路由"
+                <p class="mb-0 mt-1 text-[13px] text-secondary">
+                    "此处统一维护系统路由；加入资源组后，该组 Key 才可调用"
+                </p>
+                </div>
+                <div class="flex min-w-0 flex-wrap items-center gap-4 max-[640px]:w-full">
+                    if total > 0 {
+                        <form
+                            class="m-0 flex w-[360px] max-w-full min-w-0 gap-2 max-[640px]:w-full"
+                            method="get"
+                            action="/ui/routes"
+                            role="search"
                         >
-                        <button class=(BUTTON) type="submit">"搜索"</button>
-                    </div>
-                </form>
-            }
+                            <input
+                                class="h-9 min-w-0 flex-1 rounded-md border border-control-border px-3 text-sm focus:border-primary"
+                                type="search"
+                                name="q"
+                                value=(query.q.as_str())
+                                placeholder="搜索路由、上游模型或 Provider"
+                                aria-label="搜索模型路由"
+                            >
+                            <button class=(BUTTON) type="submit">"搜索"</button>
+                        </form>
+                    }
+                    <a href="/ui/groups" class="whitespace-nowrap text-[13px] text-primary hover:underline">"管理组资源 →"</a>
+                </div>
+            </div>
             <p
                 class="m-0 border-t border-border bg-[#fff2f0] px-6 py-3 text-sm text-[#cf1322]"
                 role="alert"
@@ -231,7 +238,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                                 type="button"
                                                 @click=$(async |_event: Event| {
                                                     let accepted = raw!(
-                                                        "window.confirm('确认删除此模型路由？')",
+                                                        "window.confirm('确认删除此模型路由？所有组都将移除此路由。仅需移出某个组，请到资源组管理。')",
                                                         false,
                                                     );
                                                     if !accepted {
@@ -278,7 +285,11 @@ pub struct EditQuery {
 #[page("./edit")]
 pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
-    let route_list = state.store.list_routes().await?;
+    let route_list = app_context::<AppState>(cx)
+        .store
+        .clone()
+        .list_all_routes()
+        .await?;
     let route = match query.id {
         Some(id) => Some(
             route_list
@@ -288,7 +299,11 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
         ),
         None => None,
     };
-    let mut models = state.store.list_models().await?;
+    let mut models = app_context::<AppState>(cx)
+        .store
+        .clone()
+        .list_all_models()
+        .await?;
     if let Some(route) = &route {
         models.sort_by_key(|model| {
             route
@@ -775,7 +790,7 @@ pub async fn save_route(
             })
             .collect(),
     };
-    let store = &app_context::<AppState>(cx).store;
+    let store = &app_context::<AppState>(cx).store.clone();
     let result = if id.is_empty() {
         store.create_route(input).await
     } else {
@@ -796,6 +811,7 @@ pub async fn delete_route(cx: &Cx, csrf: String, id: String, version: String) ->
         (Ok(id), Ok(version)) => {
             app_context::<AppState>(cx)
                 .store
+                .clone()
                 .delete_route(id, version)
                 .await
         }

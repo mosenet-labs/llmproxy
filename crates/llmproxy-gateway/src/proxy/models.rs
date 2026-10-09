@@ -9,7 +9,11 @@ pub(super) fn matches(path: &str) -> bool {
     matches!(path, "/models" | "/v1/models")
 }
 
-pub(super) async fn serve(providers: &ProviderSnapshots, session: &mut Session) -> Result<()> {
+pub(super) async fn serve(
+    providers: &ProviderSnapshots,
+    identity: &llmproxy_store::CallIdentity,
+    session: &mut Session,
+) -> Result<()> {
     if session.req_header().method != "GET" {
         session.set_keepalive(None);
         let mut header = ResponseHeader::build(405, Some(2))?;
@@ -21,7 +25,7 @@ pub(super) async fn serve(providers: &ProviderSnapshots, session: &mut Session) 
         return Ok(());
     }
     let body = serde_json::to_vec(&serde_json::json!({
-        "object": "list", "data": providers.catalog(),
+        "object": "list", "data": providers.catalog_for(identity),
     }))
     .map_err(|_| Error::explain(ErrorType::InternalError, "cannot serialize model catalog"))?;
     // A discovery request does not consume a body; do not reuse an unread connection.

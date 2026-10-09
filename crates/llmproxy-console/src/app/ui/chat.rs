@@ -46,15 +46,18 @@ fn selected_protocol(protocol: &str) -> std::result::Result<Protocol, String> {
 #[page]
 pub async fn chat(cx: &Cx) -> Result<impl View> {
     let state = app_context::<AppState>(cx);
-    let mut models: Vec<_> = state
-        .store
+    let mut models: Vec<_> = crate::app::group_store(cx, "chat")
         .list_models()
         .await?
         .into_iter()
         .filter(|model| !model.protocols.is_empty())
         .collect();
     models.sort_by(|a, b| a.alias.cmp(&b.alias));
-    let mut routes: Vec<_> = state.store.list_routes().await?.into_iter().collect();
+    let mut routes: Vec<_> = crate::app::group_store(cx, "chat")
+        .list_routes()
+        .await?
+        .into_iter()
+        .collect();
     routes.sort_by(|a, b| {
         a.name
             .cmp(&b.name)
@@ -73,10 +76,13 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         .map(|model| model.id.to_string())
         .chain(routes.iter().map(|route| format!("route:{}", route.id)))
     {
-        let protocol =
-            crate::app::chat_service::target::choose_protocol(&state.store, &id, &first_protocol)
-                .await
-                .map_err(io::Error::other)?;
+        let protocol = crate::app::chat_service::target::choose_protocol(
+            &crate::app::group_store(cx, "chat"),
+            &id,
+            &first_protocol,
+        )
+        .await
+        .map_err(io::Error::other)?;
         if !protocol.is_empty() {
             first_model = id;
             first_protocol = protocol;
@@ -84,7 +90,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         }
     }
     let service = ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     };
     let (initial, selected) = service
@@ -94,7 +100,9 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
         })
         .await?;
     let initial_busy = service.load(&initial).await?.snapshot().2;
-    let resume = state.chat_sessions.any_generating();
+    let resume = state
+        .chat_sessions
+        .any_generating(crate::app::group_store(cx, "chat").group_id());
     let session = signal(cx, || initial);
     let model_id = signal(cx, || selected.model_id);
     let protocol = signal(cx, || selected.protocol.as_str().to_owned());
@@ -169,6 +177,9 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                     >
                         "对话工作区"
                     </h2>
+                </div>
+                <div class="mb-4 px-2 [&_form]:grid [&_form]:grid-cols-[minmax(0,1fr)_auto] [&_label]:col-span-2 [&_select]:w-full! [&_select]:min-w-0">
+                    super::groups::group_selector(scope: "chat")
                 </div>
                 if available {
                     <button
@@ -473,14 +484,15 @@ pub async fn new_chat(cx: &Cx, csrf: String, current_session: String) -> Result<
         .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
     let selection = current.selection();
     let protocol_kind = selection.protocol;
-    let (_, protocols, available, _) = chat_target(&state.store, &selection.model_id)
-        .await
-        .map_err(io::Error::other)?;
+    let (_, protocols, available, _) =
+        chat_target(&crate::app::group_store(cx, "chat"), &selection.model_id)
+            .await
+            .map_err(io::Error::other)?;
     if !available || !protocols.contains(&protocol_kind) {
         return Err(io::Error::other("当前模型或协议已不可用").into());
     }
     ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions,
     }
     .create(selection)
@@ -498,6 +510,9 @@ pub async fn switch_chat(
 ) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
+    crate::app::group_store(cx, "chat")
+        .get_chat_conversation(&session_id)
+        .await?;
     let Some(session) = state.chat_sessions.get(&session_id) else {
         return Ok("聊天会话已过期，请刷新页面".into());
     };
@@ -505,16 +520,21 @@ pub async fn switch_chat(
         Ok(kind) => kind,
         Err(error) => return Ok(error),
     };
-    let (_, protocols, available, _) = match chat_target(&state.store, &model_id).await {
-        Ok(target) => target,
-        Err(error) => return Ok(error),
-    };
+    let (_, protocols, available, _) =
+        match chat_target(&crate::app::group_store(cx, "chat"), &model_id).await {
+            Ok(target) => target,
+            Err(error) => return Ok(error),
+        };
     if !available || !protocols.contains(&kind) {
         return Ok("所选模型或协议已不可用，当前选择已保留".into());
     }
-    let health = crate::app::chat_service::target::health(&state.store, &model_id, kind)
-        .await
-        .map_err(io::Error::other)?;
+    let health = crate::app::chat_service::target::health(
+        &crate::app::group_store(cx, "chat"),
+        &model_id,
+        kind,
+    )
+    .await
+    .map_err(io::Error::other)?;
     if health.blocked {
         return Ok(format!(
             "{}，当前选择已保留，请切换协议或模型",
@@ -522,7 +542,7 @@ pub async fn switch_chat(
         ));
     }
     match (ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     })
     .select(
@@ -549,7 +569,7 @@ pub async fn default_protocol(
 ) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
     Ok(crate::app::chat_service::target::choose_protocol(
-        &app_context::<AppState>(cx).store,
+        &crate::app::group_store(cx, "chat"),
         &model_id,
         &current,
     )
@@ -562,25 +582,29 @@ pub async fn begin_chat(cx: &Cx, csrf: String, session_id: String, prompt: Strin
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
     let service = ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     };
     let session = service.load(&session_id).await?;
-    let (alias, _, available, _) =
-        match chat_target(&state.store, &session.selection().model_id).await {
-            Ok(target) => target,
-            Err(_) => {
-                session.save_error("当前模型配置已失效，请选择有效模型");
-                return Ok(false);
-            }
-        };
+    let (alias, _, available, _) = match chat_target(
+        &crate::app::group_store(cx, "chat"),
+        &session.selection().model_id,
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(_) => {
+            session.save_error("当前模型配置已失效，请选择有效模型");
+            return Ok(false);
+        }
+    };
     if !available {
         session.save_error("当前模型已不可用，请选择有效模型");
         return Ok(false);
     }
     let selection = session.selection();
     let health = crate::app::chat_service::target::health(
-        &state.store,
+        &crate::app::group_store(cx, "chat"),
         &selection.model_id,
         selection.protocol,
     )
@@ -615,7 +639,7 @@ pub async fn chat_stop_button(
     let state = app_context::<AppState>(cx);
     let room_id = session.get();
     let room = ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     }
     .load(&room_id)
@@ -667,7 +691,7 @@ pub async fn stop_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
     let service = ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     };
     let Ok(room) = service.load(&session_id).await else {
@@ -687,13 +711,23 @@ pub async fn stop_chat(cx: &Cx, csrf: String, session_id: String) -> Result<bool
 pub async fn send_chat(cx: &Cx, csrf: String, session_id: String, streaming: bool) -> Result<bool> {
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
+    crate::app::group_store(cx, "chat")
+        .get_chat_conversation(&session_id)
+        .await?;
     let Some(session) = state.chat_sessions.get(&session_id) else {
         return Ok(false);
     };
     let Some(turn) = session.start_request() else {
         return Ok(false);
     };
-    crate::app::chat_service::generation::spawn(state, session_id, session, turn, streaming);
+    crate::app::chat_service::generation::spawn(
+        state,
+        crate::app::group_store(cx, "chat"),
+        session_id,
+        session,
+        turn,
+        streaming,
+    );
     Ok(true)
 }
 
@@ -710,14 +744,18 @@ pub async fn chat_protocol_picker(
     crate::app::request_connection(cx);
     let state = app_context::<AppState>(cx);
     let csrf = state.csrf.clone();
-    let (_, protocols, _, _) = chat_target(&state.store, &model_id.get())
+    let (_, protocols, _, _) = chat_target(&crate::app::group_store(cx, "chat"), &model_id.get())
         .await
         .unwrap_or_else(|_| (String::new(), Vec::new(), false, Support::Unknown));
     let mut options = Vec::new();
     for kind in protocols {
-        let health = crate::app::chat_service::target::health(&state.store, &model_id.get(), kind)
-            .await
-            .map_err(io::Error::other)?;
+        let health = crate::app::chat_service::target::health(
+            &crate::app::group_store(cx, "chat"),
+            &model_id.get(),
+            kind,
+        )
+        .await
+        .map_err(io::Error::other)?;
         options.push((kind, health));
     }
     Ok(view! {
@@ -791,25 +829,21 @@ pub async fn chat_session_list(
 ) -> Result<impl View> {
     crate::app::request_connection(cx);
     let _revision = refresh.get();
-    let state = app_context::<AppState>(cx);
-    let mut aliases: HashMap<_, _> = state
-        .store
+    let mut aliases: HashMap<_, _> = crate::app::group_store(cx, "chat")
         .list_models()
         .await?
         .into_iter()
         .map(|model| (model.id.to_string(), model.alias))
         .collect();
-    for route in state.store.list_routes().await? {
+    for route in crate::app::group_store(cx, "chat").list_routes().await? {
         aliases.insert(format!("route:{}", route.id), route.name);
     }
     let records = if archived_only.get() {
-        state
-            .store
+        crate::app::group_store(cx, "chat")
             .list_archived_chat_conversations(page.get() * 20, 21)
             .await?
     } else {
-        state
-            .store
+        crate::app::group_store(cx, "chat")
             .list_chat_conversations(page.get() * 20, 21)
             .await?
     };
@@ -1099,6 +1133,9 @@ pub async fn chat_session_activity(
 ) -> Result<impl View> {
     crate::app::request_connection(cx);
     let _revision = refresh.get();
+    crate::app::group_store(cx, "chat")
+        .get_chat_conversation(&id)
+        .await?;
     let room = app_context::<AppState>(cx).chat_sessions.get(&id);
     Ok(live! {
         let mut changed = room.as_ref().map(|room| room.subscribe());
@@ -1208,7 +1245,7 @@ pub async fn open_chat(cx: &Cx, csrf: String, session_id: String) -> Result<Stri
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
     match (ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     })
     .load(&session_id)
@@ -1230,7 +1267,7 @@ pub async fn change_chat_history(
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
     let service = ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     };
     let action = match action.as_str() {
@@ -1262,7 +1299,7 @@ pub async fn chat_history(
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
     let service = ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     };
     let room = service.load(&session.get()).await?;
@@ -1273,7 +1310,7 @@ pub async fn chat_history(
         loop {
             let mut pending = false;
             if !room.snapshot().2 {
-                let records = match state.store.chat_turns(&session.get()).await {
+                let records = match crate::app::group_store(cx, "chat").chat_turns(&session.get()).await {
                     Ok(records) => records,
                     Err(_) => {
                         room.save_error(
@@ -1285,7 +1322,7 @@ pub async fn chat_history(
                 for record in &records {
                     room.apply_record(record);
                     pending |= record.call_started && !record.call_finished;
-                    if state.store.chat_usage_pending(&record.id) {
+                    if crate::app::group_store(cx, "chat").chat_usage_pending(&record.id) {
                         room.save_error(
                             "本轮来源用量尚未保存，请重试保存",
                         );
@@ -1579,6 +1616,9 @@ pub async fn set_chat_thinking(
 ) -> Result<String> {
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
+    crate::app::group_store(cx, "chat")
+        .get_chat_conversation(&session_id)
+        .await?;
     let Some(session) = state.chat_sessions.get(&session_id) else {
         return Ok("聊天会话已过期，请刷新页面".into());
     };
@@ -1586,7 +1626,7 @@ pub async fn set_chat_thinking(
         return Ok("思考模式无效".into());
     };
     let selection = session.selection();
-    let (_, _, _, support) = chat_target(&state.store, &selection.model_id)
+    let (_, _, _, support) = chat_target(&crate::app::group_store(cx, "chat"), &selection.model_id)
         .await
         .map_err(io::Error::other)?;
     if let Err(message) = (Config {
@@ -1601,7 +1641,7 @@ pub async fn set_chat_thinking(
         return Ok("模型选择已改变，请重试".into());
     }
     match (ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     })
     .select(&session_id, selection, choice)
@@ -1630,7 +1670,7 @@ pub async fn chat_thinking_picker(
         .get(&session.get())
         .ok_or_else(|| io::Error::other("聊天会话已过期，请刷新页面"))?;
     let current = room.thinking_choice();
-    let (_, _, _, support) = chat_target(&state.store, &model_id.get())
+    let (_, _, _, support) = chat_target(&crate::app::group_store(cx, "chat"), &model_id.get())
         .await
         .unwrap_or_else(|_| (String::new(), Vec::new(), false, Support::Unknown));
     let warning = (Config {
@@ -1770,13 +1810,12 @@ pub async fn chat_usage(
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
     let room = ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     }
     .load(&session.get())
     .await?;
-    let mut records = state
-        .store
+    let mut records = crate::app::group_store(cx, "chat")
         .chat_turns(&session.get())
         .await
         .unwrap_or_default();
@@ -1785,7 +1824,7 @@ pub async fn chat_usage(
         let mut deadline = None;
         loop {
             let busy = room.snapshot().2;
-            if !busy && let Ok(saved) = state.store.chat_turns(&session.get()).await {
+            if !busy && let Ok(saved) = crate::app::group_store(cx, "chat").chat_turns(&session.get()).await {
                 records = saved;
             }
             let pending = records
@@ -1930,7 +1969,7 @@ pub async fn retry_chat_save(cx: &Cx, csrf: String, session_id: String) -> Resul
     crate::app::check_csrf(cx, &csrf)?;
     let state = app_context::<AppState>(cx);
     ChatService {
-        store: &state.store,
+        store: &crate::app::group_store(cx, "chat"),
         sessions: &state.chat_sessions,
     }
     .retry_save(&session_id)
@@ -1959,9 +1998,9 @@ pub async fn chat_model_picker(
     let _ = revision;
     let state = app_context::<AppState>(cx);
     let model_csrf = state.csrf.clone();
-    let mut models = state.store.list_models().await?;
+    let mut models = crate::app::group_store(cx, "chat").list_models().await?;
     models.sort_by(|a, b| a.alias.cmp(&b.alias));
-    let mut routes = state.store.list_routes().await?;
+    let mut routes = crate::app::group_store(cx, "chat").list_routes().await?;
     routes.sort_by(|a, b| {
         a.name
             .cmp(&b.name)
@@ -1982,15 +2021,23 @@ pub async fn chat_model_picker(
         let preferred = if id == selected {
             current.clone()
         } else {
-            crate::app::chat_service::target::choose_protocol(&state.store, &id, &current)
-                .await
-                .unwrap_or_default()
+            crate::app::chat_service::target::choose_protocol(
+                &crate::app::group_store(cx, "chat"),
+                &id,
+                &current,
+            )
+            .await
+            .unwrap_or_default()
         };
         let kind = Protocol::parse(&preferred).or_else(|| protocols.first().copied());
         if let Some(kind) = kind {
-            let health = crate::app::chat_service::target::health(&state.store, &id, kind)
-                .await
-                .map_err(io::Error::other)?;
+            let health = crate::app::chat_service::target::health(
+                &crate::app::group_store(cx, "chat"),
+                &id,
+                kind,
+            )
+            .await
+            .map_err(io::Error::other)?;
             options.push((id, label, health.blocked));
         }
     }
@@ -2078,18 +2125,22 @@ pub async fn chat_health_notice(
     let csrf = state.csrf.clone();
     let message = signal(cx, String::new);
     let protocol = selected_protocol(&current).map_err(io::Error::other)?;
-    let health = crate::app::chat_service::target::health(&state.store, &selected, protocol)
-        .await
-        .unwrap_or(crate::app::chat_service::target::Health {
-            blocked: true,
-            warning: true,
-            severe: true,
-            label: if selected.is_empty() {
-                "请选择可用模型".into()
-            } else {
-                "模型配置已失效".into()
-            },
-        });
+    let health = crate::app::chat_service::target::health(
+        &crate::app::group_store(cx, "chat"),
+        &selected,
+        protocol,
+    )
+    .await
+    .unwrap_or(crate::app::chat_service::target::Health {
+        blocked: true,
+        warning: true,
+        severe: true,
+        label: if selected.is_empty() {
+            "请选择可用模型".into()
+        } else {
+            "模型配置已失效".into()
+        },
+    });
     let hint = if health.blocked {
         "当前选择和对话已保留，请重新探测或切换模型。"
     } else if health.warning {
@@ -2175,8 +2226,13 @@ pub async fn reprobe_chat_model(
     let state = app_context::<AppState>(cx);
     let result = async {
         let protocol = selected_protocol(&protocol)?;
-        crate::app::chat_service::target::reprobe(&state.store, &state.health, &selected, protocol)
-            .await?;
+        crate::app::chat_service::target::reprobe(
+            &crate::app::group_store(cx, "chat"),
+            &state.health,
+            &selected,
+            protocol,
+        )
+        .await?;
         Ok("探测已完成".to_owned())
     }
     .await;

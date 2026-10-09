@@ -50,6 +50,17 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     store.migrate().await.unwrap();
+    let api_key = store
+        .create_virtual_key(llmproxy_store::VirtualKeyInput {
+            name: "Console integration".into(),
+            all_routes: true,
+            model_ids: vec![],
+            route_ids: vec![],
+            expires_at: None,
+        })
+        .await
+        .unwrap()
+        .secret;
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -931,7 +942,7 @@ async fn exercise_http(database_url: &str) {
     let result: serde_json::Value = response.json().await.unwrap();
     assert_eq!(result["ok"], "「Unified Mock/mock-model」已创建");
     let saved_price = store
-        .list_models()
+        .list_all_models()
         .await
         .unwrap()
         .into_iter()
@@ -942,14 +953,14 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(saved_price.input_per_million, "0.15");
     assert_eq!(saved_price.output_per_million, "0.60");
     let model_id = store
-        .list_models()
+        .list_all_models()
         .await
         .unwrap()
         .into_iter()
         .find(|model| model.alias == "Unified Mock/mock-model")
         .unwrap()
         .id;
-    assert!(store.list_routes().await.unwrap().is_empty());
+    assert!(store.list_all_routes().await.unwrap().is_empty());
     let new_route_editor = client
         .get(format!("{base}/routes/edit"))
         .send()
@@ -993,13 +1004,17 @@ async fn exercise_http(database_url: &str) {
         "「smart-chat」已保存"
     );
     let saved_route = store
-        .list_routes()
+        .list_all_routes()
         .await
         .unwrap()
         .into_iter()
         .find(|route| route.name == "smart-chat")
         .unwrap();
     assert_eq!(saved_route.protocol, Protocol::OpenAiChat);
+    assert!(saved_route.group_ids.is_empty());
+    assert!(store.list_models().await.unwrap().is_empty());
+    assert!(store.list_routes().await.unwrap().is_empty());
+    support::assign_catalog(&store).await;
     let route_chat = client
         .get(format!("{base}/chat"))
         .send()
@@ -1061,7 +1076,7 @@ async fn exercise_http(database_url: &str) {
         "「smart-chat-v2」已保存"
     );
     let updated_route = store
-        .list_routes()
+        .list_all_routes()
         .await
         .unwrap()
         .into_iter()
@@ -1083,7 +1098,7 @@ async fn exercise_http(database_url: &str) {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(
         store
-            .list_routes()
+            .list_all_routes()
             .await
             .unwrap()
             .iter()
@@ -1283,7 +1298,7 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     assert!(chat.contains("Unified Mock/mock-model"));
-    let model_id = store.list_models().await.unwrap()[0].id;
+    let model_id = store.list_all_models().await.unwrap()[0].id;
     assert!(chat.contains(&format!("value=\"{model_id}\"")));
     assert!(chat.contains("id=\"chat-protocol\""));
     assert!(!chat.contains("id=\"chat-messages-auth\""));
@@ -1354,6 +1369,7 @@ async fn exercise_http(database_url: &str) {
     for _ in 0..60 {
         let response = client
             .post(format!("{origin}/v1/chat/completions"))
+            .bearer_auth(&api_key)
             .body(r#"{"model":"Unified Mock/mock-model","messages":[]}"#)
             .send()
             .await
@@ -1404,7 +1420,7 @@ async fn exercise_http(database_url: &str) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.text().await.unwrap().contains("模型重复选择"));
-    assert_eq!(store.list_models().await.unwrap().len(), 1);
+    assert_eq!(store.list_all_models().await.unwrap().len(), 1);
     let mut batch = batch;
     batch["models"][1]["model_id"] = "unlisted-model".into();
     batch["models"][1]["alias"] = "Unified Mock/unlisted-model".into();
@@ -1429,8 +1445,14 @@ async fn exercise_http(database_url: &str) {
         response.json::<serde_json::Value>().await.unwrap()["ok"],
         "已导入 2 个模型"
     );
-    let models = store.list_models().await.unwrap();
+    let models = store.list_all_models().await.unwrap();
     assert_eq!(models.len(), 3);
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.upstream_model_id != "mock-model")
+            .all(|model| model.group_ids.is_empty())
+    );
     assert!(
         models
             .iter()
@@ -1557,7 +1579,7 @@ async fn exercise_http(database_url: &str) {
         response.json::<serde_json::Value>().await.unwrap()["ok"],
         "已导入 1 个模型"
     );
-    assert!(store.list_models().await.unwrap().iter().any(|model| {
+    assert!(store.list_all_models().await.unwrap().iter().any(|model| {
         model.alias == "Unified Mock/another-unlisted-model"
             && model.upstream_model_id == "another-unlisted-model"
     }));

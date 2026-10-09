@@ -76,6 +76,7 @@ async fn discovery_and_automatic_bridging_use_the_same_targets() {
             .await
             .unwrap();
     }
+    support::assign_catalog(&database.store).await;
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     let list = catalog(&gateway, "/models");
     assert_eq!(list, catalog(&gateway, "/v1/models"));
@@ -249,6 +250,7 @@ async fn wait_for_catalog(gateway: &Gateway, alias: &str, present: bool) {
 #[tokio::test]
 async fn empty_catalog_is_a_successful_list() {
     let database = Database::new().await;
+    support::assign_catalog(&database.store).await;
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     assert_eq!(
         catalog(&gateway, "/models"),
@@ -278,6 +280,7 @@ async fn automatic_bridging_preserves_streams_in_all_sixteen_directions() {
             .await;
         upstreams.push((upstream, requests));
     }
+    support::assign_catalog(&database.store).await;
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     for (target, (_, requests)) in ALL.into_iter().zip(&upstreams) {
         let name = format!("internal-{}", target.as_str());

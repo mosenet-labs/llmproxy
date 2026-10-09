@@ -133,6 +133,7 @@ struct ChatState {
 }
 
 pub(crate) struct ChatSession {
+    pub(crate) group_id: i64,
     #[cfg(test)]
     scope: String,
     #[cfg(test)]
@@ -145,6 +146,7 @@ pub(crate) struct ChatSession {
 impl ChatSession {
     fn new(_scope: String, model_id: String, protocol: String) -> Self {
         Self {
+            group_id: 1,
             #[cfg(test)]
             scope: _scope,
             #[cfg(test)]
@@ -650,25 +652,28 @@ impl ChatSessions {
     }
 
     /// 首屏恢复订阅时也考虑后台会话，当前查看的会话可能已经空闲。
-    pub(crate) fn any_generating(&self) -> bool {
+    pub(crate) fn any_generating(&self, group_id: i64) -> bool {
         self.entries
             .lock()
             .expect("chat sessions mutex")
             .values()
-            .any(|(_, room)| room.snapshot().2)
+            .any(|(_, room)| room.group_id == group_id && room.snapshot().2)
     }
 
     /// 加载空闲历史，签名仍保留在结构化 IR 中。
     pub(crate) fn restore(
         &self,
+        group_id: i64,
         record: &llmproxy_store::chat_history::Conversation,
         turns: &[llmproxy_store::chat_history::Turn],
     ) -> Arc<ChatSession> {
-        let room = Arc::new(ChatSession::new(
+        let mut restored = ChatSession::new(
             llmproxy_store::chat_history::OWNER.into(),
             record.selection.model_id.clone(),
             record.selection.protocol.as_str().into(),
-        ));
+        );
+        restored.group_id = group_id;
+        let room = Arc::new(restored);
         {
             let mut state = room.state.lock().expect("chat state mutex");
             state.title = record.title.clone();

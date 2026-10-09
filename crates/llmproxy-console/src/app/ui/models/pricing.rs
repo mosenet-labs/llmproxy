@@ -565,6 +565,7 @@ pub async fn preview_price_band(
         let holidays = if china_holidays_off_peak {
             app_context::<AppState>(cx)
                 .store
+                .clone()
                 .list_holidays(year)
                 .await?
         } else {
@@ -633,7 +634,7 @@ pub async fn save_price_plan(
             .into_iter()
             .map(TryInto::try_into)
             .collect::<std::result::Result<Vec<WeeklyPeakWindow>, _>>()?;
-        let store = &app_context::<AppState>(cx).store;
+        let store = &app_context::<AppState>(cx).store.clone();
         let provider = store.get(provider_id).await?;
         let effective_at = if effective_at.is_empty() {
             None
@@ -1144,6 +1145,7 @@ pub(super) async fn price_editor(
     let calendar_year = Utc::now().with_timezone(&china_offset()).year();
     let calendar_imported = !app_context::<AppState>(cx)
         .store
+        .clone()
         .list_holidays(i64::from(calendar_year))
         .await?
         .is_empty();

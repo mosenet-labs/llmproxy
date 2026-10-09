@@ -130,11 +130,14 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
         )
         .await
         .unwrap();
+    let import_group = store.create_group("subscription-models").await.unwrap();
+    let import_cookie = format!("llmproxy_models_group={}", import_group.id);
     let response = client
         .get(format!(
             "{base}/ui/subscriptions/models?node_id={}",
             node.node_id
         ))
+        .header("cookie", &import_cookie)
         .send()
         .await
         .unwrap();
@@ -142,6 +145,8 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
     let import_page = response.text().await.unwrap();
     assert!(import_page.contains("test-model"));
     assert!(import_page.contains("second-model"));
+    assert!(import_page.contains("选择需要导入系统的模型"));
+    assert!(!import_page.contains("导入资源组："));
     let csrf_field = import_page.split("name=\"csrf\"").nth(1).unwrap();
     let csrf = csrf_field
         .split("value=\"")
@@ -151,20 +156,39 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
         .next()
         .unwrap();
     let response = client
-        .post(format!("{base}/ui/subscriptions/import"))
+        .post(format!(
+            "{base}/ui/_topcoat/runtime/procedures/import-subscription-models"
+        ))
         .header("origin", &base)
-        .form(&[
-            ("csrf", csrf),
-            ("node_id", node.node_id.as_str()),
-            ("models", "second-model"),
-        ])
+        .header("cookie", &import_cookie)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::to_vec(&[url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("csrf", csrf),
+                    ("node_id", node.node_id.as_str()),
+                    ("models", "second-model"),
+                ])
+                .finish()])
+            .unwrap(),
+        )
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    let imported = store.list_models().await.unwrap();
+    assert!(store.list_models().await.unwrap().is_empty());
+    assert!(
+        store
+            .for_group(import_group.id)
+            .list_models()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let imported = store.list_all_models().await.unwrap();
     assert_eq!(imported.len(), 1);
     assert_eq!(imported[0].upstream_model_id, "second-model");
+    assert!(imported[0].group_ids.is_empty());
     let enabled_node = store.subscription_nodes().await.unwrap().pop().unwrap();
     let response = client
         .post(format!("{base}/ui/subscriptions/name"))

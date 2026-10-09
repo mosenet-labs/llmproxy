@@ -51,10 +51,30 @@ async fn create_check(
 }
 
 impl ProviderStore {
+    pub async fn provider_health_checks(
+        &self,
+        provider_id: i64,
+    ) -> StoreResult<Vec<HealthCheckView>> {
+        let mut connection = self.connection().await?;
+        find(&mut connection, provider_id).await?;
+        let models = ModelMapping::all()
+            .filter(ModelMapping::fields().provider_id().eq(provider_id))
+            .select(ModelMapping::fields().id())
+            .exec(&mut connection)
+            .await?;
+        drop(connection);
+        let mut checks = Vec::new();
+        for id in models {
+            checks.extend(self.model_health_checks(id).await?);
+        }
+        Ok(checks)
+    }
+
     pub async fn model_health_checks(&self, model_id: i64) -> StoreResult<Vec<HealthCheckView>> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         let mapping = find_mapping(&mut tx, model_id).await?;
+
         let provider = find(&mut tx, mapping.provider_id).await?;
         let current_time = now()?;
         let mut views = Vec::new();
@@ -129,6 +149,7 @@ impl ProviderStore {
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
         let mapping = find_mapping(&mut tx, model_id).await?;
+
         if !mapping.protocols().contains(&protocol) {
             return Err(StoreError::Validation("模型未配置所选协议".into()));
         }

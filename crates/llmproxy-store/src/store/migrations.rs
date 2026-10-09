@@ -116,6 +116,26 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0023_model_health_checks.sql",
         include_str!("../../migrations/postgresql/0023_model_health_checks.sql"),
     ),
+    MigrationFile::new(
+        202610080004,
+        "0024_groups_and_virtual_keys.sql",
+        include_str!("../../migrations/postgresql/0024_groups_and_virtual_keys.sql"),
+    ),
+    MigrationFile::new(
+        202610090001,
+        "0025_shared_providers.sql",
+        include_str!("../../migrations/postgresql/0025_shared_providers.sql"),
+    ),
+    MigrationFile::new(
+        202610090002,
+        "0026_resource_group_memberships.sql",
+        include_str!("../../migrations/postgresql/0026_resource_group_memberships.sql"),
+    ),
+    MigrationFile::new(
+        202610090003,
+        "0027_virtual_key_models.sql",
+        include_str!("../../migrations/postgresql/0027_virtual_key_models.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -398,5 +418,25 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610080003,
         "0056_model_health_checks.sql",
         include_str!("../../migrations/sqlite/0056_model_health_checks.sql"),
+    ),
+    MigrationFile::new(
+        202610080004,
+        "0057_groups_and_virtual_keys.sql",
+        include_str!("../../migrations/sqlite/0057_groups_and_virtual_keys.sql"),
+    ),
+    MigrationFile::new(
+        202610090001,
+        "0058_shared_providers.sql",
+        include_str!("../../migrations/sqlite/0058_shared_providers.sql"),
+    ),
+    MigrationFile::new(
+        202610090002,
+        "0059_resource_group_memberships.sql",
+        include_str!("../../migrations/sqlite/0059_resource_group_memberships.sql"),
+    ),
+    MigrationFile::new(
+        202610090003,
+        "0060_virtual_key_models.sql",
+        include_str!("../../migrations/sqlite/0060_virtual_key_models.sql"),
     ),
 ]);

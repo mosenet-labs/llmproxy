@@ -13,8 +13,6 @@ pub use summary::{Counter, ModelTotals, Summary, Totals};
 pub const OWNER: &str = "workspace";
 /// 服务端业务请求关联头，在发给 Provider 前移除。
 pub const REQUEST_HEADER: &str = "x-llmproxy-history-request";
-/// 仅 Console 到 Gateway 使用的服务端认证头。
-pub const AUTH_HEADER: &str = "x-llmproxy-history-auth";
 
 /// 轮次执行状态；用量完整程度单独记录。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -43,6 +43,8 @@ pub struct Gateway {
 }
 
 pub struct RequestContext {
+    identity: Option<llmproxy_store::CallIdentity>,
+    group_id: i64,
     history: Option<crate::history::Tracker>,
     thinking: llmproxy_core::thinking::Choice,
     thinking_error: Option<&'static str>,
@@ -79,6 +81,7 @@ impl Gateway {
         &self,
         protocol: Protocol,
         alias: &str,
+        ctx: &RequestContext,
     ) -> std::result::Result<
         (
             Arc<ResolvedProvider>,
@@ -87,7 +90,15 @@ impl Gateway {
         ),
         u16,
     > {
-        let model = self.providers.select(protocol, alias).ok_or(404u16)?;
+        let (model, route_id) =
+            self.providers
+                .select_for(ctx.group_id, ctx.identity.as_ref(), protocol, alias)?;
+        tracing::info!(
+            group_id = ctx.group_id,
+            virtual_key_id = ctx.identity.as_ref().map(|identity| identity.key_id),
+            route_id,
+            "model route selected"
+        );
         if model.blocked {
             return Err(503);
         }
@@ -102,7 +113,7 @@ impl Gateway {
     /// 统一准备路由、转换模式和工具作用域，Pingora 阶段只负责读取及选择。
     async fn prepare_route(
         &self,
-        session: &Session,
+        _session: &Session,
         ctx: &mut RequestContext,
         route: SelectedRoute,
     ) -> Result<()> {
@@ -111,17 +122,17 @@ impl Gateway {
             return Err(Error::explain(ErrorType::HTTPStatus(422), message));
         }
         if route.provider.protocol == Protocol::Gemini && route.is_cross_protocol() {
+            let caller_scope = ctx.identity.as_ref().map_or_else(
+                || format!("console-group:{}", ctx.group_id),
+                |identity| format!("virtual-key:{}:{}", identity.group_id, identity.key_id),
+            );
             let context = crate::tool_state::Context::new(
                 self.tool_states.clone(),
                 &route.provider,
                 &route.upstream_model,
                 route.protocol,
                 &route.client_model,
-                [
-                    session.get_header_bytes("authorization"),
-                    session.get_header_bytes("x-api-key"),
-                    session.get_header_bytes("x-goog-api-key"),
-                ],
+                [caller_scope.as_bytes(), b"", b""],
             );
             ctx.request_body.set_tool_state(context.clone());
             ctx.response_body.set_tool_state(context);
@@ -161,6 +172,8 @@ impl ProxyHttp for Gateway {
 
     fn new_ctx(&self) -> Self::CTX {
         RequestContext {
+            identity: None,
+            group_id: 1,
             history: None,
             thinking: Default::default(),
             thinking_error: None,
@@ -182,13 +195,6 @@ impl ProxyHttp for Gateway {
         if buffered::resume(session, ctx)? {
             return Ok(false);
         }
-        if models::matches(session.req_header().uri.path()) {
-            let request = session.req_header();
-            ctx.telemetry
-                .begin(request.method.as_str(), request.uri.path());
-            models::serve(&self.providers, session).await?;
-            return Ok(true);
-        }
         if crate::subscriptions::matches(session.req_header().uri.path()) {
             // 订阅入口提前返回，先识别遥测路由，使成功轮询／心跳按 DEBUG 记录。
             let request = session.req_header();
@@ -203,24 +209,90 @@ impl ProxyHttp for Gateway {
             crate::console::serve(&self.console, session).await?;
             return Ok(true);
         }
-        if self.console.accepts_history_auth(
-            session.get_header_bytes(llmproxy_store::chat_history::AUTH_HEADER),
-        ) && let Some(key) = session
-            .req_header()
-            .headers
-            .get(llmproxy_store::chat_history::REQUEST_HEADER)
-            .and_then(|v| v.to_str().ok())
+        let request = session.req_header();
+        ctx.telemetry
+            .begin(request.method.as_str(), request.uri.path());
+        ctx.protocol = match match_route(request.method.as_str(), request.uri.path()) {
+            Route::Proxy(protocol) => Some(protocol),
+            Route::Gemini { .. } => Some(Protocol::Gemini),
+            _ => None,
+        };
+        let credential = authentication_key(session);
+        let internal = credential
+            .as_ref()
+            .is_ok_and(|secret| self.console.accepts_history_auth(secret.as_bytes()));
+        if internal {
+            ctx.group_id = session
+                .req_header()
+                .headers
+                .get("x-llmproxy-group")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            let enabled = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.history_store.for_group(ctx.group_id).group_enabled(),
+            )
+            .await
+            .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable"))?
+            .map_err(|_| {
+                Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable")
+            })?;
+            if !enabled {
+                return Err(Error::explain(ErrorType::HTTPStatus(403), "group disabled"));
+            }
+        } else if models::matches(session.req_header().uri.path())
+            || !matches!(
+                match_route(
+                    session.req_header().method.as_str(),
+                    session.req_header().uri.path()
+                ),
+                Route::NotFound
+            )
+        {
+            let secret = credential?;
+            let identity = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.history_store.authenticate_virtual_key(&secret),
+            )
+            .await
+            .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable"))?
+            .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable"))?
+            .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(401), "invalid API key"))?;
+            ctx.group_id = identity.group_id;
+            tracing::info!(
+                group_id = identity.group_id,
+                virtual_key_id = identity.key_id,
+                "model request authenticated"
+            );
+            ctx.identity = Some(identity);
+        }
+        if models::matches(session.req_header().uri.path()) {
+            let Some(identity) = &ctx.identity else {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(403),
+                    "model catalog requires virtual key",
+                ));
+            };
+            models::serve(&self.providers, identity, session).await?;
+            return Ok(true);
+        }
+        if internal
+            && let Some(key) = session
+                .req_header()
+                .headers
+                .get(llmproxy_store::chat_history::REQUEST_HEADER)
+                .and_then(|v| v.to_str().ok())
         {
             ctx.history = Some(crate::history::Tracker::new(
                 key.into(),
-                self.history_store.clone(),
+                self.history_store.for_group(ctx.group_id),
             ));
         }
         let request = session.req_header();
         let method = request.method.as_str();
         let path = request.uri.path();
         let route = match_route(method, path);
-        ctx.telemetry.begin(method, path);
         match thinking::choice(request) {
             Ok(choice) => ctx.thinking = choice,
             Err(message) => {
@@ -242,7 +314,7 @@ impl ProxyHttp for Gateway {
                 ctx.protocol = Some(protocol);
                 ctx.request_body.set_protocol(protocol);
                 let (provider, upstream_model_id, thinking) =
-                    match self.resolve_model_route(protocol, &alias) {
+                    match self.resolve_model_route(protocol, &alias, ctx) {
                         Ok(route) => route,
                         Err(status) => {
                             ctx.telemetry.selected(protocol, None);
@@ -296,7 +368,7 @@ impl ProxyHttp for Gateway {
                     }
                 };
                 let (provider, upstream_model_id, thinking) =
-                    match self.resolve_model_route(protocol, &alias) {
+                    match self.resolve_model_route(protocol, &alias, ctx) {
                         Ok(route) => route,
                         Err(status) => {
                             ctx.telemetry.selected(protocol, None);
@@ -718,4 +790,35 @@ fn error_status(error: &Error) -> u16 {
         },
         ErrorSource::Internal | ErrorSource::Unset => 500,
     }
+}
+
+fn authentication_key(session: &Session) -> Result<String> {
+    let mut supplied: Option<&str> = None;
+    for name in ["authorization", "x-api-key", "x-goog-api-key"] {
+        for value in session.req_header().headers.get_all(name).iter() {
+            let raw = value
+                .to_str()
+                .map_err(|_| Error::explain(ErrorType::HTTPStatus(401), "invalid API key"))?;
+            let value = if name == "authorization" {
+                raw.split_once(' ')
+                    .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+                    .map(|(_, key)| key)
+                    .ok_or_else(|| {
+                        Error::explain(ErrorType::HTTPStatus(401), "invalid authorization")
+                    })?
+            } else {
+                raw
+            };
+            if value.is_empty() || supplied.is_some_and(|previous| previous != value) {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(401),
+                    "ambiguous API key",
+                ));
+            }
+            supplied = Some(value);
+        }
+    }
+    supplied
+        .map(str::to_owned)
+        .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(401), "API key required"))
 }

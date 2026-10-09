@@ -1,9 +1,11 @@
 pub(crate) mod chat;
+pub(crate) mod groups;
 pub(crate) mod holidays;
 pub(crate) mod models;
 pub(crate) mod providers;
 pub(crate) mod routes;
 pub(crate) mod subscriptions;
+mod table;
 
 use topcoat::{
     Result,
@@ -15,7 +17,7 @@ use topcoat::{
 };
 use topcoat_ant_design::head_assets;
 use topcoat_ant_design::icons::{
-    APARTMENT_OUTLINED, APPSTORE_OUTLINED, CALENDAR_OUTLINED, PROJECT_OUTLINED,
+    APARTMENT_OUTLINED, APPSTORE_OUTLINED, CALENDAR_OUTLINED, PROJECT_OUTLINED, TEAM_OUTLINED,
 };
 
 const NAV_ITEM: &str = "flex min-h-11 items-center gap-3 whitespace-nowrap rounded-md px-3 py-2.5 text-sm text-secondary hover:bg-surface hover:text-primary aria-[current=page]:bg-primary-soft aria-[current=page]:font-medium aria-[current=page]:text-[#0958d9] max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-[13px]";
@@ -26,12 +28,21 @@ pub async fn providers_redirect(cx: &Cx) -> Result<topcoat::router::error::SeeOt
 
 #[layout]
 pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
+    let groups_page = uri(cx).path().starts_with("/ui/groups");
+    let group_detail = groups_page && uri(cx).path() != "/ui/groups";
+    let group_keys = group_detail && uri(cx).path().ends_with("/keys");
     let routes_page = uri(cx).path().starts_with("/ui/routes");
     let models_page = uri(cx).path() == "/ui/models";
     let chat_page = uri(cx).path() == "/ui/chat";
     let holidays_page = uri(cx).path() == "/ui/holidays";
     let subscriptions_page = uri(cx).path() == "/ui/subscriptions";
-    let page_title = if routes_page {
+    let page_title = if group_keys {
+        "Keys"
+    } else if group_detail {
+        "模型"
+    } else if groups_page {
+        "资源组"
+    } else if routes_page {
         "Model Routes"
     } else if models_page {
         "Models"
@@ -90,6 +101,18 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                             aria-label="主导航"
                         >
                             <a
+                                id="nav-chat"
+                                class=(NAV_ITEM)
+                                (chat_link)
+                                aria-current=(if chat_page { Some("page") } else { None })
+                            >
+                                icon(
+                                    data: PROJECT_OUTLINED,
+                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                )
+                                "Chat"
+                            </a>
+                            <a
                                 id="nav-providers"
                                 class=(NAV_ITEM)
                                 (providers_link)
@@ -97,7 +120,8 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     || models_page
                                     || chat_page
                                     || holidays_page
-                                    || subscriptions_page {
+                                    || subscriptions_page
+                                    || groups_page {
                                     None
                                 } else {
                                     Some("page")
@@ -120,18 +144,6 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
                                 )
                                 "Models"
-                            </a>
-                            <a
-                                id="nav-chat"
-                                class=(NAV_ITEM)
-                                (chat_link)
-                                aria-current=(if chat_page { Some("page") } else { None })
-                            >
-                                icon(
-                                    data: PROJECT_OUTLINED,
-                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
-                                )
-                                "Chat"
                             </a>
                             <a
                                 id="nav-routes"
@@ -177,6 +189,10 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                 )
                                 "订阅节点"
                             </a>
+                            <a id="nav-groups" class=(NAV_ITEM) href=(href!(groups::groups)) aria-current=(if groups_page { Some("page") } else { None })>
+                                icon(data: TEAM_OUTLINED, size: 16)
+                                "资源组"
+                            </a>
                         </nav>
                         <div
                             class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden"
@@ -185,20 +201,15 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                         </div>
                     </aside>
                     <div id="console-content" class="flex min-w-0 flex-col">
-                        <header
-                            id="console-header"
-                            class=(if chat_page {
-                                "sticky top-0 z-20 h-12 shrink-0 border-b border-[#e9edf2] bg-white text-xs text-[#788496] max-[640px]:hidden"
-                            } else {
-                                "sticky top-0 z-20 h-12 shrink-0 border-b border-border bg-white text-sm text-secondary max-[640px]:hidden"
-                            })
-                        >
-                            <div
-                                class="flex size-full items-center px-7 [&_strong]:font-medium [&_strong]:text-heading"
-                            >
-                                <span>
+                        <header id="console-header" class="sticky top-0 z-20 min-h-14 shrink-0 border-b border-border bg-white text-sm text-secondary">
+                            <div class="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-7 py-2 max-[640px]:px-4">
+                                <span class="shrink-0">
                                     "控制台"
                                     <span class="mx-2.5 text-[#b9c3ce]">"/"</span>
+                                    if group_detail {
+                                        <a href=(href!(groups::groups)) class="text-primary hover:text-primary-hover hover:underline">"资源组"</a>
+                                        <span class="mx-2.5 text-[#b9c3ce]">"/"</span>
+                                    }
                                     <strong>(page_title)</strong>
                                 </span>
                             </div>
