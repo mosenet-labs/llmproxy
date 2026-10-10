@@ -89,7 +89,7 @@ async fn feedback(cx: &Cx, controls: &Controls) -> Result<impl View> {
 pub async fn group_selector(cx: &Cx, scope: &str) -> Result<impl View> {
     let store = group_store(cx, scope);
     let group_rows = store.list_groups().await?;
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let selector_id = format!("{scope}-group");
     Ok(view! {
         <form method="post" action="/ui/groups/select" class="m-0 flex min-w-0 flex-wrap items-center gap-2" aria-label="切换资源组" data-group-selector=(scope)>
@@ -124,7 +124,7 @@ async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
     let group_rows = store.list_groups().await?;
     let paging = Pagination::new(cx);
     let page_range = paging.range(group_rows.len());
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let models = store.list_all_models().await?;
     let routes = store.list_all_routes().await?;
     let new_group = native_dialog_trigger_attributes(cx, "group-create");
@@ -215,7 +215,7 @@ pub async fn key_workspace(
     let key_rows = store.list_virtual_keys().await?;
     let paging = Pagination::new(cx);
     let page_range = paging.range(key_rows.len());
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let new_key = native_dialog_trigger_attributes(cx, "key-create");
     Ok(view! {
         <section class="w-full min-w-0">

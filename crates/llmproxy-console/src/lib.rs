@@ -15,7 +15,7 @@ use topcoat::{
 };
 use topcoat_ant_design::RouterBuilderUiExt;
 
-pub use topcoat::router::{Body, request::Request, response::Response};
+pub use topcoat::router::{Body, RemoteAddr, request::Request, response::Response};
 
 pub use topcoat::runtime::RUNTIME_PROTOCOL;
 
@@ -26,6 +26,7 @@ pub type SubscriptionPresence = std::sync::Arc<
 
 #[derive(Clone)]
 pub struct Console {
+    store: ProviderStore,
     history_auth: String,
     router: Router,
     subscriptions: SubscriptionPresence,
@@ -65,9 +66,10 @@ impl Console {
         let health = model_health::ModelHealthService::new(store.clone(), telemetry.clone())?;
         let state = app::AppState {
             websocket,
+            auth: app::auth::AuthService::from_env()?,
             subscriptions: subscriptions.clone(),
             history_auth: history_auth.clone(),
-            store,
+            store: store.clone(),
             health: health.clone(),
             csrf,
             port: listen.port(),
@@ -90,6 +92,18 @@ impl Console {
             .layer(BodyLimit::max(BODY_LIMIT))
             .layer(app::protect)
             .layer(observability::request_layer())
+            .route(app::ui::users::save_user)
+            .route(app::ui::users::user_action)
+            .route(app::ui::settings::save_mail_settings)
+            .route(app::ui::settings::test_mail_settings)
+            .route(app::auth::login)
+            .route(app::auth::bootstrap_admin)
+            .route(app::auth::send_code)
+            .route(app::auth::register)
+            .route(app::auth::reset_password)
+            .route(app::auth::logout)
+            .route(app::auth::save_profile)
+            .route(app::auth::change_password)
             .route(app::ui::groups::legacy_keys)
             .route(app::ui::groups::select)
             .route(app::ui::groups::save_group)
@@ -175,11 +189,19 @@ impl Console {
                 write!(writer, "/ui{}", topcoat::font::FontRoute::new(font).path())
             }));
         Ok(Self {
+            store,
             history_auth,
             router: builder.build(),
             _health_worker: health.start(),
             subscriptions,
         })
+    }
+
+    pub async fn session_valid(&self, headers: &topcoat::router::header::HeaderMap) -> bool {
+        let Some(secret) = app::auth::session_secret(headers) else {
+            return false;
+        };
+        self.store.session_is_active(secret).await.unwrap_or(false)
     }
 
     pub fn subscription_presence(&self) -> SubscriptionPresence {

@@ -182,7 +182,7 @@ pub async fn model_health(
 ) -> Result<impl View> {
     crate::app::request_connection(cx);
     let _ = revision;
-    let state = app_context::<AppState>(cx);
+    let csrf = crate::app::auth::csrf_token(cx);
     let checks = if id.is_empty() {
         Vec::new()
     } else {
@@ -207,7 +207,7 @@ pub async fn model_health(
         for check in &checks {
             health_form(
                 check: check,
-                csrf: state.csrf.as_str(),
+                csrf: csrf.as_str(),
                 dialog_revision: &dialog_revision,
                 open: &open,
                 busy: &busy,

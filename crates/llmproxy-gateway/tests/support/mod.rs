@@ -82,6 +82,8 @@ pub fn bind_listener(address: impl ToSocketAddrs) -> TcpListener {
 
 pub struct Gateway {
     pub api_key: String,
+    auth_database: (String, String),
+    auth_cookie: std::sync::OnceLock<String>,
     child: Child,
     pub address: SocketAddr,
     directory: PathBuf,
@@ -183,6 +185,46 @@ impl Provider {
 }
 
 impl Gateway {
+    pub fn console_cookie(&self) -> &str {
+        self.auth_cookie.get_or_init(|| {
+            let (url, key) = self.auth_database.clone();
+            thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let store = ProviderStore::connect(&url, &key).await.unwrap();
+                        if !store.admin_initialized().await.unwrap() {
+                            store
+                                .bootstrap_admin("admin@example.test", "isolated-test-password")
+                                .await
+                                .unwrap();
+                        }
+                        let session = store
+                            .login("admin@example.test", "isolated-test-password")
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        format!("llmproxy_session={}", session.secret)
+                    })
+            })
+            .join()
+            .unwrap()
+        })
+    }
+
+    pub fn console_client(&self) -> reqwest::ClientBuilder {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::COOKIE,
+            self.console_cookie().parse().unwrap(),
+        );
+        reqwest::Client::builder()
+            .no_proxy()
+            .default_headers(headers)
+    }
+
     pub fn start(providers: [Provider; 3]) -> Self {
         let _allocation = PORT_ALLOCATION
             .lock()
@@ -275,6 +317,7 @@ impl Gateway {
         };
         let url = env_value("LLMPROXY_DATABASE_URL");
         let master_key = env_value("LLMPROXY_MASTER_KEY");
+        let auth_database = (url.clone(), master_key.clone());
         let cache_url = url.clone();
         let cached = TEST_KEYS.lock().unwrap().get(&url).cloned();
         let api_key = cached.unwrap_or_else(|| {
@@ -308,6 +351,8 @@ impl Gateway {
         let child = command.spawn().unwrap();
         let mut gateway = Self {
             api_key,
+            auth_database,
+            auth_cookie: Default::default(),
             child,
             address,
             directory,

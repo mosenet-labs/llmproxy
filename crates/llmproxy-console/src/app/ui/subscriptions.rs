@@ -46,6 +46,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                 .is_some_and(|entry| entry.online_until > now)
         })
         .count();
+    let csrf = crate::app::auth::csrf_token(cx);
     Ok(view! {
         if let Some(error) = &query.error {
             <p
@@ -127,7 +128,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                                     ))
                                 </p>
                             </td>
-                            <td>node_alias(node: node, csrf: &state.csrf)</td>
+                            <td>node_alias(node: node, csrf: csrf.as_str())</td>
                             <td>(node.backend.clone())</td>
                             <td>
                                 (if presence
@@ -163,7 +164,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                             <td class="whitespace-nowrap [&>a]:ml-4">
                                 node_action(
                                     node: node,
-                                    csrf: &state.csrf,
+                                    csrf: csrf.as_str(),
                                     configured: configured
                                 )
                                 if node.enabled {
@@ -277,7 +278,6 @@ async fn import_provider(cx: &Cx, node_id: &str) -> Result<i64> {
 
 #[page("/ui/subscriptions/models")]
 pub async fn import_models(cx: &Cx, Form(query): Form<ModelQuery>) -> Result<impl View> {
-    let state = app_context::<AppState>(cx);
     let id = import_provider(cx, &query.node_id).await?;
     let provider = app_context::<AppState>(cx).store.clone().get(id).await?;
     let target = app_context::<AppState>(cx)
@@ -323,7 +323,7 @@ pub async fn import_models(cx: &Cx, Form(query): Form<ModelQuery>) -> Result<imp
                 }
             })
         >
-            <input type="hidden" name="csrf" value=(state.csrf.clone())>
+            <input type="hidden" name="csrf" value=(crate::app::auth::csrf_token(cx))>
             <input type="hidden" name="node_id" value=(query.node_id.clone())>
             <p role="alert" class="text-danger" :hidden=$(error.get().is_empty())>$(error.get())</p>
             <div :hidden=$(saved.get())>

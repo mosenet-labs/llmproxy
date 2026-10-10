@@ -10,7 +10,11 @@
 bash scripts/dev.sh up
 ```
 
-默认监听 `127.0.0.1:3200`。打开 `http://127.0.0.1:3200/ui/providers` 新增并启用 Provider，配置其支持的协议、上游路径和模型探测接口（默认 `/models`）；然后到 `/ui/models` 添加具体模型并设置至少一个协议。导入仅保存到系统列表，不会自动加入任何组。选择模型或路由加入资源组后，才可用该组虚拟 Key 调用。到 `/ui/routes` 可创建新的对外模型名，添加不同 Provider 的候选模型并调整顺序。OpenAI 和 Anthropic 请求在请求体顶层 `model` 字段填写模型标识或路由名称，网关将其改写成所选上游模型 ID；Gemini 请求在路径中填写。控制台保存后，新请求约一秒内使用新配置；没有模型和路由时服务可启动，但代理请求不会自动选择 Provider。
+默认监听 `127.0.0.1:3200`。升级后控制台需要用户登录；现有 Provider、模型、资源组及虚拟 Key 保留。首次访问 `/ui/login`，页面默认展示“初始化管理员”，填写邮箱、密码及确认密码（15–128 个字符）即可创建首个管理员并自动登录，无需命令行或 SMTP。初始化后入口关闭，服务端也拒绝重复创建。
+
+后续访问 `/ui/login` 登录。公开邮箱注册只创建普通用户，当前仅开放个人账户；管理员可在 `/ui/users` 搜索用户、修改显示名称/平台角色、启停账户、注销全部会话及发送密码重置邮件。管理员在左侧菜单底部「系统设置」(`/ui/settings`) 配置并启用邮件服务，可发送测试邮件；配置存入数据库，SMTP 密码加密保存，留空保留原密码，保存后立即生效。SMTP 不再使用环境变量配置，升级后原环境配置需在页面重新填写。未启用邮件服务时关闭注册和找回密码，已有账户仍可登录。会话和虚拟 Key 分别用于控制台与模型 API 认证。通过本地 HTTPS 反向代理访问时设置 `LLMPROXY_PUBLIC_ORIGIN`，后端仍只接受回环连接。
+
+打开 `http://127.0.0.1:3200/ui/providers` 新增并启用 Provider，配置其支持的协议、上游路径和模型探测接口（默认 `/models`）；然后到 `/ui/models` 添加具体模型并设置至少一个协议。导入仅保存到系统列表，不会自动加入任何组。选择模型或路由加入资源组后，才可用该组虚拟 Key 调用。到 `/ui/routes` 可创建新的对外模型名，添加不同 Provider 的候选模型并调整顺序。OpenAI 和 Anthropic 请求在请求体顶层 `model` 字段填写模型标识或路由名称，网关将其改写成所选上游模型 ID；Gemini 请求在路径中填写。控制台保存后，新请求约一秒内使用新配置；没有模型和路由时服务可启动，但代理请求不会自动选择 Provider。
 
 在 `/ui/groups` 管理全部资源组，点击组列表的“详情”进入 `/ui/groups/{group_id}`，通过 Topcoat 原生 Tabs 在 Models 与 Keys 间页内切换，保留各自的搜索和分页状态；`?tab=keys` 可直接打开 Keys，旧 `/models`、`/keys` 链接仍可访问同一个详情页。Provider 全局共享；Models 和 Model Routes 维护全系统资源列表，不显示分组切换；虚拟 Key 按组管理，组内页面明确显示所属组，通过 URL 固定组上下文；Chat 在工作区选择组。资源组页面管理所有组，不显示切组器；左侧只保留资源组入口，组内页面的面包屑为“控制台 / 资源组 / [资源组名称]详情”，“资源组”可点击返回。模型导入、路由新建及旧库升级均不自动加入 `default` 或其他组；不同组可使用相同模型或路由名称；在组内模型页点击“添加模型或路由”，搜索、勾选系统中已有的模型和路由加入组，同一资源可加入多个组。路由可引用系统已导入的模型，不会自动开放候选模型别名。虚拟 Key 仅属于一个组。**模型调用和 `/models`、`/v1/models` 列表均要求虚拟 Key**，升级后现有外部客户端须配置新 Key。完整 Key 只在创建时展示一次；指定模式可分别勾选本组 Models 和 Model Routes，未选择资源则无调用权限；全部模式开放组内模型与路由（包含未来加入组的资源）。Key 停用、撤销或过期，以及组停用，会立即拒绝新请求。控制台 Chat 使用服务端内部认证。
 
@@ -37,6 +41,8 @@ Gemini 原生接入：在 Providers 中选择 Gemini，上游地址填写 `https
 | 阅读方向 | 文档 |
 | --- | --- |
 | 需求与计划 | [原始需求](docs/00-original-requirements.md) · [架构设计](docs/01-architecture.md) · [实施任务](docs/02-tasks.md) |
+| 组织功能（待实现） | [需求记录与待确认事项](docs/40-organizations-requirements.md) |
+| 用户登录与管理 | [需求](docs/41-users-and-authentication.md) · [任务](docs/42-users-and-authentication-tasks.md) |
 | 启动与部署 | [本地运行与遥测](docs/03-development.md) · [单进程、单端口与 `/ui`](docs/11-unified-service.md) · [SQLite 与 PostgreSQL](docs/12-sqlite-compatibility-plan.md) |
 | 代理实现 | [模型发现与跨协议路由](docs/36-model-discovery-and-protocol-routing.md) · [实现任务](docs/37-model-discovery-and-protocol-routing-tasks.md) · [明确入口联调](docs/05-explicit-routes-validation.md) · [Pingora 请求阶段](docs/06-pingora-request-lifecycle.md) |
 | Provider 与模型控制台 | [Provider 管理](docs/07-provider-console.md) · [多协议 Provider 与模型探测](docs/13-provider-interfaces-and-model-discovery.md) · [模型映射与 Models 控制台](docs/14-model-mapping.md) · [Model Routes](docs/18-model-routes.md) · [模型参考价格规则](docs/16-model-pricing.md) · [节假日日历](docs/17-holiday-calendar.md) · [异步操作与一次性通知](docs/09-console-async-actions.md) |

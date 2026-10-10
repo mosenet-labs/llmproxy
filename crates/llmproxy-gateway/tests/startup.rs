@@ -60,11 +60,15 @@ fn command(directory: &Path) -> Command {
 }
 
 fn request(address: SocketAddr, path: &str) -> Option<String> {
+    authenticated_request(address, path, "")
+}
+
+fn authenticated_request(address: SocketAddr, path: &str, cookie: &str) -> Option<String> {
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"
     )
     .ok()?;
     let mut response = String::new();
@@ -91,7 +95,7 @@ fn start(directory: &Path, database_url: Option<&str>) -> RunningGateway {
     let mut running = RunningGateway { child, address };
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if let Some(response) = request(address, "/ui/providers")
+        if let Some(response) = request(address, "/ui/login")
             && response.starts_with("HTTP/1.1 200")
         {
             return running;
@@ -116,9 +120,9 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
     assert!(database.is_file());
     assert!(key_file.is_file());
     assert!(
-        request(first.address, "/ui/providers")
+        request(first.address, "/ui/login")
             .unwrap()
-            .contains("Providers")
+            .contains("id=\"auth-bootstrap-form\"")
     );
     drop(first);
 
@@ -128,9 +132,18 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(async {
+    let cookie = runtime.block_on(async {
         let store = ProviderStore::connect(config.url(), config.master_key())
             .await
+            .unwrap();
+        store
+            .bootstrap_admin("admin@example.test", "isolated-test-password")
+            .await
+            .unwrap();
+        let session = store
+            .login("admin@example.test", "isolated-test-password")
+            .await
+            .unwrap()
             .unwrap();
         let provider = store
             .create(ProviderInput {
@@ -162,13 +175,14 @@ fn default_sqlite_starts_and_persists_provider_across_restart() {
             })
             .await
             .unwrap();
+        format!("llmproxy_session={}", session.secret)
     });
     drop(runtime);
 
     let second = start(&directory, None);
-    let html = request(second.address, "/ui/providers").unwrap();
+    let html = authenticated_request(second.address, "/ui/providers", &cookie).unwrap();
     assert!(html.contains("Restarted SQLite Provider"));
-    let models = request(second.address, "/ui/models").unwrap();
+    let models = authenticated_request(second.address, "/ui/models", &cookie).unwrap();
     assert!(models.contains("restart/chat-model"));
     drop(second);
     fs::remove_file(&key_file).unwrap();

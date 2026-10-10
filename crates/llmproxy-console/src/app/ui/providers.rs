@@ -253,7 +253,7 @@ pub async fn provider_list(
     };
     let editor = EditorSignals::new(cx, &defaults, None, editor_open);
     let create = editor_trigger(cx, &editor, ProviderForm::default());
-    let csrf = &app_context::<AppState>(cx).csrf;
+    let csrf = crate::app::auth::csrf_token(cx);
     let total = all.len();
     let enabled = all.iter().filter(|provider| provider.enabled).count();
     let refresh = controls.refresh.clone();
@@ -535,13 +535,13 @@ pub async fn provider_list(
                                             provider_action_confirmation(
                                                 controls: &controls,
                                                 provider: provider,
-                                                csrf: csrf,
+                                                csrf: csrf.as_str(),
                                                 delete: false
                                             )
                                         } else {
                                             action_form(
                                                 controls: &controls,
-                                                csrf: csrf,
+                                                csrf: csrf.as_str(),
                                                 provider: provider,
                                                 action: "enable",
                                                 label: "启用".to_owned()
@@ -549,7 +549,7 @@ pub async fn provider_list(
                                             provider_action_confirmation(
                                                 controls: &controls,
                                                 provider: provider,
-                                                csrf: csrf,
+                                                csrf: csrf.as_str(),
                                                 delete: true
                                             )
                                         }

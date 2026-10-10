@@ -101,6 +101,7 @@ async fn exercise_store(url: &str, sqlite: bool) {
     assert!(store.load_active().await.unwrap().is_empty());
     exercise_tool_continuations(&store, url, &key).await;
     history::exercise(&store, url, &key).await;
+    exercise_accounts(&store, url, &key).await;
 
     // An empty migrated database is already bound to its first master key.
     let wrong_key = ProviderStore::connect(url, &STANDARD.encode([8; 32]))
@@ -625,4 +626,89 @@ async fn exercise_tool_continuations(store: &ProviderStore, url: &str, key: &str
             .await,
         Err(StoreError::Configuration(_))
     ));
+}
+
+/// Both SQL backends use the same public account and session contracts.
+async fn exercise_accounts(store: &ProviderStore, url: &str, key: &str) {
+    use llmproxy_store::auth::{EmailPurpose, UserRole};
+    let password = "isolated-account-password";
+    let admin = store
+        .bootstrap_admin("admin@example.test", password)
+        .await
+        .unwrap();
+    let code = store
+        .issue_email_code("member@example.test", EmailPurpose::Register)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .register_user(&code.email, &code.code, password, "Member")
+        .await
+        .unwrap();
+    let session = store.login(&code.email, password).await.unwrap().unwrap();
+    let reopened = ProviderStore::connect(url, key).await.unwrap();
+    let identity = reopened
+        .authenticate_session(&session.secret)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(identity.user.role, UserRole::User);
+    assert_eq!(identity.csrf, session.session.csrf);
+    let mail = store
+        .save_mail_settings(
+            admin.id,
+            llmproxy_store::settings::MailSettingsInput {
+                enabled: true,
+                host: "smtp.example.test".into(),
+                port: 587,
+                tls: "starttls".into(),
+                from: "noreply@example.test".into(),
+                username: "smtp-user".into(),
+                password: "isolated-smtp-password".into(),
+                version: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(mail.password_configured);
+    assert_eq!(
+        reopened
+            .mail_delivery_settings()
+            .await
+            .unwrap()
+            .unwrap()
+            .password,
+        "isolated-smtp-password"
+    );
+    reopened
+        .update_user(
+            admin.id,
+            identity.user.id,
+            identity.user.version,
+            "Disabled",
+            UserRole::User,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .authenticate_session(&session.secret)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .update_user(
+                admin.id,
+                admin.id,
+                admin.version,
+                "Admin",
+                UserRole::User,
+                true
+            )
+            .await
+            .is_err()
+    );
 }

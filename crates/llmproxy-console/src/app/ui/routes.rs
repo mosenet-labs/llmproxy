@@ -24,7 +24,6 @@ pub struct ListQuery {
 
 #[page]
 pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> {
-    let state = app_context::<AppState>(cx);
     let all = app_context::<AppState>(cx)
         .store
         .clone()
@@ -49,7 +48,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
         .collect();
     let total = all.len();
     let error = signal(cx, String::new);
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let unavailable: Outcome = Err("删除失败，请重试".into());
     Ok(view! {
         <section class=(PAGE_HEADING)>
@@ -284,7 +283,6 @@ pub struct EditQuery {
 
 #[page("./edit")]
 pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
-    let state = app_context::<AppState>(cx);
     let route_list = app_context::<AppState>(cx)
         .store
         .clone()
@@ -318,7 +316,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
     let selected_provider_protocol = route.as_ref().map(|route| route.provider_protocol);
     let busy = signal(cx, || false);
     let error = signal(cx, String::new);
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let id = route
         .as_ref()
         .map_or(String::new(), |route| route.id.to_string());

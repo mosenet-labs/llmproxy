@@ -33,9 +33,13 @@ pub async fn serve(console: &Console, session: &mut Session) -> Result<()> {
         .map_err(|_| {
             Error::explain(ErrorType::HTTPStatus(408), "console request body timed out").into_down()
         })??;
-    let response = console
-        .handle(Request::from_parts(parts, Body::from(body)))
-        .await;
+    let mut request = Request::from_parts(parts, Body::from(body));
+    if let Some(address) = session.client_addr().and_then(|a| a.as_inet()) {
+        request
+            .extensions_mut()
+            .insert(llmproxy_console::RemoteAddr(*address));
+    }
+    let response = console.handle(request).await;
     let (parts, mut body) = response.into_parts();
     let mut header = ResponseHeader::build(parts.status.as_u16(), Some(parts.headers.len()))?;
     for (name, value) in &parts.headers {

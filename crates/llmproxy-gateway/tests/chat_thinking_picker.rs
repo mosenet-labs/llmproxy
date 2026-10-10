@@ -85,7 +85,7 @@ async fn thinking_picker_does_not_reuse_another_conversations_client_value() {
         .unwrap();
     support::assign_catalog(&database.store).await;
     let gateway = Gateway::database(&database.url, MASTER_KEY);
-    let client = reqwest::Client::new();
+    let client = gateway.console_client().build().unwrap();
     let base = format!("http://{}/ui", gateway.address);
     let form = client
         .get(format!("{base}/providers/form"))

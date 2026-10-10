@@ -83,6 +83,9 @@ fn request(gateway: &Gateway) -> tokio_tungstenite::tungstenite::http::Request<(
         format!("http://{}", gateway.address).parse().unwrap(),
     );
     request
+        .headers_mut()
+        .insert("cookie", gateway.console_cookie().parse().unwrap());
+    request
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -199,7 +202,7 @@ async fn explicit_http_mode_keeps_shards_and_rejects_socket() {
         MASTER_KEY,
         &[("LLMPROXY_UI_WEBSOCKET", "false")],
     );
-    let client = reqwest::Client::new();
+    let client = gateway.console_client().build().unwrap();
     let url = format!("http://{}/ui/models", gateway.address);
     let html = client.get(&url).send().await.unwrap().text().await.unwrap();
     assert!(!html.contains("<!--::topcoat::connect-->"));
@@ -330,7 +333,7 @@ async fn live_run_capacity_cancellation_and_slow_reader_are_isolated() {
         )
         .await;
     let gateway = Gateway::database(&database.url, MASTER_KEY);
-    let client = reqwest::Client::new();
+    let client = gateway.console_client().build().unwrap();
     let base = format!("http://{}/ui", gateway.address);
     let editor = client
         .get(format!("{base}/providers/form"))
@@ -472,4 +475,34 @@ async fn live_run_capacity_cancellation_and_slow_reader_are_isolated() {
             .is_some_and(|html| html.contains("已停止"));
     }
     reopened.close(None).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_rejects_anonymous_handshakes_and_closes_revoked_sessions() {
+    let database = Database::new().await;
+    let gateway = Gateway::database(&database.url, MASTER_KEY);
+    let mut anonymous = request(&gateway);
+    anonymous.headers_mut().remove("cookie");
+    match connect_async(anonymous).await.unwrap_err() {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status().as_u16(), 401)
+        }
+        error => panic!("unexpected handshake error: {error}"),
+    }
+    let (mut socket, _) = connect_async(request(&gateway)).await.unwrap();
+    let secret = gateway
+        .console_cookie()
+        .strip_prefix("llmproxy_session=")
+        .unwrap();
+    database.store.logout(secret).await.unwrap();
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            match socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("revoked WebSocket should close without another client request");
 }

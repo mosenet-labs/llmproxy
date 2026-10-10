@@ -22,6 +22,7 @@ use crate::{
     pricing::decimal_price,
 };
 
+mod auth;
 mod chat_history;
 mod groups;
 mod health;
@@ -31,6 +32,7 @@ mod models;
 mod pricing;
 mod providers;
 mod routes;
+mod settings;
 mod subscription_nodes;
 mod tool_continuations;
 
@@ -86,6 +88,10 @@ impl ProviderStore {
         let cipher = KeyCipher::new(master_key)?;
         let db = Db::builder()
             .models(toasty::models!(
+                crate::model::MailSettingsRow,
+                crate::model::UserRow,
+                crate::model::UserSessionRow,
+                crate::model::EmailChallengeRow,
                 crate::model::GroupRow,
                 crate::model::VirtualKeyRow,
                 crate::model::ModelGroupMembership,

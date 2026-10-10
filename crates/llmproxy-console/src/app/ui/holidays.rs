@@ -38,7 +38,7 @@ pub async fn holidays(cx: &Cx) -> Result<impl View> {
     let success = signal(cx, String::new);
     let failure = signal(cx, String::new);
     let busy = signal(cx, || false);
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     Ok(view! {
         notification(
             message: &success,

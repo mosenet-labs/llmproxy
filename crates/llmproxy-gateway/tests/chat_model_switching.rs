@@ -270,7 +270,12 @@ async fn saved_turn(
 #[tokio::test]
 async fn history_records_source_usage_in_all_directions_and_survives_restart() {
     let mut fixture = Fixture::new().await;
-    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let client = fixture
+        .gateway
+        .console_client()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
     let mut base = fixture.base();
     let editor = client
         .get(format!("{base}/providers/form"))
@@ -588,7 +593,12 @@ async fn history_records_source_usage_in_all_directions_and_survives_restart() {
 #[tokio::test]
 async fn history_keeps_partial_usage_on_stop_and_rejects_forged_association() {
     let mut fixture = Fixture::with_pause(Duration::from_secs(2)).await;
-    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let client = fixture
+        .gateway
+        .console_client()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
     let base = fixture.base();
     let editor = client
         .get(format!("{base}/providers/form"))
@@ -751,7 +761,12 @@ async fn history_keeps_partial_usage_on_stop_and_rejects_forged_association() {
 async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_turns() {
     let fixture = Fixture::new().await;
     let base = fixture.base();
-    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let client = fixture
+        .gateway
+        .console_client()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
     let editor = client
         .get(format!("{base}/providers/form"))
         .send()
@@ -942,7 +957,12 @@ async fn one_session_switches_four_protocols_in_both_modes_with_all_previous_tur
 async fn history_generates_multiple_conversations_without_holding_http_requests() {
     use llmproxy_store::chat_history::Status;
     let fixture = Fixture::with_pause(Duration::from_secs(3)).await;
-    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let client = fixture
+        .gateway
+        .console_client()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
     let base = fixture.base();
     let editor = client
         .get(format!("{base}/providers/form"))
@@ -1137,7 +1157,12 @@ async fn browser_model_switching_fixture() {
 async fn thinking_switches_all_sixteen_directions_and_keeps_native_streaming() {
     use llmproxy_core::thinking::{Choice, HEADER};
     let fixture = Fixture::new().await;
-    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let client = fixture
+        .gateway
+        .console_client()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
     for (index, target) in ALL.into_iter().enumerate() {
         for source in ALL {
             for choice in [Choice::Enabled, Choice::Disabled] {
@@ -1326,7 +1351,12 @@ async fn enabled_gemini_summaries_reach_all_clients_in_both_modes() {
         thinking::HEADER,
     };
     let fixture = Fixture::new().await;
-    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let client = fixture
+        .gateway
+        .console_client()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
     let summary = "先检查条件，再计算结果。";
     for source in ALL {
         for stream in [false, true] {
@@ -1430,7 +1460,12 @@ async fn chat_health_blocks_confirmed_failures_and_preserves_selection_and_provi
     use llmproxy_probe::{Reason, Verdict};
     let fixture = Fixture::new().await;
     let base = fixture.base();
-    let client = Client::builder().timeout(DEADLINE).build().unwrap();
+    let client = fixture
+        .gateway
+        .console_client()
+        .timeout(DEADLINE)
+        .build()
+        .unwrap();
     let editor = client
         .get(format!("{base}/providers/form"))
         .send()

@@ -1,5 +1,6 @@
 //! Provider management persistence. Public views never contain stored credentials.
 
+pub mod auth;
 pub mod chat_history;
 mod crypto;
 mod database;
@@ -7,6 +8,7 @@ pub mod health;
 mod holiday;
 mod model;
 mod pricing;
+pub mod settings;
 mod store;
 
 use std::fmt;

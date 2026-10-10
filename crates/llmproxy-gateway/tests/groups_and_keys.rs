@@ -345,7 +345,7 @@ async fn limited_keys_authorize_models_and_routes_independently() {
     assert_eq!(model, route.id);
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     let base = format!("http://{}", gateway.address);
-    let client = reqwest::Client::new();
+    let client = gateway.console_client().build().unwrap();
     let html = client
         .get(format!("{base}/ui/groups/1/keys"))
         .send()
@@ -460,7 +460,11 @@ async fn limited_keys_authorize_models_and_routes_independently() {
         &client,
         &base,
         "create-key",
-        Some(&format!("llmproxy_keys_group={}", other.id)),
+        Some(&format!(
+            "{}; llmproxy_keys_group={}",
+            gateway.console_cookie(),
+            other.id
+        )),
         &[
             ("csrf", csrf),
             ("group_id", &other.id.to_string()),
@@ -531,7 +535,8 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
     let group = database.store.create_group("second").await.unwrap();
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     let base = format!("http://{}", gateway.address);
-    let client = reqwest::Client::builder()
+    let client = gateway
+        .console_client()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
@@ -635,7 +640,10 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
         assert_eq!(response.headers()["location"], "/ui/groups");
         assert!(!response.headers().contains_key("set-cookie"));
     }
-    let cookie = "llmproxy_keys_group=1; llmproxy_models_group=1; llmproxy_chat_group=1".to_owned();
+    let cookie = format!(
+        "{}; llmproxy_keys_group=1; llmproxy_models_group=1; llmproxy_chat_group=1",
+        gateway.console_cookie()
+    );
     for suffix in ["models", "keys"] {
         let page = client
             .get(format!("{base}/ui/groups/{}/{suffix}", group.id))
@@ -676,7 +684,14 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
     }
     let legacy = client
         .get(format!("{base}/ui/keys"))
-        .header("cookie", format!("llmproxy_keys_group={}", group.id))
+        .header(
+            "cookie",
+            format!(
+                "{}; llmproxy_keys_group={}",
+                gateway.console_cookie(),
+                group.id
+            ),
+        )
         .send()
         .await
         .unwrap();
@@ -949,7 +964,7 @@ async fn group_resources_procedure_and_gateway_respect_independent_memberships()
     let scoped = database.store.for_group(group.id);
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     let base = format!("http://{}", gateway.address);
-    let client = reqwest::Client::new();
+    let client = gateway.console_client().build().unwrap();
     let html = client
         .get(format!("{base}/ui/groups"))
         .send()
@@ -989,7 +1004,14 @@ async fn group_resources_procedure_and_gateway_respect_independent_memberships()
     for path in ["models", "routes"] {
         let page = client
             .get(format!("{base}/ui/{path}"))
-            .header("cookie", format!("llmproxy_{path}_group={}", group.id))
+            .header(
+                "cookie",
+                format!(
+                    "{}; llmproxy_{path}_group={}",
+                    gateway.console_cookie(),
+                    group.id
+                ),
+            )
             .send()
             .await
             .unwrap()
@@ -1245,7 +1267,7 @@ async fn group_tables_paginate_with_runtime_signals_and_preserve_group_paths() {
             .unwrap();
     }
     let gateway = Gateway::database(&database.url, MASTER_KEY);
-    let client = reqwest::Client::new();
+    let client = gateway.console_client().build().unwrap();
     let base = format!("http://{}", gateway.address);
     for (path, total, panel) in [
         ("/ui/groups".to_owned(), 12, ""),

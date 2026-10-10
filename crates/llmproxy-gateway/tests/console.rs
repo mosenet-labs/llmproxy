@@ -101,7 +101,20 @@ async fn exercise_http(database_url: &str) {
     let mut process = ConsoleProcess { child, directory };
     let origin = format!("http://127.0.0.1:{port}");
     let base = format!("{origin}/ui");
+    store
+        .bootstrap_admin("admin@example.test", "isolated-test-password")
+        .await
+        .unwrap();
+    let login = store
+        .login("admin@example.test", "isolated-test-password")
+        .await
+        .unwrap()
+        .unwrap();
+    let auth_cookie = format!("llmproxy_session={}", login.secret);
+    let mut auth_headers = reqwest::header::HeaderMap::new();
+    auth_headers.insert(reqwest::header::COOKIE, auth_cookie.parse().unwrap());
     let client = Client::builder()
+        .default_headers(auth_headers)
         .no_proxy()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(5))
@@ -251,7 +264,7 @@ async fn exercise_http(database_url: &str) {
         .await
         .unwrap();
     let csrf = hidden(&editor, "csrf");
-    assert_eq!(csrf.len(), 64);
+    assert_eq!(csrf.len(), 43);
     // 停止生成必须注册为实际 HTTP procedure，且仍受 CSRF 校验保护。
     for (token, status) in [
         ("invalid", StatusCode::FORBIDDEN),

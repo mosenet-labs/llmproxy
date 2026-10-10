@@ -177,7 +177,7 @@ pub(super) async fn provider_editor(
     editor: &EditorSignals,
     controls: &ListSignals,
 ) -> Result<impl View> {
-    let csrf = &app_context::<AppState>(cx).csrf;
+    let csrf = crate::app::auth::csrf_token(cx);
     let EditorSignals {
         open,
         title,

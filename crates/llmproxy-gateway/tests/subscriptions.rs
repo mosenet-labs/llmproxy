@@ -53,7 +53,20 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
         .unwrap();
     let mut process = Process { child, directory };
     let base = format!("http://127.0.0.1:{port}");
+    store
+        .bootstrap_admin("admin@example.test", "isolated-test-password")
+        .await
+        .unwrap();
+    let login = store
+        .login("admin@example.test", "isolated-test-password")
+        .await
+        .unwrap()
+        .unwrap();
+    let auth_cookie = format!("llmproxy_session={}", login.secret);
+    let mut auth_headers = reqwest::header::HeaderMap::new();
+    auth_headers.insert(reqwest::header::COOKIE, auth_cookie.parse().unwrap());
     let client = reqwest::Client::builder()
+        .default_headers(auth_headers)
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
@@ -131,7 +144,7 @@ async fn reverse_http_relay_registration_reconnect_and_console() {
         .await
         .unwrap();
     let import_group = store.create_group("subscription-models").await.unwrap();
-    let import_cookie = format!("llmproxy_models_group={}", import_group.id);
+    let import_cookie = format!("{auth_cookie}; llmproxy_models_group={}", import_group.id);
     let response = client
         .get(format!(
             "{base}/ui/subscriptions/models?node_id={}",

@@ -48,9 +48,17 @@ pub(super) async fn serve(console: &Console, session: &mut Session) -> Result<()
     // Hyper owns only this bounded in-memory connection, never another listener.
     let (client_io, server_io) = tokio::io::duplex(BUFFER_SIZE);
     let mut tasks = JoinSet::new();
+    let auth_console = console.clone();
+    let auth_headers = session.req_header().headers.clone();
+    let remote = session.client_addr().and_then(|a| a.as_inet()).copied();
     let console = console.clone();
     tasks.spawn(async move {
-        let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+        let service = service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
+            if let Some(address) = remote {
+                request
+                    .extensions_mut()
+                    .insert(llmproxy_console::RemoteAddr(address));
+            }
             let console = console.clone();
             async move { Ok::<_, Infallible>(console.handle(request.map(Body::new)).await) }
         });
@@ -97,13 +105,24 @@ pub(super) async fn serve(console: &Console, session: &mut Session) -> Result<()
     let upgraded = hyper::upgrade::on(&mut response)
         .await
         .map_err(|_| failure())?;
-    pump(session, TokioIo::new(upgraded), &mut tasks).await
+    let (revoked, mut revocation) = mpsc::channel(1);
+    tasks.spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if !auth_console.session_valid(&auth_headers).await {
+                let _ = revoked.send(()).await;
+                break;
+            }
+        }
+    });
+    pump(session, TokioIo::new(upgraded), &mut tasks, &mut revocation).await
 }
 
 async fn pump(
     session: &mut Session,
     io: TokioIo<hyper::upgrade::Upgraded>,
     tasks: &mut JoinSet<()>,
+    revocation: &mut mpsc::Receiver<()>,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(io);
     let (to_server, mut client_bytes) = mpsc::channel::<Bytes>(1);
@@ -145,6 +164,9 @@ async fn pump(
     // Read and queued writes share Pingora's Session. Its upgraded reader and
     // proxy-task writer retain their progress when these futures are re-polled.
     std::future::poll_fn(|cx| {
+        if revocation.poll_recv(cx).is_ready() {
+            return Poll::Ready(Ok(()));
+        }
         if shutdown.poll_tick(cx).is_ready() && session.is_process_shutting_down() {
             return Poll::Ready(Ok(()));
         }

@@ -136,6 +136,16 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0027_virtual_key_models.sql",
         include_str!("../../migrations/postgresql/0027_virtual_key_models.sql"),
     ),
+    MigrationFile::new(
+        202610100001,
+        "0028_users_and_authentication.sql",
+        include_str!("../../migrations/postgresql/0028_users_and_authentication.sql"),
+    ),
+    MigrationFile::new(
+        202610100002,
+        "0029_mail_settings.sql",
+        include_str!("../../migrations/postgresql/0029_mail_settings.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -438,5 +448,15 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610090003,
         "0060_virtual_key_models.sql",
         include_str!("../../migrations/sqlite/0060_virtual_key_models.sql"),
+    ),
+    MigrationFile::new(
+        202610100001,
+        "0061_users_and_authentication.sql",
+        include_str!("../../migrations/sqlite/0061_users_and_authentication.sql"),
+    ),
+    MigrationFile::new(
+        202610100002,
+        "0062_mail_settings.sql",
+        include_str!("../../migrations/sqlite/0062_mail_settings.sql"),
     ),
 ]);

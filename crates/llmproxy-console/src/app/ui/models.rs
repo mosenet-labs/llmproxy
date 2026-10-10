@@ -112,7 +112,6 @@ pub async fn model_workspace(
     let applied_provider = signal(cx, String::new);
     let page = signal(cx, || 1usize);
     let page_size = signal(cx, || "10".to_owned());
-    let state = app_context::<AppState>(cx);
     let all = app_context::<AppState>(cx)
         .store
         .clone()
@@ -201,7 +200,7 @@ pub async fn model_workspace(
     let editor = Editor::new(cx);
     let price_editor_state = PriceEditor::new(cx);
     let create = editor_trigger(cx, &editor, None, None, None);
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let reset = attributes! {
         cx =>
         @click=$(|_event: Event| {

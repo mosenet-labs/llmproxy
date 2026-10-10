@@ -120,7 +120,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
     let refresh = signal(cx, || 0usize);
     let usage_open = signal(cx, || false);
     let settings_open = signal(cx, || false);
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let submit = attributes! {
         cx =>
         @submit=$(async |event: Event| {
@@ -151,7 +151,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
             }
         })
     };
-    let reset_csrf = state.csrf.clone();
+    let reset_csrf = crate::app::auth::csrf_token(cx);
     Ok(view! {
         <section
             :data-chat-session=$(session.get())
@@ -640,7 +640,7 @@ pub async fn chat_stop_button(
     }
     .load(&room_id)
     .await?;
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     Ok(live! {
         let mut changed = room.subscribe();
         loop {
@@ -738,8 +738,7 @@ pub async fn chat_protocol_picker(
     selection_error: Signal<String>,
 ) -> Result<impl View> {
     crate::app::request_connection(cx);
-    let state = app_context::<AppState>(cx);
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let (_, protocols, _, _) = chat_target(&crate::app::group_store(cx, "chat"), &model_id.get())
         .await
         .unwrap_or_else(|_| (String::new(), Vec::new(), false, Support::Unknown));
@@ -947,7 +946,7 @@ async fn chat_session_item(
     let item_running = signal(cx, || record.active_turn.is_some());
     let session_archived = controls.session_archived.clone();
     let error = controls.error.clone();
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let unavailable = "无法打开会话，请刷新后重试".to_owned();
     let menu_id = format!("chat-actions-{id}");
     let menu_label = format!("会话「{title}」的操作");
@@ -1194,7 +1193,7 @@ fn history_action_attributes(
     let archived_only = controls.archived_only.clone();
     let session_archived = controls.session_archived.clone();
     let error = controls.error.clone();
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let id = id.to_owned();
     let action = action.to_owned();
     let unavailable: HistoryOutcome = Err("会话操作失败，请刷新后重试".into());
@@ -1299,7 +1298,7 @@ pub async fn chat_history(
         sessions: &state.chat_sessions,
     };
     let room = service.load(&session.get()).await?;
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     Ok(live! {
         let mut changed = room.subscribe();
         let mut deadline = None;
@@ -1679,7 +1678,7 @@ pub async fn chat_thinking_picker(
     let choice = signal(&cx.keyed((session.get(), current.as_str())), || {
         current.as_str().to_owned()
     });
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     Ok(view! {
         <div class="mt-3" data-thinking-support=(support.as_str())>
             if support == Support::Switchable
@@ -1992,8 +1991,7 @@ pub async fn chat_model_picker(
 ) -> Result<impl View> {
     crate::app::request_connection(cx);
     let _ = revision;
-    let state = app_context::<AppState>(cx);
-    let model_csrf = state.csrf.clone();
+    let model_csrf = crate::app::auth::csrf_token(cx);
     let mut models = crate::app::group_store(cx, "chat").list_models().await?;
     models.sort_by(|a, b| a.alias.cmp(&b.alias));
     let mut routes = crate::app::group_store(cx, "chat").list_routes().await?;
@@ -2117,8 +2115,7 @@ pub async fn chat_health_notice(
 ) -> Result<impl View> {
     crate::app::request_connection(cx);
     let _ = revision;
-    let state = app_context::<AppState>(cx);
-    let csrf = state.csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let message = signal(cx, String::new);
     let protocol = selected_protocol(&current).map_err(io::Error::other)?;
     let health = crate::app::chat_service::target::health(

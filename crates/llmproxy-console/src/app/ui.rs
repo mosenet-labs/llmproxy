@@ -1,11 +1,16 @@
+pub(crate) mod account;
 pub(crate) mod chat;
+pub(crate) mod forms;
 pub(crate) mod groups;
 pub(crate) mod holidays;
+pub(crate) mod login;
 pub(crate) mod models;
 pub(crate) mod providers;
 pub(crate) mod routes;
+pub(crate) mod settings;
 pub(crate) mod subscriptions;
 mod table;
+pub(crate) mod users;
 
 use topcoat::{
     Result,
@@ -23,11 +28,26 @@ use topcoat_ant_design::icons::{
 const NAV_ITEM: &str = "flex min-h-11 items-center gap-3 whitespace-nowrap rounded-md px-3 py-2.5 text-sm text-secondary hover:bg-surface hover:text-primary aria-[current=page]:bg-primary-soft aria-[current=page]:font-medium aria-[current=page]:text-[#0958d9] max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-[13px]";
 #[route(GET)]
 pub async fn providers_redirect(cx: &Cx) -> Result<topcoat::router::error::SeeOther> {
-    Ok(see_other(href!(providers::list).resolve(cx)))
+    Ok(see_other(
+        if crate::app::auth::session(cx)?.user.role == llmproxy_store::auth::UserRole::Admin {
+            href!(providers::list).resolve(cx)
+        } else {
+            "/ui/account".into()
+        },
+    ))
 }
 
 #[layout]
 pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
+    use topcoat::view::ViewExt;
+    if uri(cx).path() == "/ui/login" {
+        return Ok(view! { login::document(slot: slot) }.boxed());
+    }
+    let identity = crate::app::auth::session(cx).ok();
+    let is_admin = identity.is_some_and(|s| s.user.role == llmproxy_store::auth::UserRole::Admin);
+    let users_page = uri(cx).path() == "/ui/users";
+    let account_page = uri(cx).path() == "/ui/account";
+    let settings_page = uri(cx).path() == "/ui/settings";
     let groups_page = uri(cx).path().starts_with("/ui/groups");
     let group_detail = groups_page && uri(cx).path() != "/ui/groups";
     let group_title = if group_detail {
@@ -40,7 +60,13 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     let chat_page = uri(cx).path() == "/ui/chat";
     let holidays_page = uri(cx).path() == "/ui/holidays";
     let subscriptions_page = uri(cx).path() == "/ui/subscriptions";
-    let page_title = (if let Some(title) = &group_title {
+    let page_title = (if settings_page {
+        "系统设置"
+    } else if users_page {
+        "用户管理"
+    } else if account_page {
+        "个人账户"
+    } else if let Some(title) = &group_title {
         title.as_str()
     } else if groups_page {
         "资源组"
@@ -59,6 +85,11 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     })
     .to_owned();
     let providers_link = link_attrs(cx, href!(providers::list), prefetch_mode(cx));
+    let home_link = if is_admin {
+        providers_link.clone()
+    } else {
+        link_attrs(cx, href!(account::account), PrefetchMode::Never)
+    };
     let models_link = link_attrs(cx, href!(models::models), prefetch_mode(cx));
     let chat_link = link_attrs(cx, href!(chat::chat), PrefetchMode::Never);
     let routes_link = link_attrs(cx, href!(routes::routes), prefetch_mode(cx));
@@ -88,7 +119,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                     >
                         <a
                             class="flex h-16 shrink-0 items-center gap-3 px-3 text-lg font-semibold max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-base max-[640px]:h-14 max-[640px]:px-0"
-                            (providers_link.clone())
+                            (home_link)
                         >
                             <span
                                 class="grid size-8 place-items-center rounded-lg bg-primary text-xl font-bold text-white"
@@ -103,6 +134,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                             class="mt-4 grid gap-1 max-[640px]:mt-0 max-[640px]:grid-cols-2"
                             aria-label="主导航"
                         >
+                            if is_admin {
                             <a
                                 id="nav-chat"
                                 class=(NAV_ITEM)
@@ -124,7 +156,10 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     || chat_page
                                     || holidays_page
                                     || subscriptions_page
-                                    || groups_page {
+                                    || groups_page
+                                    || users_page
+                                    || settings_page
+                                    || account_page {
                                     None
                                 } else {
                                     Some("page")
@@ -196,15 +231,25 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                 icon(data: TEAM_OUTLINED, size: 16)
                                 "资源组"
                             </a>
+                            <a id="nav-users" class=(NAV_ITEM) href="/ui/users" aria-current=(if users_page { Some("page") } else { None })>
+                                icon(data: TEAM_OUTLINED, size: 16) "用户管理"
+                            </a>
+                            }
+                            <a id="nav-account" class=(NAV_ITEM) href="/ui/account" aria-current=(if account_page { Some("page") } else { None })>
+                                icon(data: TEAM_OUTLINED, size: 16) "个人账户"
+                            </a>
                         </nav>
-                        <div
-                            class="mt-auto border-t border-border px-3 py-5 text-[13px] text-muted max-[640px]:hidden"
-                        >
-                            "本地开发环境"
+                        <div class="mt-auto border-t border-border pt-3 max-[640px]:mt-3">
+                            if is_admin {
+                                <a id="nav-settings" class=(NAV_ITEM) href="/ui/settings" aria-current=(if settings_page { Some("page") } else { None })>
+                                    <svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h7m4 0h5M4 12h2m4 0h10M4 18h10m4 0h2"></path><circle cx="13" cy="6" r="2"></circle><circle cx="8" cy="12" r="2"></circle><circle cx="16" cy="18" r="2"></circle></svg> "系统设置"
+                                </a>
+                            }
+                            <p class="m-0 px-3 py-5 text-[13px] text-muted max-[640px]:hidden">"本地开发环境"</p>
                         </div>
                     </aside>
                     <div id="console-content" class="flex min-w-0 flex-col">
-                        <header id="console-header" class="sticky top-0 z-20 min-h-14 shrink-0 border-b border-border bg-white text-sm text-secondary">
+                        <header id="console-header" class="sticky top-0 z-40 min-h-14 shrink-0 border-b border-border bg-white text-sm text-secondary">
                             <div class="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-7 py-2 max-[640px]:px-4">
                                 <span class="shrink-0">
                                     "控制台"
@@ -215,6 +260,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     }
                                     <strong>(page_title.as_str())</strong>
                                 </span>
+                                account::header_account()
                             </div>
                         </header>
                         <main
@@ -231,5 +277,5 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                 </div>
             </body>
         </html>
-    })
+    }.boxed())
 }

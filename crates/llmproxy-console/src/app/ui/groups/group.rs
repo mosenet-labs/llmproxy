@@ -51,7 +51,7 @@ async fn workspace(cx: &Cx, initial_tab: &str) -> Result<impl View> {
     let store = app_context::<AppState>(cx).store.for_group(group_id);
     let routes = store.list_routes().await?;
     let models = store.list_models().await?;
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let refresh = controls.refresh.clone();
     let success = controls.success.clone();
     let failure = controls.failure.clone();

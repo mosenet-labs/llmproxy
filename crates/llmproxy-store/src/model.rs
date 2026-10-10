@@ -3,6 +3,67 @@ use llmproxy_core::protocol::{MessagesAuth, Protocol};
 use crate::{ProbeStatus, ProviderPaths, ProviderView, StoreError, StoreResult};
 
 #[derive(toasty::Model)]
+#[table = "mail_settings"]
+pub(crate) struct MailSettingsRow {
+    #[key]
+    pub id: i64,
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub tls: String,
+    #[column("from_email")]
+    pub sender_email: String,
+    pub username: String,
+    pub encrypted_password: String,
+    #[version]
+    pub version: u64,
+}
+
+#[derive(toasty::Model)]
+#[table = "users"]
+pub(crate) struct UserRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    #[unique]
+    pub email: String,
+    pub display_name: String,
+    pub password_hash: String,
+    pub role: String,
+    pub enabled: bool,
+    pub email_verified: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_login_at: Option<i64>,
+    #[version]
+    pub version: u64,
+}
+
+#[derive(toasty::Model)]
+#[table = "user_sessions"]
+pub(crate) struct UserSessionRow {
+    #[key]
+    pub digest: String,
+    pub user_id: i64,
+    pub csrf: String,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(toasty::Model)]
+#[table = "email_challenges"]
+pub(crate) struct EmailChallengeRow {
+    #[key]
+    pub scope: String,
+    pub encrypted_code: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub attempts: u64,
+    pub used: bool,
+}
+
+#[derive(toasty::Model)]
 #[table = "subscription_nodes"]
 pub(crate) struct SubscriptionNode {
     #[key]

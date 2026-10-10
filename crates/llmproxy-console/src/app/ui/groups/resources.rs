@@ -33,7 +33,7 @@ pub(super) async fn resource_workspace(
         .iter()
         .filter(|route| route.group_ids.contains(&group_id))
         .count();
-    let csrf = app_context::<AppState>(cx).csrf.clone();
+    let csrf = crate::app::auth::csrf_token(cx);
     let query = signal(cx, String::new);
     let kind = signal(cx, String::new);
     let paging = Pagination::new(cx);
