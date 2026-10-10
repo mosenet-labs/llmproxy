@@ -17,7 +17,7 @@ use topcoat_ant_design::{
 };
 
 mod editor;
-mod group;
+pub(super) mod group;
 use super::table::{Pagination, pagination};
 mod resources;
 use editor::{group_editor, key_editor, secret_dialog};
@@ -34,19 +34,18 @@ async fn find_group(cx: &Cx, id: i64) -> Result<GroupView> {
 }
 
 #[component]
-async fn group_heading(cx: &Cx, group: &GroupView, is_keys: bool) -> Result<impl View> {
+async fn group_heading(cx: &Cx, group: &GroupView) -> Result<impl View> {
     let __cx = cx;
     Ok(view! {
         <header class=(super::providers::PAGE_HEADING)>
             <div>
-                <h1 class="sr-only">(if is_keys { "Keys" } else { "模型" })</h1>
+                <h1 class="sr-only">(format!("{}详情", group.name))</h1>
                 <p>"所属资源组："<strong class="text-heading" data-current-group=(group.id.to_string())>(group.name.as_str())</strong>
                     if !group.enabled { <span class="ml-2">"（已停用）"</span> }
                 </p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
                 <a class=(BUTTON) href=(href!(groups))>"返回资源组"</a>
-                <a class=(BUTTON) href=(if is_keys { href!(group::group_models, group::GroupId(group.id)).resolve(cx) } else { href!(group::keys, group::GroupId(group.id)).resolve(cx) })>(if is_keys { "模型" } else { "Keys" })</a>
             </div>
         </header>
     })
@@ -144,7 +143,7 @@ async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
             <section class="min-w-0 overflow-hidden rounded-lg border border-solid border-border bg-white" aria-labelledby="group-list-title">
                 <header class="px-6 py-5 max-[640px]:px-4">
                     <h2 id="group-list-title" class="m-0 text-base font-semibold">"全部资源组"<span class="ml-2 text-sm font-normal text-muted">(group_rows.len())</span></h2>
-                    <p class="mb-0 mt-1 text-[13px] text-secondary">"进入组内「模型」添加已有模型或路由，进入「Keys」分配调用凭据。"</p>
+                    <p class="mb-0 mt-1 text-[13px] text-secondary">"进入组详情，在 Models 中添加模型或路由，在 Keys 中分配调用凭据。"</p>
                 </header>
                 data_table(
                     label: "资源组列表",
@@ -166,8 +165,7 @@ async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
                                 <td>tag(tone: if group.enabled { TagTone::Success } else { TagTone::Default }, (if group.enabled { "已启用" } else { "已停用" }))</td>
                                 <td>
                                     <div class="flex justify-end gap-4">
-                                        <a class=(LINK) href=(href!(group::group_models, group::GroupId(group.id)))>"模型"</a>
-                                        <a class=(LINK) href=(href!(group::keys, group::GroupId(group.id)))>"Keys"</a>
+                                        <a class=(LINK) href=(href!(group::details, group::GroupId(group.id)))>"详情"</a>
                                         <button class=(LINK) type="button" (native_dialog_trigger_attributes(cx, &format!("group-edit-{}", group.id)))>"编辑"</button>
                                     </div>
                                     group_editor(group: Some(group), controls: controls, csrf: csrf.as_str())
@@ -188,9 +186,10 @@ async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
 pub async fn legacy_keys(cx: &Cx) -> Result<topcoat::router::error::SeeOther> {
     Ok(topcoat::router::error::see_other(
         href!(
-            group::keys,
+            group::details,
             group::GroupId(group_store(cx, "keys").group_id())
         )
+        .query([("tab", "keys")])
         .resolve(cx),
     ))
 }
@@ -220,7 +219,6 @@ pub async fn key_workspace(
     let new_key = native_dialog_trigger_attributes(cx, "key-create");
     Ok(view! {
         <section class="w-full min-w-0">
-            group_heading(group: &current, is_keys: true)
             if !current.enabled {
                 <p role="status" class="mb-5 rounded-md border border-solid border-[#ffe58f] bg-[#fffbe6] px-4 py-3 text-sm text-[#ad6800]">"当前组已停用，本组所有 Key 暂时无法调用模型。重新启用组后可恢复。"</p>
             }
@@ -337,7 +335,7 @@ async fn key_actions(
             if key.revoked { <span class="text-[13px] text-muted">"不可恢复"</span> }
             else {
                 if !key.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp()) {
-                    <form id=(toggle_id.as_str()) method="post" action=(href!(group::keys, group::GroupId(group_id))) class="m-0" (toggle)>
+                    <form id=(toggle_id.as_str()) method="post" action=(href!(group::details, group::GroupId(group_id)).query([("tab", "keys")])) class="m-0" (toggle)>
                         <input type="hidden" name="csrf" value=(csrf)>
                         <input type="hidden" name="group_id" value=(group_id.to_string())>
                         <input type="hidden" name="id" value=(key.id.to_string())>
@@ -353,7 +351,7 @@ async fn key_actions(
                         <p class="mb-3 mt-0 text-sm">"确认撤销「"(key.name.as_str())"」？"</p>
                         <p class="m-0 text-sm leading-relaxed text-secondary">"撤销后，这个 Key 将立即失效且无法恢复。调用方需要更换凭据。如果只是暂停使用，可以选择停用。"</p>
                     </div>
-                    <form id=(revoke_id.as_str()) method="post" action=(href!(group::keys, group::GroupId(group_id))) class=(FOOTER) (revoke)>
+                    <form id=(revoke_id.as_str()) method="post" action=(href!(group::details, group::GroupId(group_id)).query([("tab", "keys")])) class=(FOOTER) (revoke)>
                         <input type="hidden" name="csrf" value=(csrf)>
                         <input type="hidden" name="group_id" value=(group_id.to_string())>
                         <input type="hidden" name="id" value=(key.id.to_string())>
@@ -440,7 +438,9 @@ pub async fn select(cx: &Cx, Form(input): Form<GroupForm>) -> Result<Response> {
     *response.status_mut() = 303u16.try_into()?;
     let destination = match input.return_to.as_str() {
         "/ui/chat" => "/ui/chat".to_owned(),
-        "/ui/keys" => href!(group::keys, group::GroupId(input.group_id)).resolve(cx),
+        "/ui/keys" => href!(group::details, group::GroupId(input.group_id))
+            .query([("tab", "keys")])
+            .resolve(cx),
         _ => "/ui/groups".to_owned(),
     };
     response

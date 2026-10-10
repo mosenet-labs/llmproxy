@@ -659,11 +659,9 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
             .next()
             .unwrap();
         assert!(header.contains("href=\"/ui/groups\""));
-        assert!(header.contains(if suffix == "models" {
-            ">模型</strong>"
-        } else {
-            ">Keys</strong>"
-        }));
+        assert!(header.contains(">second详情</strong>"));
+        assert!(page.contains("id=\"group-tab-models\""));
+        assert!(page.contains("id=\"group-tab-keys\""));
     }
     for suffix in ["models", "keys"] {
         assert_eq!(
@@ -685,7 +683,7 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
     assert_eq!(legacy.status(), 303);
     assert_eq!(
         legacy.headers()["location"],
-        format!("/ui/groups/{}/keys", group.id)
+        format!("/ui/groups/{}?tab=keys", group.id)
     );
     let response = procedure(
         &client,
@@ -931,7 +929,7 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 404, "{path}");
+        assert!(matches!(response.status().as_u16(), 404 | 405), "{path}");
     }
 }
 
@@ -962,8 +960,9 @@ async fn group_resources_procedure_and_gateway_respect_independent_memberships()
         .unwrap();
     assert!(html.find("id=\"nav-chat\"").unwrap() < html.find("id=\"nav-providers\"").unwrap());
     assert!(!html.contains("管理资源"));
-    assert!(html.contains(&format!("href=\"/ui/groups/{}/models\"", group.id)));
-    assert!(html.contains(&format!("href=\"/ui/groups/{}/keys\"", group.id)));
+    assert!(html.contains(&format!("href=\"/ui/groups/{}\"", group.id)));
+    assert!(!html.contains(&format!("href=\"/ui/groups/{}/models\"", group.id)));
+    assert!(!html.contains(&format!("href=\"/ui/groups/{}/keys\"", group.id)));
     assert!(!html.contains("/ui/_topcoat/runtime/procedures/save-group-resources"));
     let page = client
         .get(format!("{base}/ui/groups/{}/models", group.id))
@@ -1248,10 +1247,12 @@ async fn group_tables_paginate_with_runtime_signals_and_preserve_group_paths() {
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     let client = reqwest::Client::new();
     let base = format!("http://{}", gateway.address);
-    for (path, total) in [
-        ("/ui/groups".to_owned(), 12),
-        (format!("/ui/groups/{}/models", groups[0].id), 12),
-        (format!("/ui/groups/{}/keys", groups[0].id), 11),
+    for (path, total, panel) in [
+        ("/ui/groups".to_owned(), 12, ""),
+        (format!("/ui/groups/{}", groups[0].id), 12, "models"),
+        (format!("/ui/groups/{}?tab=keys", groups[0].id), 11, "keys"),
+        (format!("/ui/groups/{}/models", groups[0].id), 12, "models"),
+        (format!("/ui/groups/{}/keys", groups[0].id), 11, "keys"),
     ] {
         let url = format!("{base}{path}");
         let html = client.get(&url).send().await.unwrap().text().await.unwrap();
@@ -1261,7 +1262,8 @@ async fn group_tables_paginate_with_runtime_signals_and_preserve_group_paths() {
             "{path}"
         );
         assert!(html.contains("每页记录数"));
-        let body = html
+        let table_html = group_panel(&html, panel);
+        let body = table_html
             .split("<tbody>")
             .nth(1)
             .unwrap()
@@ -1270,13 +1272,8 @@ async fn group_tables_paginate_with_runtime_signals_and_preserve_group_paths() {
             .unwrap();
         assert_eq!(body.matches("<tr").count(), 10, "{path}");
         let mut signals = pagination_signals(&html);
-        let page_id = signals
-            .iter()
-            .find(|(_, v)| v["t"] == "usize")
-            .unwrap()
-            .0
-            .clone();
-        let size_id = signals.iter().find(|(_, v)| **v == "10").unwrap().0.clone();
+        let page_id = click_signal(table_html, "aria-label=\"第 1 页\"");
+        let size_id = bound_signal(table_html, "每页记录数");
         signals[&page_id]["v"] = "2".into();
         let second = client
             .post(&url)
@@ -1288,10 +1285,10 @@ async fn group_tables_paginate_with_runtime_signals_and_preserve_group_paths() {
         assert_eq!(second.status(), 200, "{path}");
         let second = second.text().await.unwrap();
         assert!(
-            second.contains(&format!("显示 11–{total} 条，共 {total} 条")),
+            group_panel(&second, panel).contains(&format!("显示 11–{total} 条，共 {total} 条")),
             "{path}"
         );
-        if path.ends_with("/models") {
+        if panel == "models" {
             assert!(!body.contains(&format!("data-group-model=\"{last_model}\"")));
             assert!(second.contains(&format!("data-group-model=\"{last_model}\"")));
             assert!(second.contains(&format!("data-group-route=\"{}\"", route.id)));
@@ -1347,11 +1344,20 @@ async fn group_tables_paginate_with_runtime_signals_and_preserve_group_paths() {
             .await
             .unwrap();
         assert!(
-            resized.contains(&format!("显示 1–{total} 条，共 {total} 条")),
+            group_panel(&resized, panel).contains(&format!("显示 1–{total} 条，共 {total} 条")),
             "{path}"
         );
     }
     for id in ["not-a-number", "0", "-1", "9999"] {
+        assert_eq!(
+            client
+                .get(format!("{base}/ui/groups/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
         for suffix in ["models", "keys"] {
             assert_eq!(
                 client
@@ -1383,28 +1389,56 @@ fn pagination_signals(html: &str) -> serde_json::Map<String, serde_json::Value> 
 }
 
 fn bound_signal(html: &str, label: &str) -> String {
-    let position = html.find(&format!("aria-label=\"{label}\"")).unwrap();
+    hydrated_signal(&element_attribute(
+        html,
+        &format!("aria-label=\"{label}\""),
+        "data-topcoat-bind:value",
+    ))
+}
+
+fn click_signal(html: &str, marker: &str) -> String {
+    hydrated_signal(&element_attribute(html, marker, "data-topcoat-on:click"))
+}
+
+fn element_attribute(html: &str, marker: &str, attribute: &str) -> String {
+    let position = html.find(marker).unwrap();
     let start = html[..position].rfind('<').unwrap();
-    let end = position + html[position..].find('>').unwrap();
-    let binding = html[start..end]
-        .split("data-topcoat-bind:value=\"")
+    html[start..]
+        .split(&format!("{attribute}=\""))
         .nth(1)
         .unwrap()
         .split('"')
         .next()
         .unwrap()
-        .replace("&quot;", "\"");
+        .replace("&quot;", "\"")
+}
+
+fn hydrated_signal(binding: &str) -> String {
     let value: serde_json::Value = serde_json::from_str(
         binding
             .split("cx.hydrate(")
             .nth(1)
-            .unwrap()
-            .split(")).get()")
+            .unwrap_or_else(|| panic!("missing signal hydration: {binding}"))
+            .split("))")
             .next()
             .unwrap(),
     )
     .unwrap();
     value["id"].as_str().unwrap().to_owned()
+}
+
+fn group_panel<'a>(html: &'a str, panel: &str) -> &'a str {
+    match panel {
+        "models" => html
+            .split("id=\"group-models-panel\"")
+            .nth(1)
+            .unwrap()
+            .split("id=\"group-keys-panel\"")
+            .next()
+            .unwrap(),
+        "keys" => html.split("id=\"group-keys-panel\"").nth(1).unwrap(),
+        _ => html,
+    }
 }
 
 async fn procedure(

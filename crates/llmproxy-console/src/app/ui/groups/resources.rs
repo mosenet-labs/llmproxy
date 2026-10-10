@@ -87,7 +87,6 @@ pub(super) async fn resource_workspace(
         native_dialog_trigger_attributes(cx, &format!("group-resources-{group_id}"));
     Ok(view! {
         <section class="w-full min-w-0">
-            group_heading(group: &group, is_keys: false)
             <section class="min-w-0 overflow-hidden rounded-lg border border-solid border-border bg-white" aria-labelledby="group-models-title">
                 <header class="flex flex-wrap items-center justify-between gap-4 px-6 py-5 max-[640px]:px-4">
                     <div>
@@ -174,7 +173,7 @@ async fn remove_action(
             <button type="button" class=(LINK) (native_dialog_trigger_attributes(cx, &dialog_id))>"移出组"</button>
         </div>
         native_dialog(config: NativeDialogConfig::new(&dialog_id, "移出资源组"), open: Some(&open), busy: &busy, language: UiLanguage::ChineseSimplified, attrs: attributes! { class=(DIALOG) },
-            <form id=(form_id.as_str()) class="m-0" method="post" action=(href!(group::group_models, group::GroupId(group.id)))
+            <form id=(form_id.as_str()) class="m-0" method="post" action=(href!(group::details, group::GroupId(group.id)))
                 @submit=$(async |event: Event| {
                     event.prevent_default();
                     if busy.get() { return; }
@@ -270,7 +269,7 @@ pub(super) async fn resource_editor(
             config: NativeDialogConfig::new(&id, &title),
             open: Some(&open), busy: &busy, language: UiLanguage::ChineseSimplified,
             attrs: attributes! { class=(class!(DIALOG, "w-[min(720px,calc(100%_-_32px))]!")) },
-            <form id=(form_id.as_str()) method="post" action=(href!(group::group_models, group::GroupId(group.id))) class="m-0 flex min-h-0 flex-col"
+            <form id=(form_id.as_str()) method="post" action=(href!(group::details, group::GroupId(group.id))) class="m-0 flex min-h-0 flex-col"
                 @submit=$(async |event: Event| {
                     event.prevent_default();
                     if busy.get() { return; }

@@ -120,7 +120,7 @@ pub(super) async fn key_editor(
             config: NativeDialogConfig::new("key-create", "创建虚拟 Key"),
             open: Some(&open), busy: &busy, language: UiLanguage::ChineseSimplified,
             attrs: attributes! { class=(class!(DIALOG, "w-[min(640px,calc(100%_-_32px))]!")) },
-            <form id="key-editor-form" method="post" action=(href!(group::keys, group::GroupId(group_id))) class="m-0 flex min-h-0 flex-col" autocomplete="off"
+            <form id="key-editor-form" method="post" action=(href!(group::details, group::GroupId(group_id)).query([("tab", "keys")])) class="m-0 flex min-h-0 flex-col" autocomplete="off"
                 @submit=$(async |event: Event| {
                     event.prevent_default();
                     if busy.get() { return; }
@@ -174,7 +174,7 @@ pub(super) async fn key_editor(
                     <fieldset class="m-0 min-w-0 rounded-md border border-solid border-border p-4" :hidden=$(all_routes.get()) :disabled=$(all_routes.get())>
                         <legend class="px-1 text-sm font-medium">"可调用资源"</legend>
                         if models.is_empty() && routes.is_empty() {
-                            <p class="m-0 text-sm text-secondary">"当前组还没有添加模型或路由。"<a href=(href!(group::group_models, group::GroupId(group_id))) class="ml-2 text-primary hover:text-primary-hover">"前往添加模型或路由"</a></p>
+                            <p class="m-0 text-sm text-secondary">"当前组还没有添加模型或路由。"<a href=(href!(group::details, group::GroupId(group_id))) class="ml-2 text-primary hover:text-primary-hover">"前往添加模型或路由"</a></p>
                         } else {
                             <div role="group" aria-label="可调用资源类型" class="mb-3 flex gap-6 border-b border-border">
                                 <button type="button" class="border-0 border-b-2! border-solid! border-transparent bg-transparent px-0 pb-3 text-sm text-secondary aria-pressed:border-primary! aria-pressed:text-primary" :aria-pressed=$(resource_tab.get() == "models") @click=$(|_event: Event| resource_tab.set("models".to_owned()))>"Models "(models.len())</button>

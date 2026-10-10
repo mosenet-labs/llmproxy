@@ -30,16 +30,18 @@ pub async fn providers_redirect(cx: &Cx) -> Result<topcoat::router::error::SeeOt
 pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     let groups_page = uri(cx).path().starts_with("/ui/groups");
     let group_detail = groups_page && uri(cx).path() != "/ui/groups";
-    let group_keys = group_detail && uri(cx).path().ends_with("/keys");
+    let group_title = if group_detail {
+        Some(groups::group::title(cx).await?)
+    } else {
+        None
+    };
     let routes_page = uri(cx).path().starts_with("/ui/routes");
     let models_page = uri(cx).path() == "/ui/models";
     let chat_page = uri(cx).path() == "/ui/chat";
     let holidays_page = uri(cx).path() == "/ui/holidays";
     let subscriptions_page = uri(cx).path() == "/ui/subscriptions";
-    let page_title = if group_keys {
-        "Keys"
-    } else if group_detail {
-        "模型"
+    let page_title = (if let Some(title) = &group_title {
+        title.as_str()
     } else if groups_page {
         "资源组"
     } else if routes_page {
@@ -54,7 +56,8 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
         "订阅节点"
     } else {
         "Providers"
-    };
+    })
+    .to_owned();
     let providers_link = link_attrs(cx, href!(providers::list), prefetch_mode(cx));
     let models_link = link_attrs(cx, href!(models::models), prefetch_mode(cx));
     let chat_link = link_attrs(cx, href!(chat::chat), PrefetchMode::Never);
@@ -210,7 +213,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                         <a href=(href!(groups::groups)) class="text-primary hover:text-primary-hover hover:underline">"资源组"</a>
                                         <span class="mx-2.5 text-[#b9c3ce]">"/"</span>
                                     }
-                                    <strong>(page_title)</strong>
+                                    <strong>(page_title.as_str())</strong>
                                 </span>
                             </div>
                         </header>
