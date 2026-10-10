@@ -151,6 +151,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0030_personal_resources.sql",
         include_str!("../../migrations/postgresql/0030_personal_resources.sql"),
     ),
+    MigrationFile::new(
+        202610100004,
+        "0031_resource_spaces.sql",
+        include_str!("../../migrations/postgresql/0031_resource_spaces.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -468,5 +473,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610100003,
         "0063_personal_resources.sql",
         include_str!("../../migrations/sqlite/0063_personal_resources.sql"),
+    ),
+    MigrationFile::new(
+        202610100004,
+        "0064_resource_spaces.sql",
+        include_str!("../../migrations/sqlite/0064_resource_spaces.sql"),
     ),
 ]);

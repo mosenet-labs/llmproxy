@@ -46,11 +46,32 @@ fn conversation(cipher: &KeyCipher, row: ChatConversationRow) -> StoreResult<Con
 }
 impl ProviderStore {
     fn chat_owner(&self) -> String {
+        if let (Some(space), Some(user)) = (self.space_id, self.user_id)
+            && !self.personal_space
+        {
+            format!("space:{space}:user:{user}:group:{}", self.group_id)
+        } else {
+            self.legacy_chat_owner()
+        }
+    }
+    fn legacy_chat_owner(&self) -> String {
         if self.group_id == 1 {
             chat_history::OWNER.into()
         } else {
             format!("group:{}", self.group_id)
         }
+    }
+    fn can_read_legacy_chat(&self) -> bool {
+        self.space_id == Some(1) && self.platform_admin
+    }
+    /// The unscoped service store records usage and recovers interrupted turns;
+    /// console users always carry an actor and must match their private owner.
+    fn owns_chat_owner(&self, owner: &str) -> bool {
+        owner == self.chat_owner()
+            || (self.can_read_legacy_chat() && owner == self.legacy_chat_owner())
+            || (self.user_id.is_none()
+                && owner.starts_with("space:")
+                && owner.ends_with(&format!(":group:{}", self.group_id)))
     }
     /// PostgreSQL 锁定会话行；SQLite 写事务使用 IMMEDIATE。
     async fn chat_row(
@@ -71,7 +92,7 @@ impl ProviderStore {
             .exec(&mut *tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        if row.owner != self.chat_owner() {
+        if !self.owns_chat_owner(&row.owner) {
             return Err(StoreError::NotFound);
         }
         Ok(row)
@@ -135,8 +156,12 @@ impl ProviderStore {
         let mut tx = self.transaction(&mut connection, false).await?;
         self.verify_tool_key(&mut tx).await?;
         Box::pin(self.require_group(&mut tx)).await?;
+        let mut owners = vec![self.chat_owner()];
+        if self.can_read_legacy_chat() {
+            owners.push(self.legacy_chat_owner());
+        }
         let rows = ChatConversationRow::all()
-            .filter(ChatConversationRow::fields().owner().eq(self.chat_owner()))
+            .filter(ChatConversationRow::fields().owner().in_list(owners))
             .filter(ChatConversationRow::fields().archived().eq(archived))
             .order_by(ChatConversationRow::fields().updated_at().desc())
             .order_by(ChatConversationRow::fields().id().desc())
@@ -160,7 +185,7 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        if row.owner != self.chat_owner() {
+        if !self.owns_chat_owner(&row.owner) {
             return Err(StoreError::NotFound);
         }
         tx.commit().await?;
@@ -495,10 +520,19 @@ impl ProviderStore {
     /// 启动恢复单个本地服务遗留的轮次，不自动重新调用 Provider。
     pub async fn recover_chat_history(&self) -> StoreResult<()> {
         let mut connection = self.connection().await?;
-        let rows = ChatConversationRow::all()
-            .filter(ChatConversationRow::fields().owner().eq(self.chat_owner()))
-            .exec(&mut connection)
-            .await?;
+        let mut query = ChatConversationRow::all()
+            .filter(ChatConversationRow::fields().owner().eq(self.chat_owner()));
+        if self.user_id.is_none() {
+            query = ChatConversationRow::all().filter(
+                ChatConversationRow::fields()
+                    .owner()
+                    .eq(self.chat_owner())
+                    .or(ChatConversationRow::fields()
+                        .owner()
+                        .like(format!("space:%:user:%:group:{}", self.group_id))),
+            );
+        }
+        let rows = query.exec(&mut connection).await?;
         drop(connection);
         let rooms: Vec<_> = rows
             .into_iter()

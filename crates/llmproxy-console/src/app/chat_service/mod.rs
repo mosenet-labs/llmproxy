@@ -45,6 +45,10 @@ impl ChatService<'_> {
             if room.group_id != self.store.group_id() {
                 return Err(topcoat::router::error::forbidden().into());
             }
+            // 页面请求重新验证归属；内部生成任务在数据库故障时仍须保留待保存回复。
+            if self.store.actor_user_id().is_some() {
+                self.store.get_chat_conversation(id).await?;
+            }
             return Ok(room);
         }
         let room = self.store.get_chat_conversation(id).await?;

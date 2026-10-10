@@ -62,12 +62,12 @@ async fn workspace(cx: &Cx, initial_tab: &str) -> Result<impl View> {
             tabs_list(attrs: attributes! { role="navigation" aria-label="资源组分类" },
                 tabs_trigger(active: $(selected.get() == "models"), attrs: attributes! { cx =>
                     id="group-tab-models" aria-controls="group-models-panel"
-                    href=(href!(details, GroupId(group_id)))
+                    href=(crate::app::scoped_href(cx, href!(details, GroupId(group_id)) .resolve(cx)))
                     @click=$(|event: Event| { event.prevent_default(); selected.set("models".to_owned()); })
                 }, "Models")
                 tabs_trigger(active: $(selected.get() == "keys"), attrs: attributes! { cx =>
                     id="group-tab-keys" aria-controls="group-keys-panel"
-                    href=(href!(details, GroupId(group_id)).query([("tab", "keys")]))
+                    href=(crate::app::scoped_href(cx, href!(details, GroupId(group_id)).query([("tab", "keys")]) .resolve(cx)))
                     @click=$(|event: Event| { event.prevent_default(); selected.set("keys".to_owned()); })
                 }, "Keys")
             )

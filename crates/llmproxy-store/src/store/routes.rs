@@ -15,10 +15,13 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
+        if group.is_none() {
+            self.require_space(&mut tx, true).await?;
+        }
         let mut route_memberships = groups::route_group_map(&mut tx).await?;
         let mut query = ModelRouteRow::all();
-        if let Some(id) = self.user_id {
-            query = query.filter(ModelRouteRow::fields().owner_user_id().eq(id));
+        if let Some(id) = self.space_id {
+            query = query.filter(ModelRouteRow::fields().space_id().eq(id));
         }
         if let Some(id) = group {
             self.for_group(id).require_group(&mut tx).await?;
@@ -68,13 +71,13 @@ impl ProviderStore {
         for target in &input.targets {
             let model = Box::pin(self.find_model(&mut tx, target.model_id)).await?;
             let provider = find(&mut tx, model.provider_id).await?;
-            if provider.owner_user_id != self.user_id {
-                return Err(StoreError::Validation("候选模型必须属于同一账户".into()));
+            if provider.space_id != self.resource_space_id() {
+                return Err(StoreError::Validation("候选模型必须属于同一空间".into()));
             }
         }
         check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;
         let row = ModelRouteRow::create()
-            .owner_user_id(self.user_id)
+            .space_id(self.resource_space_id())
             .name(input.name)
             .protocol(input.protocol.as_str().to_owned())
             .provider_protocol(input.provider_protocol.as_str().to_owned())
@@ -108,8 +111,8 @@ impl ProviderStore {
         for target in &input.targets {
             let model = Box::pin(self.find_model(&mut tx, target.model_id)).await?;
             let provider = find(&mut tx, model.provider_id).await?;
-            if provider.owner_user_id != row.owner_user_id {
-                return Err(StoreError::Validation("候选模型必须属于同一账户".into()));
+            if provider.space_id != row.space_id {
+                return Err(StoreError::Validation("候选模型必须属于同一空间".into()));
             }
         }
         check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;

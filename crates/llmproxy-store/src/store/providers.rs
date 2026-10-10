@@ -3,11 +3,12 @@ use super::*;
 impl ProviderStore {
     pub async fn list(&self) -> StoreResult<Vec<ProviderView>> {
         let mut connection = self.connection().await?;
+        self.require_space(&mut connection, true).await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
         let mut query = Provider::all();
-        if let Some(id) = self.user_id {
-            query = query.filter(Provider::fields().owner_user_id().eq(id));
+        if let Some(id) = self.space_id {
+            query = query.filter(Provider::fields().space_id().eq(id));
         }
         let providers = query
             .order_by(Provider::fields().id().asc())
@@ -23,6 +24,7 @@ impl ProviderStore {
 
     pub async fn get(&self, id: i64) -> StoreResult<ProviderView> {
         let mut connection = self.connection().await?;
+        self.require_space(&mut connection, true).await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
         let provider = Box::pin(self.find_provider(&mut tx, id)).await?;
@@ -46,9 +48,9 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        check_unique_name(&mut tx, &input.name, None, self.user_id).await?;
+        check_unique_name(&mut tx, &input.name, None, self.resource_space_id()).await?;
         let provider = Provider::create()
-            .owner_user_id(self.user_id)
+            .space_id(self.resource_space_id())
             .name(input.name)
             .openai_chat_path(input.paths.openai_chat)
             .openai_responses_path(input.paths.openai_responses)
@@ -99,7 +101,7 @@ impl ProviderStore {
         let mut provider = Box::pin(self.find_provider(&mut tx, id)).await?;
         self.require_editable_provider(&mut tx, id).await?;
         check_version(&provider, version)?;
-        check_unique_name(&mut tx, &input.name, Some(id), provider.owner_user_id).await?;
+        check_unique_name(&mut tx, &input.name, Some(id), provider.space_id).await?;
         if ModelMapping::all()
             .filter(ModelMapping::fields().provider_id().eq(id))
             .select((
@@ -203,7 +205,7 @@ impl ProviderStore {
     }
 
     pub async fn activate(&self, id: i64, version: u64, protocol: Protocol) -> StoreResult<()> {
-        if self.is_personal() {
+        if self.user_id.is_some() && !(self.platform_admin && self.space_id == Some(1)) {
             return Err(StoreError::Validation(
                 "系统默认 Provider 仅可由管理员设置，请通过资源组调用模型".into(),
             ));
@@ -270,6 +272,7 @@ impl ProviderStore {
 
     pub async fn load_active(&self) -> StoreResult<Vec<ActiveProvider>> {
         let mut connection = self.connection().await?;
+        self.require_space(&mut connection, true).await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
         let mut active = Vec::with_capacity(3);
@@ -278,7 +281,7 @@ impl ProviderStore {
                 continue;
             };
             let provider = find(&mut tx, id).await?;
-            if self.check_owner(provider.owner_user_id).is_err() {
+            if self.check_owner(provider.space_id).is_err() {
                 continue;
             }
             let protocol = protocol(&binding.protocol)?;
@@ -297,6 +300,7 @@ impl ProviderStore {
 
     pub async fn probe_target(&self, id: i64) -> StoreResult<ModelProbeTarget> {
         let mut connection = self.connection().await?;
+        self.require_space(&mut connection, true).await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
         let provider = Box::pin(self.find_provider(&mut tx, id)).await?;

@@ -7,6 +7,7 @@ mod database;
 pub mod health;
 mod holiday;
 mod model;
+pub mod organizations;
 mod pricing;
 pub mod settings;
 mod store;
@@ -334,6 +335,7 @@ pub struct VirtualKeyInput {
 
 #[derive(Clone, Debug)]
 pub struct VirtualKeyView {
+    pub created_by_user_id: Option<i64>,
     pub id: i64,
     pub group_id: i64,
     pub name: String,
@@ -355,6 +357,7 @@ pub struct CreatedVirtualKey {
 
 #[derive(Clone, Debug)]
 pub struct CallIdentity {
+    pub space_id: i64,
     pub group_id: i64,
     pub key_id: i64,
     pub all_routes: bool,

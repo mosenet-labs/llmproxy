@@ -24,6 +24,13 @@ pub struct ListQuery {
 
 #[page]
 pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> {
+    use topcoat::view::ViewExt;
+    if !crate::app::store(cx).can_manage_resources() {
+        return Ok(super::resource_catalog::member_catalog(cx, true)
+            .await?
+            .boxed());
+    }
+
     let all = crate::app::store(cx).list_all_routes().await?;
     let needle = query.q.trim().to_lowercase();
     let filtered: Vec<_> = all
@@ -57,8 +64,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
             <a
                 class=(class!(BUTTON, PRIMARY))
                 (topcoat::runtime::link_attrs(
-                    cx,
-                    "/ui/routes/edit",
+                    cx, crate::app::scoped_href(cx, "/ui/routes/edit"),
                     topcoat::runtime::prefetch_mode(cx),
                 ))
             >
@@ -93,6 +99,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                             action="/ui/routes"
                             role="search"
                         >
+ <input type="hidden" name="space" value=(crate::app::store(cx).space_id().unwrap().to_string())>
                             <input
                                 class="h-9 min-w-0 flex-1 rounded-md border border-control-border px-3 text-sm focus:border-primary"
                                 type="search"
@@ -104,7 +111,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                             <button class=(BUTTON) type="submit">"搜索"</button>
                         </form>
                     }
-                    <a href="/ui/groups" class="whitespace-nowrap text-[13px] text-primary hover:underline">"管理组资源 →"</a>
+                    <a href=(crate::app::scoped_href(cx, "/ui/groups")) class="whitespace-nowrap text-[13px] text-primary hover:underline">"管理组资源 →"</a>
                 </div>
             </div>
             <p
@@ -123,8 +130,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                     <a
                         class=(class!(BUTTON, PRIMARY, "mt-4"))
                         (topcoat::runtime::link_attrs(
-                            cx,
-                            "/ui/routes/edit",
+                            cx, crate::app::scoped_href(cx, "/ui/routes/edit"),
                             topcoat::runtime::prefetch_mode(cx),
                         ))
                     >
@@ -169,8 +175,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                         <a
                                             class="font-mono font-medium text-heading hover:text-primary"
                                             (topcoat::runtime::link_attrs(
-                                                cx,
-                                                format!("/ui/routes/edit?id={}", route.id),
+                                                cx, crate::app::scoped_href(cx, format!("/ui/routes/edit?id={}", route.id)),
                                                 topcoat::runtime::prefetch_mode(cx),
                                             ))
                                         >
@@ -221,8 +226,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                                             <a
                                                 class="text-primary hover:underline"
                                                 (topcoat::runtime::link_attrs(
-                                                    cx,
-                                                    format!("/ui/routes/edit?id={}", route.id),
+                                                    cx, crate::app::scoped_href(cx, format!("/ui/routes/edit?id={}", route.id)),
                                                     topcoat::runtime::prefetch_mode(cx),
                                                 ))
                                             >
@@ -261,7 +265,7 @@ pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> 
                 </div>
             }
         </section>
-    })
+    }.boxed())
 }
 
 fn route_available(route: &ModelRouteView) -> bool {
@@ -316,6 +320,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
     } else {
         "新建模型路由"
     };
+    let destination = crate::app::scoped_href(cx, "/ui/routes");
     let unavailable: Outcome = Err("保存失败，请刷新后重试".into());
     Ok(view! {
         <section class=(PAGE_HEADING)>
@@ -323,8 +328,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
                 <a
                     class="mb-2 inline-block text-[13px] text-secondary hover:text-primary"
                     (topcoat::runtime::link_attrs(
-                        cx,
-                        "/ui/routes",
+                        cx, crate::app::scoped_href(cx, "/ui/routes"),
                         topcoat::runtime::prefetch_mode(cx),
                     ))
                 >
@@ -352,7 +356,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
                 );
                 busy.set(false);
                 if result.is_ok() {
-                    raw!("window.location.assign('/ui/routes')", ());
+                    raw!("window.location.assign(${destination}.dehydrate())", ());
                 } else {
                     error.set(result.unwrap_err());
                 }
@@ -705,8 +709,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
                 <a
                     class=(BUTTON)
                     (topcoat::runtime::link_attrs(
-                        cx,
-                        "/ui/routes",
+                        cx, crate::app::scoped_href(cx, "/ui/routes"),
                         topcoat::runtime::prefetch_mode(cx),
                     ))
                 >

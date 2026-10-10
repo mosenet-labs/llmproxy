@@ -104,7 +104,7 @@ async fn workspace(cx: &Cx, refresh: &topcoat::runtime::Signal<f64>) -> Result<i
                 pagination(state: &paging, total: rows.len(), id: "users-page-size", label: "用户列表分页")
             </section>
             <p class="m-0 text-[13px] text-muted">"禁用或变更角色会注销该用户的全部会话；不能禁用或降级最后一个有效管理员。"</p>
-            if !mail_enabled { <p role="status" class="m-0 text-[13px] text-muted">"邮件服务未启用，邮箱注册、密码找回及发送重置邮件暂不可用。"<a href="/ui/settings" class="ml-2 text-primary hover:underline">"配置邮件服务"</a></p> }
+            if !mail_enabled { <p role="status" class="m-0 text-[13px] text-muted">"邮件服务未启用，邮箱注册、密码找回及发送重置邮件暂不可用。"<a href=(crate::app::scoped_href(cx, "/ui/settings")) class="ml-2 text-primary hover:underline">"配置邮件服务"</a></p> }
         </section>
         #[key(user.id)]
         for user in &rows[range.clone()] { editor::user_editor(user: user, refresh: refresh, csrf: csrf.as_str()) }

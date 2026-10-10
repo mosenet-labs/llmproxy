@@ -38,9 +38,12 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
+        if group.is_none() {
+            self.require_space(&mut tx, true).await?;
+        }
         let mut memberships = groups::model_group_map(&mut tx).await?;
         let mut query = ModelMapping::all();
-        if self.is_personal() {
+        if self.space_id.is_some() {
             query = query.filter(
                 ModelMapping::fields()
                     .provider_id()
@@ -85,6 +88,10 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
+        if self.authorized_group_ids(&mut tx).await?.is_some() {
+            self.require_group(&mut tx).await?;
+            self.require_model_member(&mut tx, id).await?;
+        }
         let mapping = Box::pin(self.find_model(&mut tx, id)).await?;
         let provider = Box::pin(self.find_provider(&mut tx, mapping.provider_id)).await?;
         let mut view = mapping_view(&mapping, &provider)?;
@@ -222,7 +229,7 @@ impl ProviderStore {
         check_mapping_version(&mapping, version)?;
         let previous = find(&mut tx, mapping.provider_id).await?;
         let provider = Box::pin(self.find_provider(&mut tx, input.provider_id)).await?;
-        if provider.owner_user_id != previous.owner_user_id {
+        if provider.space_id != previous.space_id {
             return Err(StoreError::Validation(
                 "不能将模型移动到其他账户的 Provider".into(),
             ));
@@ -310,6 +317,7 @@ impl ProviderStore {
     pub async fn load_model_routes(&self) -> StoreResult<Vec<ModelRoute>> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
+        self.require_space(&mut tx, true).await?;
         self.bindings(&mut tx, false).await?;
         Box::pin(self.require_group(&mut tx)).await?;
         let mut routes = Vec::new();

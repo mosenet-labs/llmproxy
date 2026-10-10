@@ -7,16 +7,16 @@ async fn provider_name(
     name: &str,
     custom: Option<&str>,
     own_id: Option<i64>,
-    owner_user_id: Option<i64>,
+    space_id: Option<i64>,
 ) -> StoreResult<String> {
     if let Some(custom) = custom {
-        match check_unique_name(tx, custom, own_id, owner_user_id).await {
+        match check_unique_name(tx, custom, own_id, space_id).await {
             Ok(()) => return Ok(custom.to_owned()),
             Err(StoreError::Conflict(_)) => {}
             Err(error) => return Err(error),
         }
     }
-    check_unique_name(tx, name, own_id, owner_user_id).await?;
+    check_unique_name(tx, name, own_id, space_id).await?;
     Ok(name.to_owned())
 }
 
@@ -37,9 +37,10 @@ fn view(row: SubscriptionNode) -> StoreResult<SubscriptionNodeView> {
 impl ProviderStore {
     pub async fn subscription_nodes(&self) -> StoreResult<Vec<SubscriptionNodeView>> {
         let mut connection = self.connection().await?;
+        self.require_space(&mut connection, true).await?;
         let mut query = SubscriptionNode::all();
-        if let Some(id) = self.user_id {
-            query = query.filter(SubscriptionNode::fields().owner_user_id().eq(id));
+        if let Some(id) = self.space_id {
+            query = query.filter(SubscriptionNode::fields().space_id().eq(id));
         }
         query
             .exec(&mut connection)
@@ -52,7 +53,7 @@ impl ProviderStore {
     /// Claim a newly registered node by proving possession of its local identity secret.
     /// Nodes already admitted by the platform cannot be transferred this way.
     pub async fn claim_subscription(&self, node_id: &str, node_key: &str) -> StoreResult<()> {
-        let user_id = self.user_id.ok_or(StoreError::NotFound)?;
+        let space_id = self.space_id.ok_or(StoreError::NotFound)?;
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
@@ -69,14 +70,14 @@ impl ProviderStore {
                 .zip(node_key.bytes())
                 .fold(0, |difference, (a, b)| difference | (a ^ b))
                 == 0;
-        if !matching || node.owner_user_id.is_some() || node.provider_id.is_some() || node.enabled {
+        if !matching || node.space_id.is_some() || node.provider_id.is_some() || node.enabled {
             return Err(StoreError::Validation(
                 "节点身份或密钥无效，或节点已被关联".into(),
             ));
         }
         let version = node.config_version + 1;
         node.update()
-            .owner_user_id(user_id)
+            .space_id(space_id)
             .config_version(version)
             .updated_at(now()?)
             .exec(&mut tx)
@@ -117,7 +118,7 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
         {
-            self.check_owner(row.owner_user_id)?;
+            self.check_owner(row.space_id)?;
             let secret = self.cipher.decrypt(&row.encrypted_node_key)?;
             let matching = secret.len() == registration.node_key.len()
                 && secret
@@ -139,7 +140,7 @@ impl ProviderStore {
             row
         } else {
             SubscriptionNode::create()
-                .owner_user_id(self.user_id)
+                .space_id(self.space_id)
                 .node_id(&registration.node_id)
                 .name(if registration.name.trim().is_empty() {
                     format!("node-{}", &registration.node_id[..6])
@@ -183,7 +184,7 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        self.check_owner(node.owner_user_id)?;
+        self.check_owner(node.space_id)?;
         if node.config_version != version {
             return Err(StoreError::Conflict("节点配置已变化，请刷新".into()));
         }
@@ -193,7 +194,7 @@ impl ProviderStore {
             &node.name,
             custom,
             node.provider_id,
-            node.owner_user_id,
+            node.space_id.or(self.resource_space_id()),
         )
         .await?;
         if let Some(id) = node.provider_id {
@@ -243,17 +244,23 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        self.check_owner(node.owner_user_id)?;
+        self.check_owner(node.space_id)?;
         if node.config_version != version {
             return Err(StoreError::Conflict("节点配置已变化，请刷新".into()));
         }
+        // Legacy server-side admission claims an unowned node into the default space.
+        let space_id = node.space_id.or(if enabled {
+            self.resource_space_id()
+        } else {
+            None
+        });
         let provider_id = if let Some(id) = node.provider_id {
             let display_name = provider_name(
                 &mut tx,
                 &node.name,
                 node.provider_name.as_deref(),
                 Some(id),
-                node.owner_user_id,
+                space_id,
             )
             .await?;
             let mut provider = Box::pin(self.find_provider(&mut tx, id)).await?;
@@ -281,11 +288,11 @@ impl ProviderStore {
                 &node.name,
                 node.provider_name.as_deref(),
                 None,
-                node.owner_user_id,
+                space_id,
             )
             .await?;
             let provider = Provider::create()
-                .owner_user_id(node.owner_user_id)
+                .space_id(space_id)
                 .name(name)
                 .openai_chat_path(None)
                 .openai_responses_path(Some(format!("/internal/subscriptions/{node_id}/responses")))
@@ -313,6 +320,7 @@ impl ProviderStore {
         };
         let config_version = node.config_version + 1;
         node.update()
+            .space_id(space_id)
             .config_version(config_version)
             .enabled(enabled)
             .provider_id(provider_id)

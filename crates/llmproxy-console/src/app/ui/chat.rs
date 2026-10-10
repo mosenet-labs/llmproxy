@@ -45,6 +45,11 @@ fn selected_protocol(protocol: &str) -> std::result::Result<Protocol, String> {
 
 #[page]
 pub async fn chat(cx: &Cx) -> Result<impl View> {
+    use topcoat::view::ViewExt;
+    if crate::app::store(cx).group_id() == 0 {
+        return Ok(view! { super::resource_catalog::no_group() }.boxed());
+    }
+
     let state = app_context::<AppState>(cx);
     let mut models: Vec<_> = crate::app::group_store(cx, "chat")
         .list_models()
@@ -453,8 +458,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                         <a
                             class="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-white hover:bg-primary-hover"
                             (topcoat::runtime::link_attrs(
-                                cx,
-                                href!(super::models::models),
+                                cx, crate::app::scoped_href(cx, href!(super::models::models) .resolve(cx)),
                                 topcoat::runtime::prefetch_mode(cx),
                             ))
                         >
@@ -467,7 +471,7 @@ pub async fn chat(cx: &Cx) -> Result<impl View> {
                 }
             </div>
         </section>
-    })
+    }.boxed())
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/new-chat")]
@@ -1534,7 +1538,7 @@ async fn chat_message_entry(
                                         }
                                     }
                                     <a
-                                        href=(media.uri.as_str())
+                                        href=(crate::app::scoped_href(cx, media.uri.as_str()))
                                         download=(part.title.as_str())
                                         target="_blank"
                                         rel="noopener noreferrer"
@@ -1660,6 +1664,9 @@ pub async fn chat_thinking_picker(
     crate::app::request_connection(cx);
     let _revision = refresh.get();
     let state = app_context::<AppState>(cx);
+    crate::app::group_store(cx, "chat")
+        .get_chat_conversation(&session.get())
+        .await?;
     let room = state
         .chat_sessions
         .get(&session.get())
@@ -2134,7 +2141,10 @@ pub async fn chat_health_notice(
             "模型配置已失效".into()
         },
     });
-    let hint = if health.blocked {
+    let manage = crate::app::store(cx).can_manage_resources();
+    let hint = if health.blocked && !manage {
+        "当前选择和对话已保留，请切换模型或联系组织管理员。"
+    } else if health.blocked {
         "当前选择和对话已保留，请重新探测或切换模型。"
     } else if health.warning {
         "最近探测未确认可用，仍可尝试发送。"
@@ -2170,6 +2180,7 @@ pub async fn chat_health_notice(
                             "刷新状态"
                         </button>
                         if health.warning {
+                            if manage {
                             <button
                                 class="border-0 bg-transparent p-0 text-xs text-primary hover:underline"
                                 type="button"
@@ -2188,6 +2199,7 @@ pub async fn chat_health_notice(
                             >
                                 "重新探测"
                             </button>
+                            }
                             <label
                                 for="chat-model"
                                 class="cursor-pointer text-primary hover:underline"

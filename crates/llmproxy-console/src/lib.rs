@@ -92,6 +92,8 @@ impl Console {
             .layer(BodyLimit::max(BODY_LIMIT))
             .layer(app::protect)
             .layer(observability::request_layer())
+            .route(app::ui::organizations::organization_action)
+            .route(app::ui::organizations::select)
             .route(app::ui::users::save_user)
             .route(app::ui::users::user_action)
             .route(app::ui::settings::save_mail_settings)

@@ -173,7 +173,7 @@ pub(super) async fn key_editor(
                     <fieldset class="m-0 min-w-0 rounded-md border border-solid border-border p-4" :hidden=$(all_routes.get()) :disabled=$(all_routes.get())>
                         <legend class="px-1 text-sm font-medium">"可调用资源"</legend>
                         if models.is_empty() && routes.is_empty() {
-                            <p class="m-0 text-sm text-secondary">"当前组还没有添加模型或路由。"<a href=(href!(group::details, group::GroupId(group_id))) class="ml-2 text-primary hover:text-primary-hover">"前往添加模型或路由"</a></p>
+                            <p class="m-0 text-sm text-secondary">"当前组还没有添加模型或路由。"<a href=(crate::app::scoped_href(cx, href!(group::details, group::GroupId(group_id)) .resolve(cx))) class="ml-2 text-primary hover:text-primary-hover">"前往添加模型或路由"</a></p>
                         } else {
                             <div role="group" aria-label="可调用资源类型" class="mb-3 flex gap-6 border-b border-border">
                                 <button type="button" class="border-0 border-b-2! border-solid! border-transparent bg-transparent px-0 pb-3 text-sm text-secondary aria-pressed:border-primary! aria-pressed:text-primary" :aria-pressed=$(resource_tab.get() == "models") @click=$(|_event: Event| resource_tab.set("models".to_owned()))>"Models "(models.len())</button>

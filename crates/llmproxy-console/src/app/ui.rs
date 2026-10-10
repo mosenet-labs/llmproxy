@@ -5,7 +5,9 @@ pub(crate) mod groups;
 pub(crate) mod holidays;
 pub(crate) mod login;
 pub(crate) mod models;
+pub(crate) mod organizations;
 pub(crate) mod providers;
+mod resource_catalog;
 pub(crate) mod routes;
 pub(crate) mod settings;
 pub(crate) mod subscriptions;
@@ -28,7 +30,10 @@ use topcoat_ant_design::icons::{
 const NAV_ITEM: &str = "flex min-h-11 items-center gap-3 whitespace-nowrap rounded-md px-3 py-2.5 text-sm text-secondary hover:bg-surface hover:text-primary aria-[current=page]:bg-primary-soft aria-[current=page]:font-medium aria-[current=page]:text-[#0958d9] max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-[13px]";
 #[route(GET)]
 pub async fn providers_redirect(cx: &Cx) -> Result<topcoat::router::error::SeeOther> {
-    Ok(see_other(href!(chat::chat).resolve(cx)))
+    Ok(see_other(crate::app::scoped_href(
+        cx,
+        href!(chat::chat).resolve(cx),
+    )))
 }
 
 #[layout]
@@ -39,6 +44,16 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     }
     let identity = crate::app::auth::session(cx).ok();
     let is_admin = identity.is_some_and(|s| s.user.role == llmproxy_store::auth::UserRole::Admin);
+    let manage = crate::app::store(cx).can_manage_resources();
+    let organizations_page = uri(cx).path().starts_with("/ui/organizations");
+    let organization_detail_title = if uri(cx).path() == "/ui/organizations/detail" {
+        Some(format!(
+            "{}详情",
+            crate::app::store(cx).current_space().await?.unwrap().name
+        ))
+    } else {
+        None
+    };
     let users_page = uri(cx).path() == "/ui/users";
     let account_page = uri(cx).path() == "/ui/account";
     let settings_page = uri(cx).path() == "/ui/settings";
@@ -55,7 +70,11 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     let chat_page = uri(cx).path() == "/ui/chat";
     let holidays_page = uri(cx).path() == "/ui/holidays";
     let subscriptions_page = uri(cx).path() == "/ui/subscriptions";
-    let page_title = (if settings_page {
+    let page_title = (if let Some(title) = &organization_detail_title {
+        title.as_str()
+    } else if organizations_page {
+        "组织"
+    } else if settings_page {
         "系统设置"
     } else if users_page {
         "用户管理"
@@ -81,13 +100,41 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
         "Providers"
     })
     .to_owned();
-    let providers_link = link_attrs(cx, href!(providers::list), prefetch_mode(cx));
-    let home_link = link_attrs(cx, href!(chat::chat), PrefetchMode::Never);
-    let models_link = link_attrs(cx, href!(models::models), prefetch_mode(cx));
-    let chat_link = link_attrs(cx, href!(chat::chat), PrefetchMode::Never);
-    let routes_link = link_attrs(cx, href!(routes::routes), prefetch_mode(cx));
-    let holidays_link = link_attrs(cx, href!(holidays::holidays), prefetch_mode(cx));
-    let subscriptions_link = link_attrs(cx, href!(subscriptions::nodes), prefetch_mode(cx));
+    let providers_link = link_attrs(
+        cx,
+        crate::app::scoped_href(cx, href!(providers::list).resolve(cx)),
+        prefetch_mode(cx),
+    );
+    let home_link = link_attrs(
+        cx,
+        crate::app::scoped_href(cx, href!(chat::chat).resolve(cx)),
+        PrefetchMode::Never,
+    );
+    let models_link = link_attrs(
+        cx,
+        crate::app::scoped_href(cx, href!(models::models).resolve(cx)),
+        prefetch_mode(cx),
+    );
+    let chat_link = link_attrs(
+        cx,
+        crate::app::scoped_href(cx, href!(chat::chat).resolve(cx)),
+        PrefetchMode::Never,
+    );
+    let routes_link = link_attrs(
+        cx,
+        crate::app::scoped_href(cx, href!(routes::routes).resolve(cx)),
+        prefetch_mode(cx),
+    );
+    let holidays_link = link_attrs(
+        cx,
+        crate::app::scoped_href(cx, href!(holidays::holidays).resolve(cx)),
+        prefetch_mode(cx),
+    );
+    let subscriptions_link = link_attrs(
+        cx,
+        crate::app::scoped_href(cx, href!(subscriptions::nodes).resolve(cx)),
+        prefetch_mode(cx),
+    );
     Ok(view! {
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -97,7 +144,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                 <meta name="color-scheme" content="light">
                 <title>(format!("{page_title} · LLMProxy"))</title>
                 head_assets()
-                <link rel="stylesheet" href="/ui/assets/console.css">
+                <link rel="stylesheet" href=(crate::app::scoped_href(cx, "/ui/assets/console.css"))>
                 topcoat::runtime::script()
                 <script type="module" src="/ui/assets/chat-resume.js"></script>
             </head>
@@ -139,6 +186,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                 )
                                 "Chat"
                             </a>
+                            if manage {
                             <a
                                 id="nav-providers"
                                 class=(NAV_ITEM)
@@ -152,7 +200,8 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     || groups_page
                                     || users_page
                                     || settings_page
-                                    || account_page {
+                                    || account_page
+                                    || organizations_page {
                                     None
                                 } else {
                                     Some("page")
@@ -164,6 +213,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                 )
                                 "Providers"
                             </a>
+                            }
                             <a
                                 id="nav-models"
                                 class=(NAV_ITEM)
@@ -206,6 +256,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     "节假日"
                                 </a>
                             }
+                            if manage {
                             <a
                                 id="nav-subscriptions"
                                 class=(NAV_ITEM)
@@ -222,31 +273,33 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                 )
                                 "订阅节点"
                             </a>
-                            <a id="nav-groups" class=(NAV_ITEM) href=(href!(groups::groups)) aria-current=(if groups_page { Some("page") } else { None })>
+                            <a id="nav-groups" class=(NAV_ITEM) href=(crate::app::scoped_href(cx, href!(groups::groups) .resolve(cx))) aria-current=(if groups_page { Some("page") } else { None })>
                                 icon(data: TEAM_OUTLINED, size: 16)
                                 "资源组"
                             </a>
                             <a
                                 id="nav-keys"
                                 class=(NAV_ITEM)
-                                href="/ui/keys"
+                                href=(crate::app::scoped_href(cx, "/ui/keys"))
                                 aria-current=(if keys_page { Some("page") } else { None })
                             >
                                 icon(data: TEAM_OUTLINED, size: 16)
                                 "虚拟 Keys"
                             </a>
+                            }
+                            <a id="nav-organizations" class=(NAV_ITEM) href=(crate::app::scoped_href(cx, "/ui/organizations")) aria-current=(if organizations_page { Some("page") } else { None })>icon(data: TEAM_OUTLINED, size: 16) "组织"</a>
                             if is_admin {
-                                <a id="nav-users" class=(NAV_ITEM) href="/ui/users" aria-current=(if users_page { Some("page") } else { None })>
+                                <a id="nav-users" class=(NAV_ITEM) href=(crate::app::scoped_href(cx, "/ui/users")) aria-current=(if users_page { Some("page") } else { None })>
                                     icon(data: TEAM_OUTLINED, size: 16) "用户管理"
                                 </a>
                             }
-                            <a id="nav-account" class=(NAV_ITEM) href="/ui/account" aria-current=(if account_page { Some("page") } else { None })>
+                            <a id="nav-account" class=(NAV_ITEM) href=(crate::app::scoped_href(cx, "/ui/account")) aria-current=(if account_page { Some("page") } else { None })>
                                 icon(data: TEAM_OUTLINED, size: 16) "个人账户"
                             </a>
                         </nav>
                         <div class="mt-auto border-t border-border pt-3 max-[640px]:mt-3">
                             if is_admin {
-                                <a id="nav-settings" class=(NAV_ITEM) href="/ui/settings" aria-current=(if settings_page { Some("page") } else { None })>
+                                <a id="nav-settings" class=(NAV_ITEM) href=(crate::app::scoped_href(cx, "/ui/settings")) aria-current=(if settings_page { Some("page") } else { None })>
                                     <svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h7m4 0h5M4 12h2m4 0h10M4 18h10m4 0h2"></path><circle cx="13" cy="6" r="2"></circle><circle cx="8" cy="12" r="2"></circle><circle cx="16" cy="18" r="2"></circle></svg> "系统设置"
                                 </a>
                             }
@@ -260,12 +313,16 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     "控制台"
                                     <span class="mx-2.5 text-[#b9c3ce]">"/"</span>
                                     if group_detail {
-                                        <a href=(href!(groups::groups)) class="text-primary hover:text-primary-hover hover:underline">"资源组"</a>
+                                        <a href=(crate::app::scoped_href(cx, href!(groups::groups) .resolve(cx))) class="text-primary hover:text-primary-hover hover:underline">"资源组"</a>
+                                        <span class="mx-2.5 text-[#b9c3ce]">"/"</span>
+                                    }
+                                    if organization_detail_title.is_some() {
+                                        <a href=(crate::app::scoped_href(cx, "/ui/organizations")) class="text-primary hover:underline">"组织"</a>
                                         <span class="mx-2.5 text-[#b9c3ce]">"/"</span>
                                     }
                                     <strong>(page_title.as_str())</strong>
                                 </span>
-                                account::header_account()
+                                <div class="flex flex-wrap items-center gap-5">organizations::space_selector() account::header_account()</div>
                             </div>
                         </header>
                         <main

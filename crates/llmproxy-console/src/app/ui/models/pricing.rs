@@ -1420,7 +1420,7 @@ pub(super) async fn price_editor(
                                 " · "
                                 <a
                                     class="text-primary hover:underline"
-                                    href="/ui/holidays"
+                                    href=(crate::app::scoped_href(cx, "/ui/holidays"))
                                 >
                                     "查看日历"
                                 </a>

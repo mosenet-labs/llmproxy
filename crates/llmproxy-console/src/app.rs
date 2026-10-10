@@ -152,3 +152,26 @@ pub(crate) fn group_store(cx: &Cx, scope: &str) -> ProviderStore {
         .unwrap_or_else(|| store.group_id());
     store.for_group(group)
 }
+
+/// Pin navigation to the current resource space, including links opened in a new tab.
+pub(crate) fn scoped_href(cx: &Cx, href: impl AsRef<str>) -> String {
+    let href = href.as_ref();
+    let Some(resources) = topcoat::context::try_request_context::<auth::ResourceStore>(cx) else {
+        return href.to_owned();
+    };
+    if !href.starts_with("/ui") || href.starts_with("/ui/assets/") || href == "/ui/login" {
+        return href.to_owned();
+    }
+    let mut url = url::Url::parse("http://console.invalid")
+        .unwrap()
+        .join(href)
+        .unwrap();
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| k != "space")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    pairs.push(("space".into(), resources.space.id.to_string()));
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    url[url::Position::BeforePath..].to_owned()
+}

@@ -218,7 +218,12 @@ impl ProviderStore {
             let mapping = Box::pin(self.find_model(&mut tx, row.model_id)).await?;
             let provider = Box::pin(self.find_provider(&mut tx, mapping.provider_id)).await?;
             let protocol = routes::protocol_from_str(&row.protocol)?;
-            if !provider.enabled || !mapping.protocols().contains(&protocol) {
+            let space = crate::model::ResourceSpaceRow::filter_by_id(
+                provider.space_id.ok_or(StoreError::Internal)?,
+            )
+            .get(&mut tx)
+            .await?;
+            if !space.enabled || !provider.enabled || !mapping.protocols().contains(&protocol) {
                 continue;
             }
             let changed =

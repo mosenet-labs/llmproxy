@@ -69,6 +69,13 @@ fn protocol_label(protocol: Protocol) -> &'static str {
 
 #[page]
 pub async fn models(cx: &Cx) -> Result<impl View> {
+    use topcoat::view::ViewExt;
+    if !crate::app::store(cx).can_manage_resources() {
+        return Ok(super::resource_catalog::member_catalog(cx, false)
+            .await?
+            .boxed());
+    }
+
     let refresh = signal(cx, || 0.0);
     let success = signal(cx, String::new);
     let failure = signal(cx, String::new);
@@ -91,7 +98,8 @@ pub async fn models(cx: &Cx) -> Result<impl View> {
             failure: $(failure),
             refresh: $(refresh)
         )
-    })
+    }
+    .boxed())
 }
 
 #[shard("/ui/_topcoat/runtime/shards/model-workspace")]
@@ -253,8 +261,7 @@ pub async fn model_workspace(
                 <a
                     class="text-[13px] text-primary hover:underline"
                     (topcoat::runtime::link_attrs(
-                        cx,
-                        "/ui/groups",
+                        cx, crate::app::scoped_href(cx, "/ui/groups"),
                         topcoat::runtime::prefetch_mode(cx),
                     ))
                 >
@@ -343,7 +350,7 @@ pub async fn model_workspace(
                     if providers.is_empty() {
                         <a
                             class=(class!(BUTTON, PRIMARY, "mt-5"))
-                            href=(href!(super::providers::list))
+                            href=(crate::app::scoped_href(cx, href!(super::providers::list) .resolve(cx)))
                         >
                             "管理 Providers"
                         </a>

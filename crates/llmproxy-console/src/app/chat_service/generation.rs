@@ -22,6 +22,8 @@ pub(crate) fn spawn(
     streaming: bool,
 ) {
     let sessions = state.chat_sessions.clone();
+    // Persist a started turn even if membership is revoked during generation.
+    let history_store = state.store.for_group(store.group_id());
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::AUTHORIZATION,
@@ -31,6 +33,10 @@ pub(crate) fn spawn(
         "x-llmproxy-group",
         history_header(&store.group_id().to_string()),
     );
+    if let (Some(user), Some(space)) = (store.actor_user_id(), store.space_id()) {
+        headers.insert("x-llmproxy-user", history_header(&user.to_string()));
+        headers.insert("x-llmproxy-space", history_header(&space.to_string()));
+    }
     let client = reqwest::Client::builder()
         .no_proxy()
         .default_headers(headers)
@@ -80,7 +86,7 @@ pub(crate) fn spawn(
             result = request => result,
         };
         if let Err(error) = (ChatService {
-            store: &store,
+            store: &history_store,
             sessions: &sessions,
         })
         .finish(&id, result)

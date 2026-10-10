@@ -29,6 +29,7 @@ mod health;
 mod holidays;
 mod migrations;
 mod models;
+mod organizations;
 mod pricing;
 mod providers;
 mod routes;
@@ -51,6 +52,10 @@ pub struct ProviderStore {
     db: Db,
     group_id: i64,
     user_id: Option<i64>,
+    space_id: Option<i64>,
+    platform_admin: bool,
+    personal_space: bool,
+    space_role: Option<crate::organizations::OrganizationRole>,
     cipher: KeyCipher,
     backend: Backend,
     // SQLite 的同步锁等待不能阻塞持锁事务所在的 async 执行线程。
@@ -90,6 +95,10 @@ impl ProviderStore {
         let cipher = KeyCipher::new(master_key)?;
         let db = Db::builder()
             .models(toasty::models!(
+                crate::model::ResourceSpaceRow,
+                crate::model::OrganizationMemberRow,
+                crate::model::OrganizationInvitationRow,
+                crate::model::GroupAccessRow,
                 crate::model::MailSettingsRow,
                 crate::model::UserRow,
                 crate::model::UserSessionRow,
@@ -129,6 +138,10 @@ impl ProviderStore {
             db,
             group_id: 1,
             user_id: None,
+            space_id: None,
+            platform_admin: false,
+            personal_space: false,
+            space_role: None,
             cipher,
             backend,
             chat_writes: Arc::default(),
@@ -243,6 +256,7 @@ impl ProviderStore {
         tx: &mut Transaction<'_>,
         write: bool,
     ) -> StoreResult<Vec<RouteBinding>> {
+        Box::pin(self.require_space(tx, write)).await?;
         let bindings = locked_bindings(tx, write, &self.backend).await?;
         let key = StoreKey::filter_by_id(1_i64)
             .first()
@@ -417,7 +431,7 @@ async fn check_unique_name(
     executor: &mut dyn Executor,
     name: &str,
     own_id: Option<i64>,
-    owner_user_id: Option<i64>,
+    space_id: Option<i64>,
 ) -> StoreResult<()> {
     // Historical providers with duplicate names keep their IDs and may be edited.
     if let Some(id) = own_id
@@ -427,9 +441,9 @@ async fn check_unique_name(
     }
     if let Some(existing) = Provider::all()
         .filter(Provider::fields().name().eq(name))
-        .filter(match owner_user_id {
-            Some(id) => Provider::fields().owner_user_id().eq(id),
-            None => Provider::fields().owner_user_id().is_none(),
+        .filter(match space_id {
+            Some(id) => Provider::fields().space_id().eq(id),
+            None => Provider::fields().space_id().is_none(),
         })
         .select(Provider::fields().id())
         .first()

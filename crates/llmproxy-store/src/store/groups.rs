@@ -19,8 +19,11 @@ impl ProviderStore {
     pub async fn list_groups(&self) -> StoreResult<Vec<GroupView>> {
         let mut connection = self.connection().await?;
         let mut query = GroupRow::all();
-        if let Some(id) = self.user_id {
-            query = query.filter(GroupRow::fields().owner_user_id().eq(id));
+        if let Some(id) = self.space_id {
+            query = query.filter(GroupRow::fields().space_id().eq(id));
+        }
+        if let Some(ids) = self.authorized_group_ids(&mut connection).await? {
+            query = query.filter(GroupRow::fields().id().in_list(ids));
         }
         Ok(query
             .order_by(GroupRow::fields().id().asc())
@@ -36,10 +39,10 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        check_unique_group_name(&mut tx, &name, None, self.user_id).await?;
+        check_unique_group_name(&mut tx, &name, None, self.resource_space_id()).await?;
         let view = group_view(
             GroupRow::create()
-                .owner_user_id(self.user_id)
+                .space_id(self.resource_space_id())
                 .name(name)
                 .enabled(true)
                 .updated_at(now()?)
@@ -66,11 +69,11 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        self.check_owner(row.owner_user_id)?;
+        self.check_owner(row.space_id)?;
         if row.version != version {
             return Err(StoreError::Conflict("组已被修改，请刷新".into()));
         }
-        check_unique_group_name(&mut tx, &name, Some(id), row.owner_user_id).await?;
+        check_unique_group_name(&mut tx, &name, Some(id), row.space_id).await?;
         row.update()
             .name(name)
             .enabled(enabled)
@@ -83,22 +86,32 @@ impl ProviderStore {
 
     pub async fn group_enabled(&self) -> StoreResult<bool> {
         let mut connection = self.connection().await?;
+        self.require_group(&mut connection).await?;
         let group = GroupRow::filter_by_id(self.group_id)
-            .first()
-            .exec(&mut connection)
-            .await?
-            .ok_or(StoreError::NotFound)?;
-        self.check_owner(group.owner_user_id)?;
-        Ok(group.enabled)
+            .get(&mut connection)
+            .await?;
+        let space = crate::model::ResourceSpaceRow::filter_by_id(
+            group.space_id.ok_or(StoreError::Internal)?,
+        )
+        .get(&mut connection)
+        .await?;
+        Ok(group.enabled && space.enabled)
     }
 
     pub(super) async fn require_group(&self, executor: &mut dyn Executor) -> StoreResult<()> {
+        self.require_space(executor, false).await?;
         let group = GroupRow::filter_by_id(self.group_id)
             .first()
-            .exec(executor)
+            .exec(&mut *executor)
             .await?
             .ok_or(StoreError::NotFound)?;
-        self.check_owner(group.owner_user_id)
+        self.check_owner(group.space_id)?;
+        if let Some(ids) = self.authorized_group_ids(executor).await?
+            && !ids.contains(&group.id)
+        {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
     }
 
     pub(super) fn owns(&self, group_id: i64) -> StoreResult<()> {
@@ -110,6 +123,7 @@ impl ProviderStore {
 
     pub async fn list_virtual_keys(&self) -> StoreResult<Vec<VirtualKeyView>> {
         let mut connection = self.connection().await?;
+        self.require_space(&mut connection, true).await?;
         Box::pin(self.require_group(&mut connection)).await?;
         Ok(VirtualKeyRow::all()
             .filter(VirtualKeyRow::fields().group_id().eq(self.group_id))
@@ -161,6 +175,7 @@ impl ProviderStore {
         }
         let secret = format!("lp-vk-{}", URL_SAFE_NO_PAD.encode(<[u8; 32]>::generate()));
         let row = VirtualKeyRow::create()
+            .created_by_user_id(self.user_id)
             .group_id(self.group_id)
             .name(name)
             .digest(digest(&secret))
@@ -202,21 +217,24 @@ impl ProviderStore {
         revoke: bool,
     ) -> StoreResult<()> {
         let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
+        self.bindings(&mut tx, true).await?;
         let mut row = VirtualKeyRow::filter_by_id(id)
             .first()
-            .exec(&mut connection)
+            .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
         self.owns(row.group_id)?;
-        Box::pin(self.require_group(&mut connection)).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         if row.version != version || row.revoked {
             return Err(StoreError::Conflict("Key 已修改或撤销".into()));
         }
         row.update()
             .enabled(enabled)
             .revoked(revoke)
-            .exec(&mut connection)
+            .exec(&mut tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -249,11 +267,18 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::Internal)?;
-        self.check_owner(group.owner_user_id)?;
+        self.check_owner(group.space_id)?;
         if !group.enabled {
             return Ok(None);
         }
-        if let Some(user_id) = group.owner_user_id {
+        let space_id = group.space_id.ok_or(StoreError::Internal)?;
+        let space = crate::model::ResourceSpaceRow::filter_by_id(space_id)
+            .get(&mut tx)
+            .await?;
+        if !space.enabled {
+            return Ok(None);
+        }
+        if let Some(user_id) = space.personal_user_id {
             let user = crate::model::UserRow::filter_by_id(user_id)
                 .first()
                 .exec(&mut tx)
@@ -263,6 +288,7 @@ impl ProviderStore {
             }
         }
         let identity = CallIdentity {
+            space_id,
             group_id: row.group_id,
             key_id: row.id,
             all_routes: row.all_routes,
@@ -431,7 +457,7 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
-        self.check_owner(group.owner_user_id)?;
+        self.check_owner(group.space_id)?;
         if group.version != version {
             return Err(StoreError::Conflict("组已被修改，请刷新后重试".into()));
         }
@@ -449,8 +475,8 @@ impl ProviderStore {
         for id in models {
             let model = Box::pin(self.find_model(&mut tx, id)).await?;
             let provider = find(&mut tx, model.provider_id).await?;
-            if provider.owner_user_id != group.owner_user_id {
-                return Err(StoreError::Validation("只能添加同一账户的模型".into()));
+            if provider.space_id != group.space_id {
+                return Err(StoreError::Validation("只能添加同一空间的模型".into()));
             }
             check_unique_alias(&mut tx, &model.alias, self.group_id, None).await?;
             models::check_route_name_available(&mut tx, &model.alias, self.group_id).await?;
@@ -458,8 +484,8 @@ impl ProviderStore {
         }
         for id in routes {
             let route = self.find_route(&mut tx, id).await?;
-            if route.owner_user_id != group.owner_user_id {
-                return Err(StoreError::Validation("只能添加同一账户的模型路由".into()));
+            if route.space_id != group.space_id {
+                return Err(StoreError::Validation("只能添加同一空间的模型路由".into()));
             }
             routes::check_unique_route_name(
                 &mut tx,
@@ -508,7 +534,7 @@ impl ProviderStore {
     }
 }
 
-fn label(name: &str) -> StoreResult<String> {
+pub(super) fn label(name: &str) -> StoreResult<String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
         return Err(StoreError::Validation("名称须为 1–80 个字符".into()));
@@ -528,6 +554,7 @@ fn group_view(row: GroupRow) -> GroupView {
 }
 fn key_view(row: VirtualKeyRow) -> VirtualKeyView {
     VirtualKeyView {
+        created_by_user_id: row.created_by_user_id,
         id: row.id,
         group_id: row.group_id,
         name: row.name,
@@ -546,13 +573,13 @@ async fn check_unique_group_name(
     executor: &mut dyn Executor,
     name: &str,
     own_id: Option<i64>,
-    owner_user_id: Option<i64>,
+    space_id: Option<i64>,
 ) -> StoreResult<()> {
     if let Some(existing) = GroupRow::all()
         .filter(GroupRow::fields().name().eq(name))
-        .filter(match owner_user_id {
-            Some(id) => GroupRow::fields().owner_user_id().eq(id),
-            None => GroupRow::fields().owner_user_id().is_none(),
+        .filter(match space_id {
+            Some(id) => GroupRow::fields().space_id().eq(id),
+            None => GroupRow::fields().space_id().is_none(),
         })
         .select(GroupRow::fields().id())
         .first()

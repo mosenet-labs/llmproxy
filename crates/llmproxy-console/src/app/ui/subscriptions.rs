@@ -29,7 +29,6 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
     let refresh = signal(cx, || 0.0);
     let _revision = refresh.get();
     let claim_form = super::forms::FormState::new(cx, Some(&refresh));
-    let personal = crate::app::store(cx).is_personal();
     let state = app_context::<AppState>(cx);
     let nodes = crate::app::store(cx)
         .subscription_nodes()
@@ -69,14 +68,11 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                 </p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
-                if personal {
-                    ownership::claim_editor(state: &claim_form, csrf: csrf.as_str())
-                }
+                ownership::claim_editor(state: &claim_form, csrf: csrf.as_str())
                 <a
                     class=(super::providers::BUTTON)
                     (topcoat::runtime::link_attrs(
-                        cx,
-                        "/ui/subscriptions",
+                        cx, crate::app::scoped_href(cx, "/ui/subscriptions"),
                         topcoat::runtime::PrefetchMode::Never,
                     ))
                 >
@@ -180,10 +176,10 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                                 if node.enabled {
                                     <a
                                         class=(TEXT_LINK)
-                                        href=(format!(
+                                        href=(crate::app::scoped_href(cx, format!(
                                             "/ui/subscriptions/models?node_id={}",
                                             node.node_id,
-                                        ))
+                                        )))
                                     >
                                         "导入模型"
                                     </a>
@@ -195,11 +191,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
             </table>
             if nodes.is_empty() {
                 <p class="m-0 px-5 py-12 text-center text-secondary">
-                    (if personal {
-                        "尚无关联节点。启动订阅代理连接此系统后，点击「关联节点」添加自己的节点。"
-                    } else {
-                        "尚无登记节点。启动本地订阅代理并连接此 llmproxy 后，节点会显示在这里。"
-                    })
+                    "尚无关联节点。启动订阅代理连接此系统后，点击「关联节点」添加到当前空间。"
                 </p>
             }
         </div>
@@ -233,15 +225,15 @@ pub async fn set_enabled(
         .set_subscription_enabled(&input.node_id, input.version, input.enabled, &target)
         .await;
     if let Err(error) = result {
-        return Ok(node_error(error));
+        return Ok(node_error(cx, error));
     }
     if input.enabled {
-        Ok(see_other(format!(
-            "/ui/subscriptions/models?node_id={}",
-            input.node_id
+        Ok(see_other(crate::app::scoped_href(
+            cx,
+            format!("/ui/subscriptions/models?node_id={}", input.node_id),
         )))
     } else {
-        Ok(see_other("/ui/subscriptions"))
+        Ok(see_other(crate::app::scoped_href(cx, "/ui/subscriptions")))
     }
 }
 
@@ -263,9 +255,9 @@ pub async fn rename(
         .rename_subscription(&input.node_id, input.version, &input.name)
         .await;
     if let Err(error) = result {
-        return Ok(node_error(error));
+        return Ok(node_error(cx, error));
     }
-    Ok(see_other("/ui/subscriptions"))
+    Ok(see_other(crate::app::scoped_href(cx, "/ui/subscriptions")))
 }
 
 #[derive(Deserialize)]
@@ -359,8 +351,8 @@ pub async fn import_models(cx: &Cx, Form(query): Form<ModelQuery>) -> Result<imp
                 "导入所选模型"
             </button>
             </div>
-            <p role="status" :hidden=$(!saved.get())>"已导入系统，尚未加入任何资源组。"<a class="ml-2 text-primary" href="/ui/groups">"前往资源组添加"</a><a class="ml-2 text-primary" href="/ui/models">"查看模型列表"</a></p>
-            <a class=(super::providers::BUTTON) href="/ui/subscriptions">"返回"</a>
+            <p role="status" :hidden=$(!saved.get())>"已导入系统，尚未加入任何资源组。"<a class="ml-2 text-primary" href=(crate::app::scoped_href(cx, "/ui/groups"))>"前往资源组添加"</a><a class="ml-2 text-primary" href=(crate::app::scoped_href(cx, "/ui/models"))>"查看模型列表"</a></p>
+            <a class=(super::providers::BUTTON) href=(crate::app::scoped_href(cx, "/ui/subscriptions"))>"返回"</a>
         </form>
     })
 }
@@ -458,11 +450,14 @@ mod tests {
     }
 }
 
-fn node_error(error: llmproxy_store::StoreError) -> topcoat::router::error::SeeOther {
+fn node_error(cx: &Cx, error: llmproxy_store::StoreError) -> topcoat::router::error::SeeOther {
     let query: String = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("error", &error.to_string())
         .finish();
-    see_other(format!("/ui/subscriptions?{query}"))
+    see_other(crate::app::scoped_href(
+        cx,
+        format!("/ui/subscriptions?{query}"),
+    ))
 }
 
 #[topcoat::view::component]

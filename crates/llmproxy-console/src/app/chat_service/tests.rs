@@ -230,3 +230,93 @@ async fn saved_history_rehydrates_ir_and_failed_save_can_retry_without_a_provide
     assert!(restored.get(&id).is_none());
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn cached_organization_chats_recheck_user_ownership_and_revoked_access() {
+    use llmproxy_store::{auth::EmailPurpose, organizations::OrganizationRole};
+    let directory = std::env::temp_dir().join(format!("llmproxy-org-chat-{}", new_id().unwrap()));
+    std::fs::create_dir(&directory).unwrap();
+    let store = ProviderStore::connect(
+        &format!("sqlite:{}", directory.join("db.sqlite").display()),
+        &STANDARD.encode([7; 32]),
+    )
+    .await
+    .unwrap();
+    store.migrate().await.unwrap();
+    let password = "organization-test-password";
+    let owner = store
+        .bootstrap_admin("owner@example.test", password)
+        .await
+        .unwrap()
+        .id;
+    let code = store
+        .issue_email_code("member@example.test", EmailPurpose::Register)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .register_user("member@example.test", &code.code, password, "")
+        .await
+        .unwrap();
+    let member = store
+        .login("member@example.test", password)
+        .await
+        .unwrap()
+        .unwrap()
+        .session
+        .user
+        .id;
+    let space = store.create_organization(owner, "Team").await.unwrap();
+    store
+        .invite_organization_member(
+            owner,
+            space.id,
+            "member@example.test",
+            OrganizationRole::Admin,
+        )
+        .await
+        .unwrap();
+    let invitation = store
+        .organization_invitations(member, None)
+        .await
+        .unwrap()
+        .remove(0);
+    store
+        .accept_organization_invitation(member, invitation.id, invitation.version)
+        .await
+        .unwrap();
+    let owner_store = store.for_space(owner, space.id).await.unwrap();
+    let member_store = store.for_space(member, space.id).await.unwrap();
+    let sessions = ChatSessions::default();
+    let owner_service = ChatService {
+        store: &owner_store,
+        sessions: &sessions,
+    };
+    let member_service = ChatService {
+        store: &member_store,
+        sessions: &sessions,
+    };
+    let selection = Selection {
+        model_id: "model".into(),
+        protocol: Protocol::OpenAiChat,
+    };
+    let id = owner_service.create(selection.clone()).await.unwrap();
+    assert!(sessions.get(&id).is_some());
+    assert!(member_service.load(&id).await.is_err());
+    let mine = member_service.create(selection).await.unwrap();
+    assert!(member_service.load(&mine).await.is_ok());
+    let row = store
+        .organization_members(owner, space.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.user_id == member)
+        .unwrap();
+    store
+        .remove_organization_member(owner, space.id, row.id, row.version, false)
+        .await
+        .unwrap();
+    assert!(member_service.load(&mine).await.is_err());
+    drop((store, owner_store, member_store));
+    std::fs::remove_dir_all(directory).unwrap();
+}

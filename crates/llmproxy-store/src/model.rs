@@ -66,7 +66,7 @@ pub(crate) struct EmailChallengeRow {
 #[derive(toasty::Model)]
 #[table = "subscription_nodes"]
 pub(crate) struct SubscriptionNode {
-    pub owner_user_id: Option<i64>,
+    pub space_id: Option<i64>,
     #[key]
     pub node_id: String,
     pub name: String,
@@ -87,7 +87,7 @@ pub(crate) struct SubscriptionNode {
 #[derive(toasty::Model)]
 #[table = "providers"]
 pub(crate) struct Provider {
-    pub owner_user_id: Option<i64>,
+    pub space_id: Option<i64>,
     #[key]
     #[auto]
     pub id: i64,
@@ -150,7 +150,7 @@ pub(crate) struct ModelMapping {
 #[derive(toasty::Model)]
 #[table = "model_routes"]
 pub(crate) struct ModelRouteRow {
-    pub owner_user_id: Option<i64>,
+    pub space_id: Option<i64>,
     #[key]
     #[auto]
     pub id: i64,
@@ -391,7 +391,7 @@ pub(crate) struct ModelHealthCheck {
 #[derive(toasty::Model)]
 #[table = "groups"]
 pub(crate) struct GroupRow {
-    pub owner_user_id: Option<i64>,
+    pub space_id: Option<i64>,
     #[key]
     #[auto]
     pub id: i64,
@@ -405,6 +405,7 @@ pub(crate) struct GroupRow {
 #[derive(toasty::Model)]
 #[table = "virtual_keys"]
 pub(crate) struct VirtualKeyRow {
+    pub created_by_user_id: Option<i64>,
     #[key]
     #[auto]
     pub id: i64,
@@ -444,4 +445,57 @@ pub(crate) struct RouteGroupMembership {
     pub id: i64,
     pub group_id: i64,
     pub route_id: i64,
+}
+
+#[derive(toasty::Model)]
+#[table = "resource_spaces"]
+pub(crate) struct ResourceSpaceRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub kind: String,
+    pub name: String,
+    pub personal_user_id: Option<i64>,
+    pub enabled: bool,
+    pub created_at: i64,
+    #[version]
+    pub version: u64,
+}
+
+#[derive(toasty::Model)]
+#[table = "organization_members"]
+pub(crate) struct OrganizationMemberRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub space_id: i64,
+    pub user_id: i64,
+    pub role: String,
+    #[version]
+    pub version: u64,
+}
+
+#[derive(toasty::Model)]
+#[table = "organization_invitations"]
+pub(crate) struct OrganizationInvitationRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub space_id: i64,
+    pub user_id: i64,
+    pub role: String,
+    pub status: String,
+    pub expires_at: i64,
+    #[version]
+    pub version: u64,
+}
+
+#[derive(toasty::Model)]
+#[table = "group_access"]
+pub(crate) struct GroupAccessRow {
+    #[key]
+    #[auto]
+    pub id: i64,
+    pub group_id: i64,
+    pub user_id: i64,
 }

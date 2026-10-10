@@ -163,6 +163,7 @@ fn public_path(path: &str) -> bool {
 pub(crate) struct ResourceStore {
     pub store: llmproxy_store::ProviderStore,
     pub groups: Vec<llmproxy_store::GroupView>,
+    pub space: llmproxy_store::organizations::ResourceSpace,
 }
 
 fn member_path(path: &str) -> bool {
@@ -175,6 +176,7 @@ fn member_path(path: &str) -> bool {
         "/ui/routes",
         "/ui/subscriptions",
         "/ui/groups",
+        "/ui/organizations",
     ]
     .iter()
     .any(|prefix| {
@@ -245,7 +247,69 @@ fn member_path(path: &str) -> bool {
             | "/ui/_topcoat/runtime/procedures/auth-logout"
             | "/ui/_topcoat/runtime/procedures/auth-save-profile"
             | "/ui/_topcoat/runtime/procedures/auth-change-password"
-    )
+    ) || path == "/ui/_topcoat/runtime/procedures/organization-action"
+}
+
+fn selected_space(cx: &Cx) -> Result<Option<i64>> {
+    let referer;
+    let query = if (method(cx) == "POST" || uri(cx).path().starts_with("/ui/_topcoat/runtime/"))
+        && uri(cx).query().is_none()
+    {
+        referer = headers(cx)
+            .get("referer")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| url::Url::parse(s).ok());
+        if let Some(ref url) = referer {
+            let host = headers(cx)
+                .get("host")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("");
+            if url[url::Position::BeforeHost..url::Position::AfterPort] != *host {
+                return Err(topcoat::router::error::forbidden().into());
+            }
+        }
+        referer.as_ref().and_then(|u| u.query())
+    } else {
+        uri(cx).query()
+    };
+    let values: Vec<_> = url::form_urlencoded::parse(query.unwrap_or("").as_bytes())
+        .filter(|(k, _)| k == "space")
+        .collect();
+    if values.len() > 1 {
+        return Err(topcoat::router::error::bad_request("空间参数无效").into());
+    }
+    values
+        .first()
+        .map(|(_, v)| {
+            v.parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| topcoat::router::error::bad_request("空间参数无效").into())
+        })
+        .transpose()
+}
+
+fn organization_member_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/ui"
+            | "/ui/"
+            | "/ui/chat"
+            | "/ui/models"
+            | "/ui/routes"
+            | "/ui/account"
+            | "/ui/groups/select"
+    ) || path.starts_with("/ui/organizations")
+        || path.starts_with("/ui/assets/")
+        || path.contains("/fonts/")
+        || path == "/ui/_topcoat/runtime/procedures/organization-action"
+        || path.starts_with("/ui/_topcoat/runtime/procedures/auth-")
+        || ((path.starts_with("/ui/_topcoat/runtime/procedures/")
+            || path.starts_with("/ui/_topcoat/runtime/shards/"))
+            && path
+                .rsplit('/')
+                .next()
+                .is_some_and(|s| s.contains("chat") && !s.starts_with("reprobe")))
 }
 
 pub(crate) async fn guard(cx: &Cx, body: Body, next: Next<'_>) -> Result<Response> {
@@ -260,16 +324,44 @@ pub(crate) async fn guard(cx: &Cx, body: Body, next: Next<'_>) -> Result<Respons
         if !public_path(path) && !member_path(path) && identity.user.role != UserRole::Admin {
             return Err(topcoat::router::error::forbidden().into());
         }
-        let resources = if identity.user.role == UserRole::Admin {
-            state.store.clone()
-        } else {
-            Box::pin(state.store.for_user(identity.user.id)).await?
-        };
+        let spaces = state.store.list_spaces(identity.user.id).await?;
+        let selected = selected_space(cx)?.unwrap_or_else(|| {
+            if identity.user.role == UserRole::Admin {
+                1
+            } else {
+                spaces[0].id
+            }
+        });
+        let space = spaces
+            .iter()
+            .find(|s| s.id == selected)
+            .cloned()
+            .ok_or_else(topcoat::router::error::forbidden)?;
+        let platform_page = identity.user.role == UserRole::Admin && !member_path(path);
+        if space.role == llmproxy_store::organizations::OrganizationRole::Member
+            && !organization_member_path(path)
+            && !public_path(path)
+            && !platform_page
+        {
+            return Err(topcoat::router::error::forbidden().into());
+        }
+        if !space.enabled
+            && !(path.starts_with("/ui/organizations")
+                || path == "/ui/account"
+                || path == "/ui/_topcoat/runtime/procedures/organization-action"
+                || path.starts_with("/ui/_topcoat/runtime/procedures/auth-")
+                || public_path(path)
+                || platform_page)
+        {
+            return Err(topcoat::router::error::forbidden().into());
+        }
+        let resources = Box::pin(state.store.for_space(identity.user.id, selected)).await?;
         let groups = Box::pin(resources.list_groups()).await?;
         let child = cx.with(identity);
         let child = child.with(ResourceStore {
             store: resources,
             groups,
+            space,
         });
         return next.run(&child, body).await;
     }

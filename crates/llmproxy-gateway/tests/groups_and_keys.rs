@@ -605,7 +605,7 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
                 .await
                 .unwrap();
             assert_eq!(response.status(), 303);
-            assert_eq!(response.headers()["location"], page);
+            assert_eq!(response.headers()["location"], format!("{page}?space=1"));
             assert!(
                 response.headers()["set-cookie"]
                     .to_str()
@@ -637,8 +637,24 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
             .await
             .unwrap();
         assert_eq!(response.status(), 303);
-        assert_eq!(response.headers()["location"], "/ui/groups");
-        assert!(!response.headers().contains_key("set-cookie"));
+        if matches!(destination, "/ui/models" | "/ui/routes") {
+            assert_eq!(
+                response.headers()["location"],
+                format!("{destination}?space=1")
+            );
+            assert!(
+                response.headers()["set-cookie"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!(
+                        "llmproxy_{}_group=",
+                        destination.trim_start_matches("/ui/")
+                    ))
+            );
+        } else {
+            assert_eq!(response.headers()["location"], "/ui/groups?space=1");
+            assert!(!response.headers().contains_key("set-cookie"));
+        }
     }
     let cookie = format!(
         "{}; llmproxy_keys_group=1; llmproxy_models_group=1; llmproxy_chat_group=1",
@@ -666,7 +682,7 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
             .split("</header>")
             .next()
             .unwrap();
-        assert!(header.contains("href=\"/ui/groups\""));
+        assert!(header.contains("href=\"/ui/groups?space=1\""));
         assert!(header.contains(">second详情</strong>"));
         assert!(page.contains("id=\"group-tab-models\""));
         assert!(page.contains("id=\"group-tab-keys\""));
@@ -975,9 +991,9 @@ async fn group_resources_procedure_and_gateway_respect_independent_memberships()
         .unwrap();
     assert!(html.find("id=\"nav-chat\"").unwrap() < html.find("id=\"nav-providers\"").unwrap());
     assert!(!html.contains("管理资源"));
-    assert!(html.contains(&format!("href=\"/ui/groups/{}\"", group.id)));
-    assert!(!html.contains(&format!("href=\"/ui/groups/{}/models\"", group.id)));
-    assert!(!html.contains(&format!("href=\"/ui/groups/{}/keys\"", group.id)));
+    assert!(html.contains(&format!("href=\"/ui/groups/{}?space=1\"", group.id)));
+    assert!(!html.contains(&format!("href=\"/ui/groups/{}/models?space=1\"", group.id)));
+    assert!(!html.contains(&format!("href=\"/ui/groups/{}/keys?space=1\"", group.id)));
     assert!(!html.contains("/ui/_topcoat/runtime/procedures/save-group-resources"));
     let page = client
         .get(format!("{base}/ui/groups/{}/models", group.id))
@@ -1654,7 +1670,10 @@ async fn personal_console_scopes_pages_procedures_cookies_and_gateway_calls() {
         .await
         .unwrap();
     assert_eq!(selection.status(), 303);
-    assert_eq!(selection.headers()["location"], "/ui/keys");
+    assert_eq!(
+        selection.headers()["location"],
+        format!("/ui/keys?space={}", first.space_id().unwrap())
+    );
     assert!(
         selection.headers()["set-cookie"]
             .to_str()

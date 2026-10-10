@@ -203,7 +203,7 @@ pub async fn holiday_workspace(
             <span>"红色：放假区间　黄色：调休上班"</span>
             <a
                 class="text-primary hover:underline"
-                href=(holiday_notice::SOURCE_2026)
+                href=(crate::app::scoped_href(cx, holiday_notice::SOURCE_2026))
                 target="_blank"
                 rel="noopener noreferrer"
             >

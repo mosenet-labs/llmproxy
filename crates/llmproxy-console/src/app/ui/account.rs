@@ -29,7 +29,7 @@ pub(super) async fn header_account(cx: &Cx) -> Result<impl View> {
                 icon(data: DOWN_OUTLINED, size: 12)
             )
             dropdown_menu_content(attrs: attributes! { class="left-auto! right-0 min-w-44 border-solid bg-white! text-secondary! shadow-lg" },
-                <a href="/ui/account" class="flex items-center rounded-md px-3 py-2 text-sm text-secondary hover:bg-surface hover:text-primary focus-visible:bg-surface">"个人账户"</a>
+                <a href=(crate::app::scoped_href(cx, "/ui/account")) class="flex items-center rounded-md px-3 py-2 text-sm text-secondary hover:bg-surface hover:text-primary focus-visible:bg-surface">"个人账户"</a>
                 dropdown_menu_separator()
                 <form id="header-logout-form" method="post" action="/ui/login" class="m-0" (submit)>
                     <input type="hidden" name="csrf" value=(csrf.as_str())>

@@ -229,15 +229,46 @@ impl ProxyHttp for Gateway {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1);
-            let enabled = tokio::time::timeout(
-                Duration::from_secs(5),
-                self.history_store.for_group(ctx.group_id).group_enabled(),
-            )
-            .await
-            .map_err(|_| Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable"))?
-            .map_err(|_| {
-                Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable")
-            })?;
+            let user = request
+                .headers
+                .get("x-llmproxy-user")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i64>().ok());
+            let space = request
+                .headers
+                .get("x-llmproxy-space")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i64>().ok());
+            let scoped = match (user, space) {
+                (Some(user), Some(space)) => self
+                    .history_store
+                    .for_space(user, space)
+                    .await
+                    .map_err(|_| {
+                        Error::explain(ErrorType::HTTPStatus(403), "space access denied")
+                    })?,
+                (None, None)
+                    if !request.headers.contains_key("x-llmproxy-user")
+                        && !request.headers.contains_key("x-llmproxy-space") =>
+                {
+                    self.history_store.clone()
+                }
+                _ => {
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(403),
+                        "invalid space context",
+                    ));
+                }
+            }
+            .for_group(ctx.group_id);
+            let enabled = tokio::time::timeout(Duration::from_secs(5), scoped.group_enabled())
+                .await
+                .map_err(|_| {
+                    Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable")
+                })?
+                .map_err(|_| {
+                    Error::explain(ErrorType::HTTPStatus(503), "authentication unavailable")
+                })?;
             if !enabled {
                 return Err(Error::explain(ErrorType::HTTPStatus(403), "group disabled"));
             }
@@ -261,6 +292,7 @@ impl ProxyHttp for Gateway {
             .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(401), "invalid API key"))?;
             ctx.group_id = identity.group_id;
             tracing::info!(
+                space_id = identity.space_id,
                 group_id = identity.group_id,
                 virtual_key_id = identity.key_id,
                 "model request authenticated"

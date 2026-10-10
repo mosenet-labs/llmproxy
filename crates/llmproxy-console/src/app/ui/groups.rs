@@ -44,7 +44,7 @@ async fn group_heading(cx: &Cx, group: &GroupView) -> Result<impl View> {
                 </p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
-                <a class=(BUTTON) href=(href!(groups))>"返回资源组"</a>
+                <a class=(BUTTON) href=(crate::app::scoped_href(cx, href!(groups) .resolve(cx)))>"返回资源组"</a>
             </div>
         </header>
     })
@@ -94,6 +94,7 @@ pub async fn group_selector(cx: &Cx, scope: &str) -> Result<impl View> {
         <form method="post" action="/ui/groups/select" class="m-0 flex min-w-0 flex-wrap items-center gap-2" aria-label="切换资源组" data-group-selector=(scope)>
             <input type="hidden" name="csrf" value=(csrf.as_str())>
             <input type="hidden" name="return_to" value=(format!("/ui/{scope}"))>
+            <input type="hidden" name="space" value=(crate::app::store(cx).space_id().unwrap().to_string())>
             <label for=(selector_id.as_str()) class="whitespace-nowrap text-[13px] text-secondary">"资源组"</label>
             <select id=(selector_id.as_str()) name="group_id" class="h-9! w-[160px] max-[640px]:w-[140px]" aria-label="当前资源组">
                 #[key(group.id)]
@@ -164,7 +165,7 @@ async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
                                 <td>tag(tone: if group.enabled { TagTone::Success } else { TagTone::Default }, (if group.enabled { "已启用" } else { "已停用" }))</td>
                                 <td>
                                     <div class="flex justify-end gap-4">
-                                        <a class=(LINK) href=(href!(group::details, group::GroupId(group.id)))>"详情"</a>
+                                        <a class=(LINK) href=(crate::app::scoped_href(cx, href!(group::details, group::GroupId(group.id)) .resolve(cx)))>"详情"</a>
                                         <button class=(LINK) type="button" (native_dialog_trigger_attributes(cx, &format!("group-edit-{}", group.id)))>"编辑"</button>
                                     </div>
                                     group_editor(group: Some(group), controls: controls, csrf: csrf.as_str())
@@ -208,7 +209,7 @@ pub async fn keys(cx: &Cx) -> Result<impl View> {
                     (format!("当前组：{}", group.name))
                 </span>
             </div>
-            <a class=(BUTTON) href=(href!(group::details, group::GroupId(group_id)))>
+            <a class=(BUTTON) href=(crate::app::scoped_href(cx, href!(group::details, group::GroupId(group_id)) .resolve(cx)))>
                 "管理组内模型"
             </a>
         </header>
@@ -476,14 +477,17 @@ pub async fn select(cx: &Cx, Form(input): Form<GroupForm>) -> Result<Response> {
     let destination = match input.return_to.as_str() {
         "/ui/chat" => "/ui/chat".to_owned(),
         "/ui/keys" => "/ui/keys".to_owned(),
+        "/ui/models" => "/ui/models".to_owned(),
+        "/ui/routes" => "/ui/routes".to_owned(),
         _ => "/ui/groups".to_owned(),
     };
-    response
-        .headers_mut()
-        .insert("location", destination.parse()?);
+    response.headers_mut().insert(
+        "location",
+        crate::app::scoped_href(cx, &destination).parse()?,
+    );
     if let Some(scope) = destination
         .strip_prefix("/ui/")
-        .filter(|scope| matches!(*scope, "chat" | "keys"))
+        .filter(|scope| matches!(*scope, "chat" | "keys" | "models" | "routes"))
     {
         response.headers_mut().insert(
             "set-cookie",

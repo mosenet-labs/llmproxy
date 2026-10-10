@@ -179,7 +179,7 @@ async fn exercise_http(database_url: &str) {
     );
     let alias = client.get(&base).send().await.unwrap();
     assert_eq!(alias.status(), StatusCode::SEE_OTHER);
-    assert_eq!(alias.headers()["location"], "/ui/chat");
+    assert_eq!(alias.headers()["location"], "/ui/chat?space=1");
     let models = client.get(format!("{base}/models")).send().await.unwrap();
     assert_eq!(models.status(), StatusCode::OK);
     assert_navigation(&models.text().await.unwrap(), "/ui/models", "Models");
@@ -1753,14 +1753,14 @@ fn assert_navigation(html: &str, active_href: &str, title: &str) {
     assert_eq!(nav.matches("data-topcoat-link=").count(), 6);
     let chat_link = nav
         .split("<a ")
-        .find(|anchor| anchor.contains("href=\"/ui/chat\""))
+        .find(|anchor| anchor.contains("href=\"/ui/chat?space=1\""))
         .unwrap();
     assert!(chat_link.contains("data-topcoat-link=\"never\""));
     let active = nav
         .split("<a ")
         .find(|anchor| anchor.contains("aria-current=\"page\""))
         .unwrap();
-    assert!(active.contains(&format!("href=\"{active_href}\"")));
+    assert!(active.contains(&format!("href=\"{active_href}?space=1\"")));
     assert!(active.contains(&format!(
         "id=\"nav-{}\"",
         active_href.trim_start_matches("/ui/")

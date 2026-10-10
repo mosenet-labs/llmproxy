@@ -188,6 +188,9 @@ impl ProviderSnapshot {
                 continue;
             }
             let scoped = store.for_group(group.id);
+            if !scoped.group_enabled().await.map_err(|_| ())? {
+                continue;
+            }
             let routes = scoped.load_model_routes().await.map_err(|_| ())?;
             let ids: HashSet<_> = routes.iter().filter_map(|route| route.model_id).collect();
             let mut unavailable = HashSet::new();
