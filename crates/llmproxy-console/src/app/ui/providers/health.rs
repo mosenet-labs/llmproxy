@@ -1,5 +1,7 @@
 use super::*;
+use crate::app::AppState;
 use llmproxy_store::health::{HealthCheckView, HealthStatus};
+use topcoat::context::app_context;
 use topcoat::view::{emit, live};
 
 fn status(checks: &[HealthCheckView]) -> (&'static str, TagTone) {
@@ -49,7 +51,7 @@ pub async fn provider_health(cx: &Cx, provider_id: i64, enabled: bool) -> Result
         loop {
             let mut checks = Vec::new();
             if enabled {
-                checks = state.store.provider_health_checks(provider_id).await?;
+                checks = crate::app::store(cx).provider_health_checks(provider_id).await?;
             }
             let (label, tone) = status(&checks);
             let token = emit! {

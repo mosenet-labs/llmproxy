@@ -1,4 +1,6 @@
 use super::*;
+use crate::app::AppState;
+use topcoat::context::app_context;
 
 #[procedure("/ui/_topcoat/runtime/procedures/preview-models")]
 pub async fn preview_models(cx: &Cx, payload: String) -> Result<Outcome> {
@@ -15,12 +17,7 @@ pub async fn preview_models(cx: &Cx, payload: String) -> Result<Outcome> {
         .as_deref()
         .and_then(|value| value.parse::<i64>().ok());
     let result = match input.preview_input() {
-        Ok(candidate) => match app_context::<AppState>(cx)
-            .store
-            .clone()
-            .preview_target(id, candidate)
-            .await
-        {
+        Ok(candidate) => match crate::app::store(cx).preview_target(id, candidate).await {
             Ok(target) => query_models(target).await,
             Err(error) => Err(error.to_string()),
         },
@@ -68,7 +65,7 @@ pub async fn save_provider(cx: &Cx, payload: String) -> Result<Outcome> {
 pub(super) async fn save_input(cx: &Cx, mut input: ProviderForm) -> Result<Outcome> {
     check_csrf(cx, &input.csrf)?;
     let state = app_context::<AppState>(cx);
-    let store = &app_context::<AppState>(cx).store.clone();
+    let store = &crate::app::store(cx);
     let record_id = input.id.as_deref().and_then(|id| id.parse::<i64>().ok());
     let result: std::result::Result<ProviderView, StoreError> = async {
         let status = ProbeStatus::parse(&input.models_probe_status)?;
@@ -150,7 +147,7 @@ pub async fn provider_action(
 pub(super) async fn action_input(cx: &Cx, input: ActionForm) -> Result<Outcome> {
     check_csrf(cx, &input.csrf)?;
     let state = app_context::<AppState>(cx);
-    let store = &app_context::<AppState>(cx).store.clone();
+    let store = &crate::app::store(cx);
     let (action, label, completed) = match input.action.as_str() {
         "enable" => ("enable", "启用", "已启用"),
         "disable" => ("disable", "停用", "已停用"),

@@ -5,7 +5,11 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
-        let providers = Provider::all()
+        let mut query = Provider::all();
+        if let Some(id) = self.user_id {
+            query = query.filter(Provider::fields().owner_user_id().eq(id));
+        }
+        let providers = query
             .order_by(Provider::fields().id().asc())
             .exec(&mut tx)
             .await?;
@@ -21,7 +25,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         let bindings = self.bindings(&mut tx, false).await?;
-        let provider = find(&mut tx, id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, id)).await?;
         let view = provider.view(active_protocols(&bindings, id))?;
         tx.commit().await?;
         Ok(view)
@@ -42,8 +46,9 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        check_unique_name(&mut tx, &input.name, None).await?;
+        check_unique_name(&mut tx, &input.name, None, self.user_id).await?;
         let provider = Provider::create()
+            .owner_user_id(self.user_id)
             .name(input.name)
             .openai_chat_path(input.paths.openai_chat)
             .openai_responses_path(input.paths.openai_responses)
@@ -91,9 +96,10 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         let mut bindings = self.bindings(&mut tx, true).await?;
-        let mut provider = find(&mut tx, id).await?;
+        let mut provider = Box::pin(self.find_provider(&mut tx, id)).await?;
+        self.require_editable_provider(&mut tx, id).await?;
         check_version(&provider, version)?;
-        check_unique_name(&mut tx, &input.name, Some(id)).await?;
+        check_unique_name(&mut tx, &input.name, Some(id), provider.owner_user_id).await?;
         if ModelMapping::all()
             .filter(ModelMapping::fields().provider_id().eq(id))
             .select((
@@ -181,7 +187,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         let mut bindings = self.bindings(&mut tx, true).await?;
-        let mut provider = find(&mut tx, id).await?;
+        let mut provider = Box::pin(self.find_provider(&mut tx, id)).await?;
         check_version(&provider, version)?;
         provider
             .update()
@@ -197,10 +203,15 @@ impl ProviderStore {
     }
 
     pub async fn activate(&self, id: i64, version: u64, protocol: Protocol) -> StoreResult<()> {
+        if self.is_personal() {
+            return Err(StoreError::Validation(
+                "系统默认 Provider 仅可由管理员设置，请通过资源组调用模型".into(),
+            ));
+        }
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         let mut bindings = self.bindings(&mut tx, true).await?;
-        let mut provider = find(&mut tx, id).await?;
+        let mut provider = Box::pin(self.find_provider(&mut tx, id)).await?;
         check_version(&provider, version)?;
         if !provider.enabled {
             return Err(StoreError::Conflict(
@@ -219,7 +230,7 @@ impl ProviderStore {
         if let Some(previous_id) = binding.provider_id.filter(|previous| *previous != id) {
             // Changing another provider's visible active state must invalidate its
             // stale edit form, too.
-            let mut previous = find(&mut tx, previous_id).await?;
+            let mut previous = Box::pin(self.find_provider(&mut tx, previous_id)).await?;
             previous.update().updated_at(now()?).exec(&mut tx).await?;
         }
         provider.update().updated_at(now()?).exec(&mut tx).await?;
@@ -232,7 +243,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         let mut bindings = self.bindings(&mut tx, true).await?;
-        let provider = find(&mut tx, id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, id)).await?;
         check_version(&provider, version)?;
         if ModelMapping::all()
             .filter(ModelMapping::fields().provider_id().eq(id))
@@ -267,6 +278,9 @@ impl ProviderStore {
                 continue;
             };
             let provider = find(&mut tx, id).await?;
+            if self.check_owner(provider.owner_user_id).is_err() {
+                continue;
+            }
             let protocol = protocol(&binding.protocol)?;
             let Some(upstream_path) = provider.paths().get(protocol).map(str::to_owned) else {
                 // Treat inconsistent storage as a failed snapshot, not partial config.
@@ -285,7 +299,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
-        let provider = find(&mut tx, id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, id)).await?;
         let target = ModelProbeTarget {
             host: provider.host,
             port: provider.port,
@@ -313,6 +327,11 @@ impl ProviderStore {
         id: Option<i64>,
         input: ProviderInput,
     ) -> StoreResult<ModelProbeTarget> {
+        if let Some(id) = id {
+            self.get(id).await?;
+            let mut connection = self.connection().await?;
+            self.require_editable_provider(&mut connection, id).await?;
+        }
         let input = validate(input, id.is_none())?;
         let secret = if input.api_key.is_empty() {
             let id = id.ok_or(StoreError::Internal)?;
@@ -330,5 +349,31 @@ impl ProviderStore {
             anthropic_version: input.anthropic_version,
             messages_auth: input.messages_auth,
         })
+    }
+
+    // Subscription providers carry the platform relay key. A personal account
+    // must not redirect that key through edits or an unsaved preview target.
+    async fn require_editable_provider(
+        &self,
+        executor: &mut dyn Executor,
+        id: i64,
+    ) -> StoreResult<()> {
+        if self.is_personal()
+            && crate::model::SubscriptionNode::all()
+                .filter(
+                    crate::model::SubscriptionNode::fields()
+                        .provider_id()
+                        .eq(id),
+                )
+                .first()
+                .exec(executor)
+                .await?
+                .is_some()
+        {
+            return Err(StoreError::Validation(
+                "订阅节点的 Provider 由系统维护，请在订阅节点页面管理".into(),
+            ));
+        }
+        Ok(())
     }
 }

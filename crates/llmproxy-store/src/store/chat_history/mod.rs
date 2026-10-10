@@ -91,6 +91,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let timestamp = now()?;
         let row = ChatConversationRow::create()
             .id(key)
@@ -133,6 +134,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let rows = ChatConversationRow::all()
             .filter(ChatConversationRow::fields().owner().eq(self.chat_owner()))
             .filter(ChatConversationRow::fields().archived().eq(archived))
@@ -152,6 +154,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let row = ChatConversationRow::filter_by_id(key)
             .first()
             .exec(&mut tx)
@@ -178,6 +181,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let mut row = self.chat_row(&mut tx, key).await?;
         if row.archived {
             return Err(StoreError::Conflict("会话已归档，请恢复后继续".into()));
@@ -210,6 +214,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let mut room = self.chat_row(&mut tx, &input.conversation_id).await?;
         if room.archived {
             return Err(StoreError::Conflict("会话已归档，请恢复后继续".into()));
@@ -326,6 +331,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let row = ChatTurnRow::filter_by_id(key)
             .first()
             .exec(&mut tx)
@@ -385,6 +391,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let row = ChatTurnRow::filter_by_id(key)
             .first()
             .exec(&mut tx)
@@ -430,6 +437,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let row = ChatTurnRow::filter_by_id(key)
             .first()
             .exec(&mut tx)
@@ -535,6 +543,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let mut room = self.chat_row(&mut tx, key).await?;
         if room.active_turn.is_some() {
             return Err(StoreError::Conflict(
@@ -561,6 +570,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.verify_tool_key(&mut tx).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let room = self.chat_row(&mut tx, key).await?;
         if room.active_turn.is_some() {
             return Err(StoreError::Conflict(

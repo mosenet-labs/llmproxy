@@ -179,7 +179,7 @@ async fn exercise_http(database_url: &str) {
     );
     let alias = client.get(&base).send().await.unwrap();
     assert_eq!(alias.status(), StatusCode::SEE_OTHER);
-    assert_eq!(alias.headers()["location"], "/ui/providers");
+    assert_eq!(alias.headers()["location"], "/ui/chat");
     let models = client.get(format!("{base}/models")).send().await.unwrap();
     assert_eq!(models.status(), StatusCode::OK);
     assert_navigation(&models.text().await.unwrap(), "/ui/models", "Models");

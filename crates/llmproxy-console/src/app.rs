@@ -116,6 +116,13 @@ impl Layer for ConnectionGuard {
     }
 }
 
+/// 当前会话授权的资源目录；普通用户使用个人作用域。
+pub(crate) fn store(cx: &Cx) -> ProviderStore {
+    topcoat::context::request_context::<auth::ResourceStore>(cx)
+        .store
+        .clone()
+}
+
 /// Cookie 固定在页面与 runtime 握手的请求上下文中；切组使用完整导航。
 pub(crate) fn group_store(cx: &Cx, scope: &str) -> ProviderStore {
     let prefix = format!("llmproxy_{scope}_group=");
@@ -134,6 +141,14 @@ pub(crate) fn group_store(cx: &Cx, scope: &str) -> ProviderStore {
         })
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|id| *id > 0)
-        .unwrap_or(1);
-    app_context::<AppState>(cx).store.for_group(group)
+        .unwrap_or_else(|| store(cx).group_id());
+    let store = store(cx);
+    let resources = topcoat::context::request_context::<auth::ResourceStore>(cx);
+    let group = resources
+        .groups
+        .iter()
+        .find(|row| row.id == group)
+        .map(|row| row.id)
+        .unwrap_or_else(|| store.group_id());
+    store.for_group(group)
 }

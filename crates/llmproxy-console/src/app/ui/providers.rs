@@ -8,7 +8,7 @@ use llmproxy_store::{
 use serde::Deserialize;
 use topcoat::{
     Result,
-    context::{Cx, app_context},
+    context::Cx,
     icon::icon,
     router::{
         content::{Form, Json},
@@ -29,7 +29,7 @@ use topcoat_ant_design::{
 use url::{Host, Url};
 
 use crate::app::{
-    AppState, check_csrf,
+    check_csrf,
     model_catalog::{DEFAULT_ANTHROPIC_VERSION, query_models},
 };
 
@@ -213,7 +213,7 @@ pub async fn provider_list(
     let applied_q = signal(cx, || q);
     let applied_protocol = signal(cx, || protocol);
     let applied_state = signal(cx, || state);
-    let all = app_context::<AppState>(cx).store.clone().list().await?;
+    let all = crate::app::store(cx).list().await?;
     let query = ListQuery {
         q: applied_q.get(),
         protocol: applied_protocol.get(),
@@ -244,9 +244,7 @@ pub async fn provider_list(
     let defaults = if edit_id.is_empty() {
         ProviderForm::default()
     } else {
-        app_context::<AppState>(cx)
-            .store
-            .clone()
+        crate::app::store(cx)
             .get(edit_id.parse::<i64>()?)
             .await?
             .into()

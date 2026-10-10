@@ -63,7 +63,6 @@ pub async fn account(cx: &Cx) -> Result<impl View> {
                     forms::feedback(state: &profile)
                     <dl class="m-0 grid gap-5 text-sm sm:grid-cols-2"><div class="grid gap-2"><dt class="font-medium">"邮箱"</dt><dd class="m-0 break-all text-secondary">(user.email.as_str())</dd></div><div class="grid gap-2"><dt class="font-medium">"平台角色"</dt><dd class="m-0 text-secondary">(if user.role == llmproxy_store::auth::UserRole::Admin { "平台管理员" } else { "普通用户" })</dd></div></dl>
                     <label class=(class!(FIELD, "max-w-[420px]")) for="profile-name">"显示名称"<input id="profile-name" name="display_name" value=(user.display_name.as_str()) required=(true) maxlength="80" autocomplete="nickname"></label>
-                    if user.role != llmproxy_store::auth::UserRole::Admin { <p role="status" class="m-0 rounded-md bg-surface p-3 text-[13px] leading-relaxed text-secondary">"当前仅开放个人账户功能。模型、资源组和 Chat 的使用权限将在组织授权接入后开放。"</p> }
                     <div><button type="submit" class=(class!(BUTTON, PRIMARY)) :disabled=$(busy.get())>"保存信息"</button></div>
                 </form>
             </section>

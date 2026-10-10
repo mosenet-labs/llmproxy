@@ -1,4 +1,6 @@
 use super::*;
+use crate::app::AppState;
+use topcoat::context::app_context;
 
 #[derive(Deserialize)]
 struct ModelForm {
@@ -49,9 +51,7 @@ pub async fn load_model_candidates(
         let id = provider_id
             .parse::<i64>()
             .map_err(|_| "请选择 Provider".to_owned())?;
-        let target = app_context::<AppState>(cx)
-            .store
-            .clone()
+        let target = crate::app::store(cx)
             .probe_enabled_target(id)
             .await
             .map_err(|error| error.to_string())?;
@@ -75,7 +75,7 @@ pub async fn save_models(
             .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?,
     };
     check_csrf(cx, &input.csrf)?;
-    let store = &app_context::<AppState>(cx).store.clone();
+    let store = &crate::app::store(cx);
     let result: std::result::Result<String, StoreError> = async {
         let provider_id = input
             .provider_id
@@ -133,7 +133,7 @@ pub async fn save_model(cx: &Cx, csrf: String, model_json: String) -> Result<Out
         .map_err(|_| topcoat::router::error::bad_request("无效的模型表单"))?;
     input.id = input.id.filter(|id| !id.is_empty());
     input.version = input.version.filter(|v| !v.is_empty());
-    let store = &app_context::<AppState>(cx).store.clone();
+    let store = &crate::app::store(cx);
     let result: std::result::Result<String, StoreError> = async {
         let provider_id = input
             .provider_id
@@ -216,7 +216,7 @@ pub async fn save_model(cx: &Cx, csrf: String, model_json: String) -> Result<Out
 #[procedure("/ui/_topcoat/runtime/procedures/delete-model")]
 pub async fn delete_model(cx: &Cx, csrf: String, id: String, version: String) -> Result<Outcome> {
     check_csrf(cx, &csrf)?;
-    let store = &app_context::<AppState>(cx).store.clone();
+    let store = &crate::app::store(cx);
     let id = id.parse::<i64>()?;
     let version = version.parse::<u64>()?;
     let model = store.get_model(id).await?;
@@ -251,6 +251,10 @@ pub async fn probe_saved_model(
             .filter(|value| (1..=1024).contains(value))
             .ok_or_else(|| "输出上限须为 1–1024 token".to_owned())?;
         let state = app_context::<AppState>(cx);
+        crate::app::store(cx)
+            .get_model(id)
+            .await
+            .map_err(|error| error.to_string())?;
         let (alias, probe) = state.health.probe(id, protocol, max_output_tokens).await?;
         let label = format!("「{}」{}", alias, protocol_label(protocol));
         let thinking_note = if probe.thinking_mode == ThinkingMode::Low {

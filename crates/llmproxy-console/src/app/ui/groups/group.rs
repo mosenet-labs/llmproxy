@@ -48,7 +48,7 @@ async fn workspace(cx: &Cx, initial_tab: &str) -> Result<impl View> {
     let created = signal(cx, || false);
     let group_id = *path_param::<GroupId>(cx)?;
     let group = find_group(cx, group_id).await?;
-    let store = app_context::<AppState>(cx).store.for_group(group_id);
+    let store = crate::app::store(cx).for_group(group_id);
     let routes = store.list_routes().await?;
     let models = store.list_models().await?;
     let csrf = crate::app::auth::csrf_token(cx);

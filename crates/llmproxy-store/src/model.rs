@@ -66,6 +66,7 @@ pub(crate) struct EmailChallengeRow {
 #[derive(toasty::Model)]
 #[table = "subscription_nodes"]
 pub(crate) struct SubscriptionNode {
+    pub owner_user_id: Option<i64>,
     #[key]
     pub node_id: String,
     pub name: String,
@@ -86,6 +87,7 @@ pub(crate) struct SubscriptionNode {
 #[derive(toasty::Model)]
 #[table = "providers"]
 pub(crate) struct Provider {
+    pub owner_user_id: Option<i64>,
     #[key]
     #[auto]
     pub id: i64,
@@ -148,6 +150,7 @@ pub(crate) struct ModelMapping {
 #[derive(toasty::Model)]
 #[table = "model_routes"]
 pub(crate) struct ModelRouteRow {
+    pub owner_user_id: Option<i64>,
     #[key]
     #[auto]
     pub id: i64,
@@ -388,10 +391,10 @@ pub(crate) struct ModelHealthCheck {
 #[derive(toasty::Model)]
 #[table = "groups"]
 pub(crate) struct GroupRow {
+    pub owner_user_id: Option<i64>,
     #[key]
     #[auto]
     pub id: i64,
-    #[unique]
     pub name: String,
     pub enabled: bool,
     #[version]

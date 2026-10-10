@@ -1,3 +1,5 @@
+pub(crate) mod ownership;
+
 use crate::app::{AppState, check_csrf};
 use llmproxy_core::subscription::Health;
 use serde::Deserialize;
@@ -24,14 +26,16 @@ pub struct NodeQuery {
 
 #[page]
 pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
+    let refresh = signal(cx, || 0.0);
+    let _revision = refresh.get();
+    let claim_form = super::forms::FormState::new(cx, Some(&refresh));
+    let personal = crate::app::store(cx).is_personal();
     let state = app_context::<AppState>(cx);
-    let nodes = app_context::<AppState>(cx)
-        .store
-        .clone()
+    let nodes = crate::app::store(cx)
         .subscription_nodes()
         .await
         .map_err(|error| bad_request(error.to_string()))?;
-    let providers = app_context::<AppState>(cx).store.clone().list().await?;
+    let providers = crate::app::store(cx).list().await?;
     let presence = state.subscriptions.lock().unwrap().clone();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -48,6 +52,7 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
         .count();
     let csrf = crate::app::auth::csrf_token(cx);
     Ok(view! {
+        super::forms::feedback(state: &claim_form)
         if let Some(error) = &query.error {
             <p
                 class="rounded border border-red-200 bg-red-50 p-4 text-red-700"
@@ -63,16 +68,21 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
                     "查看个人订阅代理的连接与后端状态，并决定是否提供代理服务。"
                 </p>
             </div>
-            <a
-                class=(super::providers::BUTTON)
-                (topcoat::runtime::link_attrs(
-                    cx,
-                    "/ui/subscriptions",
-                    topcoat::runtime::PrefetchMode::Never,
-                ))
-            >
-                "刷新状态"
-            </a>
+            <div class="flex flex-wrap items-center gap-3">
+                if personal {
+                    ownership::claim_editor(state: &claim_form, csrf: csrf.as_str())
+                }
+                <a
+                    class=(super::providers::BUTTON)
+                    (topcoat::runtime::link_attrs(
+                        cx,
+                        "/ui/subscriptions",
+                        topcoat::runtime::PrefetchMode::Never,
+                    ))
+                >
+                    "刷新状态"
+                </a>
+            </div>
         </div>
         <div
             class="mb-6 flex items-center gap-6 rounded-lg border border-border bg-white px-5 py-4 text-sm"
@@ -185,7 +195,11 @@ pub async fn nodes(cx: &Cx, Form(query): Form<NodeQuery>) -> Result<impl View> {
             </table>
             if nodes.is_empty() {
                 <p class="m-0 px-5 py-12 text-center text-secondary">
-                    "尚无登记节点。启动本地订阅代理并连接此 llmproxy 后，节点会显示在这里。"
+                    (if personal {
+                        "尚无关联节点。启动订阅代理连接此系统后，点击「关联节点」添加自己的节点。"
+                    } else {
+                        "尚无登记节点。启动本地订阅代理并连接此 llmproxy 后，节点会显示在这里。"
+                    })
                 </p>
             }
         </div>
@@ -215,9 +229,7 @@ pub async fn set_enabled(
         port: state.port,
         key,
     };
-    let result = app_context::<AppState>(cx)
-        .store
-        .clone()
+    let result = crate::app::store(cx)
         .set_subscription_enabled(&input.node_id, input.version, input.enabled, &target)
         .await;
     if let Err(error) = result {
@@ -247,9 +259,7 @@ pub async fn rename(
     Form(input): Form<Rename>,
 ) -> Result<topcoat::router::error::SeeOther> {
     check_csrf(cx, &input.csrf)?;
-    let result = app_context::<AppState>(cx)
-        .store
-        .clone()
+    let result = crate::app::store(cx)
         .rename_subscription(&input.node_id, input.version, &input.name)
         .await;
     if let Err(error) = result {
@@ -264,9 +274,7 @@ pub struct ModelQuery {
 }
 
 async fn import_provider(cx: &Cx, node_id: &str) -> Result<i64> {
-    let node = app_context::<AppState>(cx)
-        .store
-        .clone()
+    let node = crate::app::store(cx)
         .subscription_nodes()
         .await?
         .into_iter()
@@ -279,16 +287,12 @@ async fn import_provider(cx: &Cx, node_id: &str) -> Result<i64> {
 #[page("/ui/subscriptions/models")]
 pub async fn import_models(cx: &Cx, Form(query): Form<ModelQuery>) -> Result<impl View> {
     let id = import_provider(cx, &query.node_id).await?;
-    let provider = app_context::<AppState>(cx).store.clone().get(id).await?;
-    let target = app_context::<AppState>(cx)
-        .store
-        .clone()
-        .probe_enabled_target(id)
-        .await?;
+    let provider = crate::app::store(cx).get(id).await?;
+    let target = crate::app::store(cx).probe_enabled_target(id).await?;
     let candidates = crate::app::model_catalog::query_models(target)
         .await
         .map_err(bad_request)?;
-    let model_store = app_context::<AppState>(cx).store.clone();
+    let model_store = crate::app::store(cx);
     let existing = model_store.list_all_models().await?;
     let busy = signal(cx, || false);
     let error = signal(cx, String::new);
@@ -380,13 +384,9 @@ pub async fn save_import(cx: &Cx, payload: String) -> Result<std::result::Result
 
 async fn import_selected_models(cx: &Cx, input: Import) -> Result<()> {
     let id = import_provider(cx, &input.node_id).await?;
-    let provider = app_context::<AppState>(cx).store.clone().get(id).await?;
+    let provider = crate::app::store(cx).get(id).await?;
     let candidates = crate::app::model_catalog::query_models(
-        app_context::<AppState>(cx)
-            .store
-            .clone()
-            .probe_enabled_target(id)
-            .await?,
+        crate::app::store(cx).probe_enabled_target(id).await?,
     )
     .await
     .map_err(bad_request)?;
@@ -401,11 +401,7 @@ async fn import_selected_models(cx: &Cx, input: Import) -> Result<()> {
     let mut selected = input.models;
     selected.sort();
     selected.dedup();
-    let existing = app_context::<AppState>(cx)
-        .store
-        .clone()
-        .list_all_models()
-        .await?;
+    let existing = crate::app::store(cx).list_all_models().await?;
     let mappings = selected
         .into_iter()
         .filter(|model| {
@@ -423,11 +419,7 @@ async fn import_selected_models(cx: &Cx, input: Import) -> Result<()> {
         })
         .collect::<Vec<_>>();
     if !mappings.is_empty() {
-        app_context::<AppState>(cx)
-            .store
-            .clone()
-            .create_models(mappings)
-            .await?;
+        crate::app::store(cx).create_models(mappings).await?;
     }
     Ok(())
 }

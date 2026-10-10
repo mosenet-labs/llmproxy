@@ -1,9 +1,9 @@
-use crate::app::{AppState, check_csrf, group_store};
+use crate::app::{check_csrf, group_store};
 use llmproxy_store::{GroupView, VirtualKeyView};
 use serde::Deserialize;
 use topcoat::{
     Result,
-    context::{Cx, app_context},
+    context::Cx,
     icon::icon,
     router::{content::Form, href, page, response::Response, route},
     runtime::{Event, Signal, procedure, shard, signal},
@@ -24,8 +24,7 @@ use editor::{group_editor, key_editor, secret_dialog};
 pub(crate) use resources::{remove_group_resource, save_group_resources};
 
 async fn find_group(cx: &Cx, id: i64) -> Result<GroupView> {
-    app_context::<AppState>(cx)
-        .store
+    crate::app::store(cx)
         .list_groups()
         .await?
         .into_iter()
@@ -120,7 +119,7 @@ pub async fn groups(cx: &Cx) -> Result<impl View> {
 
 #[component]
 async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
-    let store = app_context::<AppState>(cx).store.clone();
+    let store = crate::app::store(cx);
     let group_rows = store.list_groups().await?;
     let paging = Pagination::new(cx);
     let page_range = paging.range(group_rows.len());
@@ -182,16 +181,55 @@ async fn group_workspace(cx: &Cx, controls: &Controls) -> Result<impl View> {
     })
 }
 
-#[route(GET "/ui/keys")]
-pub async fn legacy_keys(cx: &Cx) -> Result<topcoat::router::error::SeeOther> {
-    Ok(topcoat::router::error::see_other(
-        href!(
-            group::details,
-            group::GroupId(group_store(cx, "keys").group_id())
+#[page("/ui/keys")]
+pub async fn keys(cx: &Cx) -> Result<impl View> {
+    crate::app::request_connection(cx);
+    let store = group_store(cx, "keys");
+    let group_id = store.group_id();
+    let group = find_group(cx, group_id).await?;
+    let controls = Controls::new(cx);
+    let secret = signal(cx, String::new);
+    let created = signal(cx, || false);
+    let models = store.list_models().await?;
+    let routes = store.list_routes().await?;
+    let csrf = crate::app::auth::csrf_token(cx);
+    let refresh = controls.refresh.clone();
+    let success = controls.success.clone();
+    let failure = controls.failure.clone();
+    Ok(view! {
+        feedback(controls: &controls)
+        <header class="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-3">
+                group_selector(scope: "keys")
+                <span
+                    class="text-[13px] text-secondary"
+                    data-current-group=(group_id.to_string())
+                >
+                    (format!("当前组：{}", group.name))
+                </span>
+            </div>
+            <a class=(BUTTON) href=(href!(group::details, group::GroupId(group_id)))>
+                "管理组内模型"
+            </a>
+        </header>
+        key_workspace(
+            group_id: group_id,
+            revision: $(refresh.get()),
+            refresh: $(refresh),
+            success: $(success),
+            failure: $(failure)
         )
-        .query([("tab", "keys")])
-        .resolve(cx),
-    ))
+        key_editor(
+            group_id: group_id,
+            models: &models,
+            routes: &routes,
+            controls: &controls,
+            csrf: csrf.as_str(),
+            secret: &secret,
+            created: &created
+        )
+        secret_dialog(secret: &secret, open: &created)
+    })
 }
 
 #[shard("/ui/_topcoat/runtime/shards/key-workspace")]
@@ -210,7 +248,7 @@ pub async fn key_workspace(
         success,
         failure,
     };
-    let store = app_context::<AppState>(cx).store.for_group(group_id);
+    let store = crate::app::store(cx).for_group(group_id);
     let current = find_group(cx, group_id).await?;
     let key_rows = store.list_virtual_keys().await?;
     let paging = Pagination::new(cx);
@@ -425,8 +463,7 @@ pub struct GroupForm {
 #[route(POST "/ui/groups/select")]
 pub async fn select(cx: &Cx, Form(input): Form<GroupForm>) -> Result<Response> {
     check_csrf(cx, &input.csrf)?;
-    if !app_context::<AppState>(cx)
-        .store
+    if !crate::app::store(cx)
         .list_groups()
         .await?
         .iter()
@@ -438,9 +475,7 @@ pub async fn select(cx: &Cx, Form(input): Form<GroupForm>) -> Result<Response> {
     *response.status_mut() = 303u16.try_into()?;
     let destination = match input.return_to.as_str() {
         "/ui/chat" => "/ui/chat".to_owned(),
-        "/ui/keys" => href!(group::details, group::GroupId(input.group_id))
-            .query([("tab", "keys")])
-            .resolve(cx),
+        "/ui/keys" => "/ui/keys".to_owned(),
         _ => "/ui/groups".to_owned(),
     };
     response
@@ -448,7 +483,7 @@ pub async fn select(cx: &Cx, Form(input): Form<GroupForm>) -> Result<Response> {
         .insert("location", destination.parse()?);
     if let Some(scope) = destination
         .strip_prefix("/ui/")
-        .filter(|scope| *scope == "chat")
+        .filter(|scope| matches!(*scope, "chat" | "keys"))
     {
         response.headers_mut().insert(
             "set-cookie",
@@ -466,7 +501,7 @@ pub async fn select(cx: &Cx, Form(input): Form<GroupForm>) -> Result<Response> {
 pub async fn save_group(cx: &Cx, payload: String) -> Result<Outcome> {
     let Form(input) = Form::<GroupForm>::from_bytes(payload.as_bytes())?;
     check_csrf(cx, &input.csrf)?;
-    let store = app_context::<AppState>(cx).store.clone();
+    let store = crate::app::store(cx);
     let result = if input.group_id == 0 {
         store.create_group(&input.name).await
     } else {
@@ -497,9 +532,7 @@ pub async fn create_key(cx: &Cx, payload: String) -> Result<Outcome> {
             .unwrap_or("")
     };
     check_csrf(cx, value("csrf"))?;
-    let store = app_context::<AppState>(cx)
-        .store
-        .for_group(value("group_id").parse::<i64>()?);
+    let store = crate::app::store(cx).for_group(value("group_id").parse::<i64>()?);
     let expires_at = if value("expires_at").is_empty() {
         None
     } else {
@@ -543,7 +576,7 @@ pub struct KeyAction {
 pub async fn change_key(cx: &Cx, payload: String) -> Result<Outcome> {
     let Form(input) = Form::<KeyAction>::from_bytes(payload.as_bytes())?;
     check_csrf(cx, &input.csrf)?;
-    let store = app_context::<AppState>(cx).store.for_group(input.group_id);
+    let store = crate::app::store(cx).for_group(input.group_id);
     let (result, message) = match input.action.as_str() {
         "revoke" => (
             store.revoke_virtual_key(input.id, input.version).await,

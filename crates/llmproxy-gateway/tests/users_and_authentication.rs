@@ -168,7 +168,7 @@ async fn first_admin_is_initialized_on_the_login_page_once_without_smtp() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn console_requires_sessions_and_limits_members_to_their_account() {
+async fn console_requires_sessions_and_opens_personal_resources_for_members() {
     let database = Database::new().await;
     let gateway = Gateway::database(&database.url, MASTER_KEY);
     let base = format!("http://{}", gateway.address);
@@ -319,18 +319,39 @@ async fn console_requires_sessions_and_limits_members_to_their_account() {
     assert!(html.contains("个人账户"));
     assert!(html.contains("id=\"account-confirmation-error\""));
     assert!(!html.contains("id=\"nav-users\""));
-    assert!(!html.contains("id=\"nav-providers\""));
+    for menu in [
+        "chat",
+        "providers",
+        "models",
+        "routes",
+        "subscriptions",
+        "keys",
+        "account",
+    ] {
+        assert!(
+            html.contains(&format!("id=\"nav-{menu}\"")),
+            "missing menu {menu}"
+        );
+    }
+    assert!(!html.contains("当前仅开放个人账户功能"));
     assert!(!html.contains("id=\"nav-settings\""));
     for path in [
         "providers",
         "models",
         "groups",
-        "users",
         "chat",
         "routes",
         "subscriptions",
-        "settings",
+        "keys",
     ] {
+        let response = member_client
+            .get(format!("{base}/ui/{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "member page {path}");
+    }
+    for path in ["users", "settings", "holidays"] {
         assert_eq!(
             member_client
                 .get(format!("{base}/ui/{path}"))
@@ -341,14 +362,31 @@ async fn console_requires_sessions_and_limits_members_to_their_account() {
             StatusCode::FORBIDDEN
         );
     }
-    let denied = call(
+    let saved = call(
         &member_client,
         &base,
         "save-group",
-        &[("csrf", &member.session.csrf), ("name", "forbidden")],
+        &[
+            ("csrf", &member.session.csrf),
+            ("name", "personal-test"),
+            ("group_id", "0"),
+        ],
     )
     .await;
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert!(saved.text().await.unwrap().contains("组已创建"));
+    assert!(
+        database
+            .store
+            .for_user(member.session.user.id)
+            .await
+            .unwrap()
+            .list_groups()
+            .await
+            .unwrap()
+            .iter()
+            .any(|group| group.name == "personal-test")
+    );
     for action in ["save-mail-settings", "test-mail-settings"] {
         let denied = call(
             &member_client,
@@ -603,7 +641,7 @@ async fn smtp_registration_and_password_recovery_use_real_public_procedures() {
         .next()
         .unwrap()
         .to_owned();
-    assert!(logged.text().await.unwrap().contains("/ui/account"));
+    assert!(logged.text().await.unwrap().contains("/ui/chat"));
     let sent = call(
         &client,
         &base,
@@ -650,7 +688,7 @@ async fn smtp_registration_and_password_recovery_use_real_public_procedures() {
     )
     .await;
     assert!(logged.headers().contains_key("set-cookie"));
-    assert!(logged.text().await.unwrap().contains("/ui/account"));
+    assert!(logged.text().await.unwrap().contains("/ui/chat"));
     let version = database
         .store
         .mail_settings()

@@ -7,15 +7,16 @@ async fn provider_name(
     name: &str,
     custom: Option<&str>,
     own_id: Option<i64>,
+    owner_user_id: Option<i64>,
 ) -> StoreResult<String> {
     if let Some(custom) = custom {
-        match check_unique_name(tx, custom, own_id).await {
+        match check_unique_name(tx, custom, own_id, owner_user_id).await {
             Ok(()) => return Ok(custom.to_owned()),
             Err(StoreError::Conflict(_)) => {}
             Err(error) => return Err(error),
         }
     }
-    check_unique_name(tx, name, own_id).await?;
+    check_unique_name(tx, name, own_id, owner_user_id).await?;
     Ok(name.to_owned())
 }
 
@@ -36,12 +37,52 @@ fn view(row: SubscriptionNode) -> StoreResult<SubscriptionNodeView> {
 impl ProviderStore {
     pub async fn subscription_nodes(&self) -> StoreResult<Vec<SubscriptionNodeView>> {
         let mut connection = self.connection().await?;
-        SubscriptionNode::all()
+        let mut query = SubscriptionNode::all();
+        if let Some(id) = self.user_id {
+            query = query.filter(SubscriptionNode::fields().owner_user_id().eq(id));
+        }
+        query
             .exec(&mut connection)
             .await?
             .into_iter()
             .map(view)
             .collect()
+    }
+
+    /// Claim a newly registered node by proving possession of its local identity secret.
+    /// Nodes already admitted by the platform cannot be transferred this way.
+    pub async fn claim_subscription(&self, node_id: &str, node_key: &str) -> StoreResult<()> {
+        let user_id = self.user_id.ok_or(StoreError::NotFound)?;
+        let mut connection = self.connection().await?;
+        let mut tx = self.transaction(&mut connection, true).await?;
+        self.bindings(&mut tx, true).await?;
+        let mut node = SubscriptionNode::filter_by_node_id(node_id.trim())
+            .first()
+            .exec(&mut tx)
+            .await?
+            .ok_or_else(|| StoreError::Validation("节点身份或密钥无效".into()))?;
+        let secret = self.cipher.decrypt(&node.encrypted_node_key)?;
+        let node_key = node_key.trim();
+        let matching = secret.len() == node_key.len()
+            && secret
+                .bytes()
+                .zip(node_key.bytes())
+                .fold(0, |difference, (a, b)| difference | (a ^ b))
+                == 0;
+        if !matching || node.owner_user_id.is_some() || node.provider_id.is_some() || node.enabled {
+            return Err(StoreError::Validation(
+                "节点身份或密钥无效，或节点已被关联".into(),
+            ));
+        }
+        let version = node.config_version + 1;
+        node.update()
+            .owner_user_id(user_id)
+            .config_version(version)
+            .updated_at(now()?)
+            .exec(&mut tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn register_subscription(
@@ -76,6 +117,7 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
         {
+            self.check_owner(row.owner_user_id)?;
             let secret = self.cipher.decrypt(&row.encrypted_node_key)?;
             let matching = secret.len() == registration.node_key.len()
                 && secret
@@ -97,6 +139,7 @@ impl ProviderStore {
             row
         } else {
             SubscriptionNode::create()
+                .owner_user_id(self.user_id)
                 .node_id(&registration.node_id)
                 .name(if registration.name.trim().is_empty() {
                     format!("node-{}", &registration.node_id[..6])
@@ -140,13 +183,21 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
+        self.check_owner(node.owner_user_id)?;
         if node.config_version != version {
             return Err(StoreError::Conflict("节点配置已变化，请刷新".into()));
         }
         let custom = (!name.is_empty()).then_some(name);
-        let display_name = provider_name(&mut tx, &node.name, custom, node.provider_id).await?;
+        let display_name = provider_name(
+            &mut tx,
+            &node.name,
+            custom,
+            node.provider_id,
+            node.owner_user_id,
+        )
+        .await?;
         if let Some(id) = node.provider_id {
-            let mut provider = find(&mut tx, id).await?;
+            let mut provider = Box::pin(self.find_provider(&mut tx, id)).await?;
             provider
                 .update()
                 .name(display_name)
@@ -192,13 +243,20 @@ impl ProviderStore {
             .exec(&mut tx)
             .await?
             .ok_or(StoreError::NotFound)?;
+        self.check_owner(node.owner_user_id)?;
         if node.config_version != version {
             return Err(StoreError::Conflict("节点配置已变化，请刷新".into()));
         }
         let provider_id = if let Some(id) = node.provider_id {
-            let display_name =
-                provider_name(&mut tx, &node.name, node.provider_name.as_deref(), Some(id)).await?;
-            let mut provider = find(&mut tx, id).await?;
+            let display_name = provider_name(
+                &mut tx,
+                &node.name,
+                node.provider_name.as_deref(),
+                Some(id),
+                node.owner_user_id,
+            )
+            .await?;
+            let mut provider = Box::pin(self.find_provider(&mut tx, id)).await?;
             provider
                 .update()
                 .name(display_name)
@@ -218,9 +276,16 @@ impl ProviderStore {
             }
             Some(id)
         } else if enabled {
-            let name =
-                provider_name(&mut tx, &node.name, node.provider_name.as_deref(), None).await?;
+            let name = provider_name(
+                &mut tx,
+                &node.name,
+                node.provider_name.as_deref(),
+                None,
+                node.owner_user_id,
+            )
+            .await?;
             let provider = Provider::create()
+                .owner_user_id(node.owner_user_id)
                 .name(name)
                 .openai_chat_path(None)
                 .openai_responses_path(Some(format!("/internal/subscriptions/{node_id}/responses")))

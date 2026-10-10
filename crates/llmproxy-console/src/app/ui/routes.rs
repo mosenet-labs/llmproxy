@@ -1,11 +1,11 @@
 use super::providers::{BUTTON, PAGE_HEADING, PROTOCOLS, protocol_label};
-use crate::app::{AppState, check_csrf};
+use crate::app::check_csrf;
 use llmproxy_core::protocol::Protocol;
 use llmproxy_store::{ModelRouteInput, ModelRouteTargetInput, ModelRouteView, StoreError};
 use serde::Deserialize;
 use topcoat::{
     Result,
-    context::{Cx, app_context},
+    context::Cx,
     router::{content::Form, page},
     runtime::{Event, procedure, signal},
     view::{View, class, view},
@@ -24,11 +24,7 @@ pub struct ListQuery {
 
 #[page]
 pub async fn routes(cx: &Cx, Form(query): Form<ListQuery>) -> Result<impl View> {
-    let all = app_context::<AppState>(cx)
-        .store
-        .clone()
-        .list_all_routes()
-        .await?;
+    let all = crate::app::store(cx).list_all_routes().await?;
     let needle = query.q.trim().to_lowercase();
     let filtered: Vec<_> = all
         .iter()
@@ -283,11 +279,7 @@ pub struct EditQuery {
 
 #[page("./edit")]
 pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
-    let route_list = app_context::<AppState>(cx)
-        .store
-        .clone()
-        .list_all_routes()
-        .await?;
+    let route_list = crate::app::store(cx).list_all_routes().await?;
     let route = match query.id {
         Some(id) => Some(
             route_list
@@ -297,11 +289,7 @@ pub async fn edit(cx: &Cx, Form(query): Form<EditQuery>) -> Result<impl View> {
         ),
         None => None,
     };
-    let mut models = app_context::<AppState>(cx)
-        .store
-        .clone()
-        .list_all_models()
-        .await?;
+    let mut models = crate::app::store(cx).list_all_models().await?;
     if let Some(route) = &route {
         models.sort_by_key(|model| {
             route
@@ -788,7 +776,7 @@ pub async fn save_route(
             })
             .collect(),
     };
-    let store = &app_context::<AppState>(cx).store.clone();
+    let store = &crate::app::store(cx);
     let result = if id.is_empty() {
         store.create_route(input).await
     } else {
@@ -806,13 +794,7 @@ pub async fn save_route(
 pub async fn delete_route(cx: &Cx, csrf: String, id: String, version: String) -> Result<Outcome> {
     check_csrf(cx, &csrf)?;
     let result = match (id.parse::<i64>(), version.parse::<u64>()) {
-        (Ok(id), Ok(version)) => {
-            app_context::<AppState>(cx)
-                .store
-                .clone()
-                .delete_route(id, version)
-                .await
-        }
+        (Ok(id), Ok(version)) => crate::app::store(cx).delete_route(id, version).await,
         _ => Err(StoreError::Validation("路由版本无效，请刷新后重试".into())),
     };
     Ok(result

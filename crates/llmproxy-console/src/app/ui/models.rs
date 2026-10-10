@@ -12,7 +12,7 @@ use llmproxy_store::{
 use serde::{Deserialize, Serialize};
 use topcoat::{
     Result,
-    context::{Cx, app_context},
+    context::Cx,
     icon::icon,
     router::{href, page},
     runtime::{Event, Signal, procedure, shard, signal},
@@ -27,7 +27,7 @@ use topcoat_ant_design::{
 };
 
 use crate::app::{
-    AppState, check_csrf,
+    check_csrf,
     model_catalog::{ModelCandidate, query_models},
 };
 
@@ -112,17 +112,9 @@ pub async fn model_workspace(
     let applied_provider = signal(cx, String::new);
     let page = signal(cx, || 1usize);
     let page_size = signal(cx, || "10".to_owned());
-    let all = app_context::<AppState>(cx)
-        .store
-        .clone()
-        .list_all_models()
-        .await?;
-    let price_plans = app_context::<AppState>(cx)
-        .store
-        .clone()
-        .list_current_price_plans()
-        .await?;
-    let all_providers = app_context::<AppState>(cx).store.clone().list().await?;
+    let all = crate::app::store(cx).list_all_models().await?;
+    let price_plans = crate::app::store(cx).list_current_price_plans().await?;
+    let all_providers = crate::app::store(cx).list().await?;
     let providers: Vec<_> = all_providers
         .iter()
         .filter(|provider| provider.enabled)
@@ -173,11 +165,7 @@ pub async fn model_workspace(
     let mut health_enabled = HashSet::new();
     let mut health_states = std::collections::HashMap::new();
     for model in &page_models {
-        let checks = app_context::<AppState>(cx)
-            .store
-            .clone()
-            .model_health_checks(model.id)
-            .await?;
+        let checks = crate::app::store(cx).model_health_checks(model.id).await?;
         if checks.iter().any(|check| check.config.enabled) {
             health_enabled.insert(model.id);
         }
@@ -601,12 +589,7 @@ pub async fn model_candidates(cx: &Cx, provider_id: String, open: bool) -> Resul
             Ok(Vec::new())
         } else {
             match provider_id.parse::<i64>() {
-                Ok(id) => match app_context::<AppState>(cx)
-                    .store
-                    .clone()
-                    .probe_enabled_target(id)
-                    .await
-                {
+                Ok(id) => match crate::app::store(cx).probe_enabled_target(id).await {
                     Ok(target) => query_models(target).await,
                     Err(error) => Err(error.to_string()),
                 },

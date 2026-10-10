@@ -3,12 +3,12 @@ use super::*;
 impl ProviderStore {
     /// Routes explicitly selected for this group (Chat and gateway scope).
     pub async fn list_routes(&self) -> StoreResult<Vec<ModelRouteView>> {
-        self.routes_in_group(Some(self.group_id)).await
+        Box::pin(self.routes_in_group(Some(self.group_id))).await
     }
 
     /// System route catalog, including routes not selected for any group.
     pub async fn list_all_routes(&self) -> StoreResult<Vec<ModelRouteView>> {
-        self.routes_in_group(None).await
+        Box::pin(self.routes_in_group(None)).await
     }
 
     async fn routes_in_group(&self, group: Option<i64>) -> StoreResult<Vec<ModelRouteView>> {
@@ -17,7 +17,11 @@ impl ProviderStore {
         self.bindings(&mut tx, false).await?;
         let mut route_memberships = groups::route_group_map(&mut tx).await?;
         let mut query = ModelRouteRow::all();
+        if let Some(id) = self.user_id {
+            query = query.filter(ModelRouteRow::fields().owner_user_id().eq(id));
+        }
         if let Some(id) = group {
+            self.for_group(id).require_group(&mut tx).await?;
             query = query.filter(
                 ModelRouteRow::fields().id().in_list(
                     route_memberships
@@ -61,8 +65,16 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
+        for target in &input.targets {
+            let model = Box::pin(self.find_model(&mut tx, target.model_id)).await?;
+            let provider = find(&mut tx, model.provider_id).await?;
+            if provider.owner_user_id != self.user_id {
+                return Err(StoreError::Validation("候选模型必须属于同一账户".into()));
+            }
+        }
         check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;
         let row = ModelRouteRow::create()
+            .owner_user_id(self.user_id)
             .name(input.name)
             .protocol(input.protocol.as_str().to_owned())
             .provider_protocol(input.provider_protocol.as_str().to_owned())
@@ -86,12 +98,19 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let mut row = find_route(&mut tx, id).await?;
+        let mut row = self.find_route(&mut tx, id).await?;
         check_route_version(&row, version)?;
         for group_id in groups::route_groups(&mut tx, id).await? {
             check_unique_route_name(&mut tx, &input.name, group_id, input.protocol, Some(id))
                 .await?;
             check_model_alias_available(&mut tx, &input.name, group_id).await?;
+        }
+        for target in &input.targets {
+            let model = Box::pin(self.find_model(&mut tx, target.model_id)).await?;
+            let provider = find(&mut tx, model.provider_id).await?;
+            if provider.owner_user_id != row.owner_user_id {
+                return Err(StoreError::Validation("候选模型必须属于同一账户".into()));
+            }
         }
         check_route_targets(&mut tx, input.provider_protocol, &input.targets).await?;
         ModelRouteTargetRow::all()
@@ -117,7 +136,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let row = find_route(&mut tx, id).await?;
+        let row = self.find_route(&mut tx, id).await?;
         check_route_version(&row, version)?;
         ModelRouteTargetRow::all()
             .filter(ModelRouteTargetRow::fields().route_id().eq(id))
@@ -131,14 +150,6 @@ impl ProviderStore {
         tx.commit().await?;
         Ok(())
     }
-}
-
-async fn find_route(executor: &mut dyn Executor, id: i64) -> StoreResult<ModelRouteRow> {
-    ModelRouteRow::filter_by_id(id)
-        .first()
-        .exec(executor)
-        .await?
-        .ok_or(StoreError::NotFound)
 }
 
 async fn route_view(tx: &mut Transaction<'_>, row: &ModelRouteRow) -> StoreResult<ModelRouteView> {

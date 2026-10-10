@@ -26,12 +26,12 @@ pub(super) async fn check_route_name_available(
 impl ProviderStore {
     /// Call entries explicitly selected for this group (Chat and gateway scope).
     pub async fn list_models(&self) -> StoreResult<Vec<ModelMappingView>> {
-        self.models_in_group(Some(self.group_id)).await
+        Box::pin(self.models_in_group(Some(self.group_id))).await
     }
 
     /// System catalog, including resources that have not been selected for any group.
     pub async fn list_all_models(&self) -> StoreResult<Vec<ModelMappingView>> {
-        self.models_in_group(None).await
+        Box::pin(self.models_in_group(None)).await
     }
 
     async fn models_in_group(&self, group: Option<i64>) -> StoreResult<Vec<ModelMappingView>> {
@@ -40,7 +40,15 @@ impl ProviderStore {
         self.bindings(&mut tx, false).await?;
         let mut memberships = groups::model_group_map(&mut tx).await?;
         let mut query = ModelMapping::all();
+        if self.is_personal() {
+            query = query.filter(
+                ModelMapping::fields()
+                    .provider_id()
+                    .in_list(self.provider_ids(&mut tx).await?),
+            );
+        }
         if let Some(id) = group {
+            self.for_group(id).require_group(&mut tx).await?;
             query = query.filter(
                 ModelMapping::fields().id().in_list(
                     memberships
@@ -77,8 +85,8 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
-        let mapping = find_mapping(&mut tx, id).await?;
-        let provider = find(&mut tx, mapping.provider_id).await?;
+        let mapping = Box::pin(self.find_model(&mut tx, id)).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, mapping.provider_id)).await?;
         let mut view = mapping_view(&mapping, &provider)?;
         view.group_ids = groups::model_groups(&mut tx, mapping.id).await?;
         tx.commit().await?;
@@ -90,7 +98,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let provider = find(&mut tx, input.provider_id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, input.provider_id)).await?;
         check_mapping_provider(&provider, &input)?;
         let upstream_model_id = input.upstream_model_id.clone();
         let catalog_price = input.reference_price.clone();
@@ -157,7 +165,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let provider = find(&mut tx, provider_id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, provider_id)).await?;
         let mut saved = Vec::with_capacity(validated.len());
         for input in validated {
             let label = input.upstream_model_id.clone();
@@ -210,9 +218,15 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let mut mapping = find_mapping(&mut tx, id).await?;
+        let mut mapping = Box::pin(self.find_model(&mut tx, id)).await?;
         check_mapping_version(&mapping, version)?;
-        let provider = find(&mut tx, input.provider_id).await?;
+        let previous = find(&mut tx, mapping.provider_id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, input.provider_id)).await?;
+        if provider.owner_user_id != previous.owner_user_id {
+            return Err(StoreError::Validation(
+                "不能将模型移动到其他账户的 Provider".into(),
+            ));
+        }
         check_mapping_provider(&provider, &input)?;
         for target in ModelRouteTargetRow::all()
             .filter(ModelRouteTargetRow::fields().model_id().eq(id))
@@ -272,7 +286,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let mapping = find_mapping(&mut tx, id).await?;
+        let mapping = Box::pin(self.find_model(&mut tx, id)).await?;
         check_mapping_version(&mapping, version)?;
         let references = ModelRouteTargetRow::all()
             .filter(ModelRouteTargetRow::fields().model_id().eq(id))
@@ -297,6 +311,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
+        Box::pin(self.require_group(&mut tx)).await?;
         let mut routes = Vec::new();
         let mut route_names = HashSet::new();
         let mut target_groups = routes::route_target_groups(&mut tx).await?;
@@ -412,12 +427,12 @@ impl ProviderStore {
     pub async fn load_model_route(&self, id: i64, protocol: Protocol) -> StoreResult<ModelRoute> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
-        let mapping = find_mapping(&mut tx, id).await?;
+        let mapping = Box::pin(self.find_model(&mut tx, id)).await?;
         self.require_model_member(&mut tx, mapping.id).await?;
         if !mapping.protocols().contains(&protocol) {
             return Err(StoreError::Validation("模型未配置所选协议".into()));
         }
-        let provider = find(&mut tx, mapping.provider_id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, mapping.provider_id)).await?;
         let upstream_path = provider
             .paths()
             .get(protocol)

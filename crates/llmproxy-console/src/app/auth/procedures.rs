@@ -40,12 +40,7 @@ async fn start_session(cx: &Cx, created: CreatedSession) -> Result<Outcome> {
         app_context::<AppState>(cx).store.logout(old).await?;
     }
     set_cookie(cx, &created.secret, 7 * 24 * 3600)?;
-    Ok(Ok(if created.session.user.role == UserRole::Admin {
-        "/ui/chat"
-    } else {
-        "/ui/account"
-    }
-    .into()))
+    Ok(Ok("/ui/chat".into()))
 }
 
 #[procedure("/ui/_topcoat/runtime/procedures/auth-bootstrap-admin")]

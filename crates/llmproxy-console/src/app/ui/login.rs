@@ -11,13 +11,8 @@ use topcoat_ant_design::{head_assets, tabs, tabs_content, tabs_list, tabs_trigge
 
 #[page]
 pub async fn login(cx: &Cx) -> Result<impl View> {
-    if let Ok(identity) = auth::session(cx) {
-        let destination = if identity.user.role == llmproxy_store::auth::UserRole::Admin {
-            "/ui/chat"
-        } else {
-            "/ui/account"
-        };
-        return Err(topcoat::router::error::see_other(destination).into());
+    if auth::session(cx).is_ok() {
+        return Err(topcoat::router::error::see_other("/ui/chat").into());
     }
     let state = app_context::<AppState>(cx);
     let initialized = state.store.admin_initialized().await?;

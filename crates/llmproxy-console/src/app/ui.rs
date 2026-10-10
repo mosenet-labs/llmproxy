@@ -28,13 +28,7 @@ use topcoat_ant_design::icons::{
 const NAV_ITEM: &str = "flex min-h-11 items-center gap-3 whitespace-nowrap rounded-md px-3 py-2.5 text-sm text-secondary hover:bg-surface hover:text-primary aria-[current=page]:bg-primary-soft aria-[current=page]:font-medium aria-[current=page]:text-[#0958d9] max-[900px]:gap-2 max-[900px]:px-2 max-[900px]:text-[13px]";
 #[route(GET)]
 pub async fn providers_redirect(cx: &Cx) -> Result<topcoat::router::error::SeeOther> {
-    Ok(see_other(
-        if crate::app::auth::session(cx)?.user.role == llmproxy_store::auth::UserRole::Admin {
-            href!(providers::list).resolve(cx)
-        } else {
-            "/ui/account".into()
-        },
-    ))
+    Ok(see_other(href!(chat::chat).resolve(cx)))
 }
 
 #[layout]
@@ -48,6 +42,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     let users_page = uri(cx).path() == "/ui/users";
     let account_page = uri(cx).path() == "/ui/account";
     let settings_page = uri(cx).path() == "/ui/settings";
+    let keys_page = uri(cx).path() == "/ui/keys";
     let groups_page = uri(cx).path().starts_with("/ui/groups");
     let group_detail = groups_page && uri(cx).path() != "/ui/groups";
     let group_title = if group_detail {
@@ -68,6 +63,8 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
         "个人账户"
     } else if let Some(title) = &group_title {
         title.as_str()
+    } else if keys_page {
+        "虚拟 Keys"
     } else if groups_page {
         "资源组"
     } else if routes_page {
@@ -85,11 +82,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
     })
     .to_owned();
     let providers_link = link_attrs(cx, href!(providers::list), prefetch_mode(cx));
-    let home_link = if is_admin {
-        providers_link.clone()
-    } else {
-        link_attrs(cx, href!(account::account), PrefetchMode::Never)
-    };
+    let home_link = link_attrs(cx, href!(chat::chat), PrefetchMode::Never);
     let models_link = link_attrs(cx, href!(models::models), prefetch_mode(cx));
     let chat_link = link_attrs(cx, href!(chat::chat), PrefetchMode::Never);
     let routes_link = link_attrs(cx, href!(routes::routes), prefetch_mode(cx));
@@ -134,7 +127,6 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                             class="mt-4 grid gap-1 max-[640px]:mt-0 max-[640px]:grid-cols-2"
                             aria-label="主导航"
                         >
-                            if is_admin {
                             <a
                                 id="nav-chat"
                                 class=(NAV_ITEM)
@@ -156,6 +148,7 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                     || chat_page
                                     || holidays_page
                                     || subscriptions_page
+                                    || keys_page
                                     || groups_page
                                     || users_page
                                     || settings_page
@@ -195,22 +188,24 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                 )
                                 "Model Routes"
                             </a>
-                            <a
-                                id="nav-holidays"
-                                class=(NAV_ITEM)
-                                (holidays_link)
-                                aria-current=(if holidays_page {
-                                    Some("page")
-                                } else {
-                                    None
-                                })
-                            >
-                                icon(
-                                    data: CALENDAR_OUTLINED,
-                                    attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
-                                )
-                                "节假日"
-                            </a>
+                            if is_admin {
+                                <a
+                                    id="nav-holidays"
+                                    class=(NAV_ITEM)
+                                    (holidays_link)
+                                    aria-current=(if holidays_page {
+                                        Some("page")
+                                    } else {
+                                        None
+                                    })
+                                >
+                                    icon(
+                                        data: CALENDAR_OUTLINED,
+                                        attrs: attributes! { class="size-[18px] shrink-0" aria-hidden="true" }
+                                    )
+                                    "节假日"
+                                </a>
+                            }
                             <a
                                 id="nav-subscriptions"
                                 class=(NAV_ITEM)
@@ -231,9 +226,19 @@ pub async fn shell(cx: &Cx, slot: Slot<'_>) -> Result<impl View> {
                                 icon(data: TEAM_OUTLINED, size: 16)
                                 "资源组"
                             </a>
-                            <a id="nav-users" class=(NAV_ITEM) href="/ui/users" aria-current=(if users_page { Some("page") } else { None })>
-                                icon(data: TEAM_OUTLINED, size: 16) "用户管理"
+                            <a
+                                id="nav-keys"
+                                class=(NAV_ITEM)
+                                href="/ui/keys"
+                                aria-current=(if keys_page { Some("page") } else { None })
+                            >
+                                icon(data: TEAM_OUTLINED, size: 16)
+                                "虚拟 Keys"
                             </a>
+                            if is_admin {
+                                <a id="nav-users" class=(NAV_ITEM) href="/ui/users" aria-current=(if users_page { Some("page") } else { None })>
+                                    icon(data: TEAM_OUTLINED, size: 16) "用户管理"
+                                </a>
                             }
                             <a id="nav-account" class=(NAV_ITEM) href="/ui/account" aria-current=(if account_page { Some("page") } else { None })>
                                 icon(data: TEAM_OUTLINED, size: 16) "个人账户"

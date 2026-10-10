@@ -32,6 +32,7 @@ mod models;
 mod pricing;
 mod providers;
 mod routes;
+mod scope;
 mod settings;
 mod subscription_nodes;
 mod tool_continuations;
@@ -49,6 +50,7 @@ const MASTER_KEY_ERROR: StoreError = StoreError::Configuration(
 pub struct ProviderStore {
     db: Db,
     group_id: i64,
+    user_id: Option<i64>,
     cipher: KeyCipher,
     backend: Backend,
     // SQLite 的同步锁等待不能阻塞持锁事务所在的 async 执行线程。
@@ -126,6 +128,7 @@ impl ProviderStore {
         Ok(Self {
             db,
             group_id: 1,
+            user_id: None,
             cipher,
             backend,
             chat_writes: Arc::default(),
@@ -414,6 +417,7 @@ async fn check_unique_name(
     executor: &mut dyn Executor,
     name: &str,
     own_id: Option<i64>,
+    owner_user_id: Option<i64>,
 ) -> StoreResult<()> {
     // Historical providers with duplicate names keep their IDs and may be edited.
     if let Some(id) = own_id
@@ -423,6 +427,10 @@ async fn check_unique_name(
     }
     if let Some(existing) = Provider::all()
         .filter(Provider::fields().name().eq(name))
+        .filter(match owner_user_id {
+            Some(id) => Provider::fields().owner_user_id().eq(id),
+            None => Provider::fields().owner_user_id().is_none(),
+        })
         .select(Provider::fields().id())
         .first()
         .exec(executor)

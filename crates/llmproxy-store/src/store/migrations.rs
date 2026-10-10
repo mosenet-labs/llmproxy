@@ -146,6 +146,11 @@ pub(super) static MIGRATIONS: MigrationSet = MigrationSet::new(&[
         "0029_mail_settings.sql",
         include_str!("../../migrations/postgresql/0029_mail_settings.sql"),
     ),
+    MigrationFile::new(
+        202610100003,
+        "0030_personal_resources.sql",
+        include_str!("../../migrations/postgresql/0030_personal_resources.sql"),
+    ),
 ]);
 
 pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
@@ -458,5 +463,10 @@ pub(super) static SQLITE_MIGRATIONS: MigrationSet = MigrationSet::new(&[
         202610100002,
         "0062_mail_settings.sql",
         include_str!("../../migrations/sqlite/0062_mail_settings.sql"),
+    ),
+    MigrationFile::new(
+        202610100003,
+        "0063_personal_resources.sql",
+        include_str!("../../migrations/sqlite/0063_personal_resources.sql"),
     ),
 ]);

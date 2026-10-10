@@ -658,7 +658,7 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
         assert!(page.contains(&format!("data-current-group=\"{}\"", group.id)));
         assert!(page.contains("second"));
         assert!(!page.contains("data-group-selector="));
-        assert!(!page.contains("id=\"nav-keys\""));
+        assert!(page.contains("id=\"nav-keys\""));
         let header = page
             .split("id=\"console-header\"")
             .nth(1)
@@ -695,11 +695,11 @@ async fn console_separates_groups_and_keys_and_displays_secret_only_on_creation(
         .send()
         .await
         .unwrap();
-    assert_eq!(legacy.status(), 303);
-    assert_eq!(
-        legacy.headers()["location"],
-        format!("/ui/groups/{}?tab=keys", group.id)
-    );
+    assert_eq!(legacy.status(), 200);
+    let keys_html = legacy.text().await.unwrap();
+    assert!(keys_html.contains("id=\"nav-keys\""));
+    assert!(keys_html.contains("data-group-selector=\"keys\""));
+    assert!(keys_html.contains(&format!("data-current-group=\"{}\"", group.id)));
     let response = procedure(
         &client,
         &base,
@@ -1481,4 +1481,204 @@ async fn procedure(
         request = request.header("cookie", cookie);
     }
     request.send().await.unwrap()
+}
+
+#[tokio::test]
+async fn personal_console_scopes_pages_procedures_cookies_and_gateway_calls() {
+    use llmproxy_store::auth::EmailPurpose;
+    let database = Database::new().await;
+    let (upstream, requests) = Mock::http(|_, stream| {
+        respond(
+            stream,
+            200,
+            "Content-Type: application/json\r\n",
+            &serde_json::to_vec(&fixtures::response(Protocol::OpenAiChat, false)).unwrap(),
+        );
+    });
+    let legacy = configure(&database.store, upstream.address.port()).await;
+    let mut members = Vec::new();
+    for email in ["first@example.test", "second@example.test"] {
+        let code = database
+            .store
+            .issue_email_code(email, EmailPurpose::Register)
+            .await
+            .unwrap()
+            .unwrap();
+        database
+            .store
+            .register_user(email, &code.code, "isolated-test-password", "")
+            .await
+            .unwrap();
+        let member = database
+            .store
+            .login(email, "isolated-test-password")
+            .await
+            .unwrap()
+            .unwrap();
+        let scoped = database
+            .store
+            .for_user(member.session.user.id)
+            .await
+            .unwrap();
+        let route = configure(&scoped, upstream.address.port()).await;
+        let key = scoped
+            .create_virtual_key(VirtualKeyInput {
+                name: "private-application".into(),
+                all_routes: true,
+                model_ids: vec![],
+                route_ids: vec![],
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        members.push((member, scoped, route, key));
+    }
+    let gateway = Gateway::database(&database.url, MASTER_KEY);
+    let base = format!("http://{}", gateway.address);
+    let (member, first, first_route, first_key) = &members[0];
+    let (_, second, second_route, second_key) = &members[1];
+    let cookie = format!("llmproxy_session={}", member.secret);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("cookie", cookie.parse().unwrap());
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .build()
+        .unwrap();
+    for page in [
+        "providers",
+        "models",
+        "routes",
+        "subscriptions",
+        "chat",
+        "keys",
+    ] {
+        let response = client
+            .get(format!("{base}/ui/{page}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{page}");
+        let html = response.text().await.unwrap();
+        assert!(html.contains("id=\"nav-chat\""));
+        assert!(html.contains("id=\"nav-keys\""));
+        assert!(!html.contains("id=\"nav-users\""));
+        if page == "models" {
+            assert!(html.contains(&first_route.targets[0].model.upstream_model_id));
+            assert!(!html.contains(&second_route.targets[0].model.upstream_model_id));
+            assert!(!html.contains(&legacy.targets[0].model.upstream_model_id));
+        }
+    }
+    for group in [1, second.group_id()] {
+        assert_eq!(
+            client
+                .get(format!("{base}/ui/groups/{group}?tab=keys"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        let selection = client
+            .post(format!("{base}/ui/groups/select"))
+            .header("origin", &base)
+            .form(&[
+                ("csrf", member.session.csrf.as_str()),
+                ("group_id", &group.to_string()),
+                ("return_to", "/ui/keys"),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(selection.status(), 403);
+        let forged = procedure(
+            &client,
+            &base,
+            "create-key",
+            None,
+            &[
+                ("csrf", &member.session.csrf),
+                ("group_id", &group.to_string()),
+                ("name", "forged"),
+                ("all_routes", "true"),
+            ],
+        )
+        .await;
+        assert_eq!(forged.status(), 200);
+        assert!(!forged.text().await.unwrap().contains("lp-vk-"));
+        let fallback = client
+            .get(format!("{base}/ui/keys"))
+            .header("cookie", format!("{cookie}; llmproxy_keys_group={group}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(fallback.contains(&format!("data-current-group=\"{}\"", first.group_id())));
+    }
+    assert_eq!(second.list_virtual_keys().await.unwrap().len(), 1);
+    let probe = client
+        .post(format!(
+            "{base}/ui/_topcoat/runtime/procedures/probe-saved-model"
+        ))
+        .header("origin", &base)
+        .json(&[
+            member.session.csrf.clone(),
+            second_route.targets[0].model.id.to_string(),
+            "openai_chat".into(),
+            "16".into(),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), 200);
+    assert!(
+        probe
+            .text()
+            .await
+            .unwrap()
+            .contains(&llmproxy_store::StoreError::NotFound.to_string())
+    );
+    assert!(requests.try_recv().is_err());
+    let selection = client
+        .post(format!("{base}/ui/groups/select"))
+        .header("origin", &base)
+        .form(&[
+            ("csrf", member.session.csrf.as_str()),
+            ("group_id", &first.group_id().to_string()),
+            ("return_to", "/ui/keys"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(selection.status(), 303);
+    assert_eq!(selection.headers()["location"], "/ui/keys");
+    assert!(
+        selection.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .starts_with("llmproxy_keys_group=")
+    );
+    for (store, key) in [(first, first_key), (second, second_key)] {
+        let auth = format!(
+            "Authorization: Bearer {}\r\nContent-Type: application/json\r\n",
+            key.secret
+        );
+        let models = gateway.request_raw("GET", "/v1/models", &auth, b"");
+        assert_eq!(models.status, 200);
+        let response = gateway.request_raw(
+            "POST",
+            "/v1/chat/completions",
+            &auth,
+            br#"{"model":"shared","messages":[{"role":"user","content":"hello"}]}"#,
+        );
+        assert_eq!(response.status, 200);
+        let request = requests.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["model"],
+            format!("upstream-group-{}", store.group_id())
+        );
+    }
 }

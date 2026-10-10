@@ -186,9 +186,7 @@ pub async fn model_health(
     let checks = if id.is_empty() {
         Vec::new()
     } else {
-        app_context::<AppState>(cx)
-            .store
-            .clone()
+        crate::app::store(cx)
             .model_health_checks(id.parse::<i64>()?)
             .await?
     };
@@ -411,9 +409,7 @@ pub async fn save_health_check(
             timeout_ms: timeout.parse().map_err(|_| invalid())?,
             max_output_tokens: tokens.parse().map_err(|_| invalid())?,
         };
-        app_context::<AppState>(cx)
-            .store
-            .clone()
+        crate::app::store(cx)
             .save_health_check(
                 id,
                 protocol,

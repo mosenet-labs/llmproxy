@@ -160,14 +160,92 @@ fn public_path(path: &str) -> bool {
         )
 }
 
+pub(crate) struct ResourceStore {
+    pub store: llmproxy_store::ProviderStore,
+    pub groups: Vec<llmproxy_store::GroupView>,
+}
+
 fn member_path(path: &str) -> bool {
-    (path == "/ui" || path == "/ui/" || path == "/ui/account")
-        || matches!(
-            path,
-            "/ui/_topcoat/runtime/procedures/auth-logout"
-                | "/ui/_topcoat/runtime/procedures/auth-save-profile"
-                | "/ui/_topcoat/runtime/procedures/auth-change-password"
-        )
+    matches!(
+        path,
+        "/ui" | "/ui/" | "/ui/account" | "/ui/chat" | "/ui/keys"
+    ) || [
+        "/ui/providers",
+        "/ui/models",
+        "/ui/routes",
+        "/ui/subscriptions",
+        "/ui/groups",
+    ]
+    .iter()
+    .any(|prefix| {
+        path == *prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }) || matches!(
+        path,
+        "/ui/_topcoat/runtime/procedures/claim-subscription"
+            | "/ui/_topcoat/runtime/shards/key-workspace"
+            | "/ui/_topcoat/runtime/procedures/save-group"
+            | "/ui/_topcoat/runtime/procedures/create-key"
+            | "/ui/_topcoat/runtime/procedures/change-key"
+            | "/ui/_topcoat/runtime/shards/model-workspace"
+            | "/ui/_topcoat/runtime/shards/model-candidates"
+            | "/ui/_topcoat/runtime/shards/provider-list"
+            | "/ui/_topcoat/runtime/procedures/save-route"
+            | "/ui/_topcoat/runtime/procedures/delete-route"
+            | "/ui/_topcoat/runtime/procedures/import-subscription-models"
+            | "/ui/_topcoat/runtime/procedures/remove-group-resource"
+            | "/ui/_topcoat/runtime/procedures/save-group-resources"
+            | "/ui/_topcoat/runtime/procedures/load-model-candidates"
+            | "/ui/_topcoat/runtime/procedures/save-models"
+            | "/ui/_topcoat/runtime/procedures/save-model"
+            | "/ui/_topcoat/runtime/procedures/delete-model"
+            | "/ui/_topcoat/runtime/procedures/probe-saved-model"
+            | "/ui/_topcoat/runtime/procedures/remove-draft-model"
+            | "/ui/_topcoat/runtime/procedures/add-draft-model"
+            | "/ui/_topcoat/runtime/shards/model-health"
+            | "/ui/_topcoat/runtime/procedures/save-health-check"
+            | "/ui/_topcoat/runtime/shards/model-draft"
+            | "/ui/_topcoat/runtime/procedures/add-price-rule"
+            | "/ui/_topcoat/runtime/procedures/remove-price-rule"
+            | "/ui/_topcoat/runtime/procedures/add-price-window"
+            | "/ui/_topcoat/runtime/procedures/remove-price-window"
+            | "/ui/_topcoat/runtime/procedures/deepseek-peak-windows"
+            | "/ui/_topcoat/runtime/procedures/preview-price-band"
+            | "/ui/_topcoat/runtime/procedures/save-price-plan"
+            | "/ui/_topcoat/runtime/shards/price-rule-rows"
+            | "/ui/_topcoat/runtime/shards/price-matrix-rows"
+            | "/ui/_topcoat/runtime/shards/price-peak-windows"
+            | "/ui/_topcoat/runtime/procedures/preview-models"
+            | "/ui/_topcoat/runtime/procedures/save-provider"
+            | "/ui/_topcoat/runtime/procedures/provider-action"
+            | "/ui/_topcoat/runtime/shards/provider-health"
+            | "/ui/_topcoat/runtime/procedures/new-chat"
+            | "/ui/_topcoat/runtime/procedures/switch-chat"
+            | "/ui/_topcoat/runtime/procedures/default-chat-protocol"
+            | "/ui/_topcoat/runtime/procedures/begin-chat"
+            | "/ui/_topcoat/runtime/shards/chat-stop-button"
+            | "/ui/_topcoat/runtime/procedures/stop-chat"
+            | "/ui/_topcoat/runtime/procedures/send-chat"
+            | "/ui/_topcoat/runtime/shards/chat-protocol-picker"
+            | "/ui/_topcoat/runtime/shards/chat-session-list"
+            | "/ui/_topcoat/runtime/shards/chat-session-activity"
+            | "/ui/_topcoat/runtime/procedures/open-chat"
+            | "/ui/_topcoat/runtime/procedures/change-chat-history"
+            | "/ui/_topcoat/runtime/shards/chat-history"
+            | "/ui/_topcoat/runtime/procedures/set-chat-thinking"
+            | "/ui/_topcoat/runtime/shards/chat-thinking-picker"
+            | "/ui/_topcoat/runtime/shards/chat-usage"
+            | "/ui/_topcoat/runtime/procedures/retry-chat-save"
+            | "/ui/_topcoat/runtime/shards/chat-model-picker"
+            | "/ui/_topcoat/runtime/shards/chat-health-notice"
+            | "/ui/_topcoat/runtime/procedures/reprobe-chat-model"
+            | "/ui/_topcoat/runtime/shards/chat-health-updates"
+            | "/ui/_topcoat/runtime/procedures/auth-logout"
+            | "/ui/_topcoat/runtime/procedures/auth-save-profile"
+            | "/ui/_topcoat/runtime/procedures/auth-change-password"
+    )
 }
 
 pub(crate) async fn guard(cx: &Cx, body: Body, next: Next<'_>) -> Result<Response> {
@@ -182,7 +260,17 @@ pub(crate) async fn guard(cx: &Cx, body: Body, next: Next<'_>) -> Result<Respons
         if !public_path(path) && !member_path(path) && identity.user.role != UserRole::Admin {
             return Err(topcoat::router::error::forbidden().into());
         }
+        let resources = if identity.user.role == UserRole::Admin {
+            state.store.clone()
+        } else {
+            Box::pin(state.store.for_user(identity.user.id)).await?
+        };
+        let groups = Box::pin(resources.list_groups()).await?;
         let child = cx.with(identity);
+        let child = child.with(ResourceStore {
+            store: resources,
+            groups,
+        });
         return next.run(&child, body).await;
     }
     if public_path(path)

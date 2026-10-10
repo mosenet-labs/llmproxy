@@ -56,7 +56,7 @@ impl ProviderStore {
         provider_id: i64,
     ) -> StoreResult<Vec<HealthCheckView>> {
         let mut connection = self.connection().await?;
-        find(&mut connection, provider_id).await?;
+        Box::pin(self.find_provider(&mut connection, provider_id)).await?;
         let models = ModelMapping::all()
             .filter(ModelMapping::fields().provider_id().eq(provider_id))
             .select(ModelMapping::fields().id())
@@ -73,9 +73,9 @@ impl ProviderStore {
     pub async fn model_health_checks(&self, model_id: i64) -> StoreResult<Vec<HealthCheckView>> {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
-        let mapping = find_mapping(&mut tx, model_id).await?;
+        let mapping = Box::pin(self.find_model(&mut tx, model_id)).await?;
 
-        let provider = find(&mut tx, mapping.provider_id).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, mapping.provider_id)).await?;
         let current_time = now()?;
         let mut views = Vec::new();
         for protocol in mapping.protocols() {
@@ -148,7 +148,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        let mapping = find_mapping(&mut tx, model_id).await?;
+        let mapping = Box::pin(self.find_model(&mut tx, model_id)).await?;
 
         if !mapping.protocols().contains(&protocol) {
             return Err(StoreError::Validation("模型未配置所选协议".into()));
@@ -192,7 +192,7 @@ impl ProviderStore {
             if !(1..=1024).contains(&tokens) {
                 return Err(StoreError::Validation("输出上限须为 1–1024 token".into()));
             }
-            let mapping = find_mapping(&mut tx, id).await?;
+            let mapping = Box::pin(self.find_model(&mut tx, id)).await?;
             if !mapping.protocols().contains(&protocol) {
                 return Err(StoreError::Validation("模型未配置所选协议".into()));
             }
@@ -215,8 +215,8 @@ impl ProviderStore {
             if row.lease_until > current_time {
                 continue;
             }
-            let mapping = find_mapping(&mut tx, row.model_id).await?;
-            let provider = find(&mut tx, mapping.provider_id).await?;
+            let mapping = Box::pin(self.find_model(&mut tx, row.model_id)).await?;
+            let provider = Box::pin(self.find_provider(&mut tx, mapping.provider_id)).await?;
             let protocol = routes::protocol_from_str(&row.protocol)?;
             if !provider.enabled || !mapping.protocols().contains(&protocol) {
                 continue;
@@ -282,8 +282,8 @@ impl ProviderStore {
         if row.generation != job.generation || row.lease_until <= now()? {
             return Ok(false);
         }
-        let mapping = find_mapping(&mut tx, row.model_id).await?;
-        let provider = find(&mut tx, mapping.provider_id).await?;
+        let mapping = Box::pin(self.find_model(&mut tx, row.model_id)).await?;
+        let provider = Box::pin(self.find_provider(&mut tx, mapping.provider_id)).await?;
         if mapping.version != job.model_version || provider.version != job.provider_version {
             row.update()
                 .lease_until(0_i64)

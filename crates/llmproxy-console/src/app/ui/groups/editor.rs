@@ -95,8 +95,7 @@ pub(super) async fn key_editor(
     secret: &Signal<String>,
     created: &Signal<bool>,
 ) -> Result<impl View> {
-    let group_name = app_context::<AppState>(cx)
-        .store
+    let group_name = crate::app::store(cx)
         .list_groups()
         .await?
         .into_iter()

@@ -15,7 +15,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
-        find(&mut tx, provider_id).await?;
+        Box::pin(self.find_provider(&mut tx, provider_id)).await?;
         let plan = current_plan(&mut tx, provider_id, upstream_model_id).await?;
         let view = match plan {
             Some(plan) => Some(price_view(&mut tx, plan).await?),
@@ -29,10 +29,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, false).await?;
         self.bindings(&mut tx, false).await?;
-        let provider_ids = Provider::all()
-            .select(Provider::fields().id())
-            .exec(&mut tx)
-            .await?;
+        let provider_ids = self.provider_ids(&mut tx).await?;
         let plans = ModelPricePlan::all()
             .filter(ModelPricePlan::fields().provider_id().in_list(provider_ids))
             .filter(ModelPricePlan::fields().is_current().eq(true))
@@ -68,7 +65,7 @@ impl ProviderStore {
         let mut connection = self.connection().await?;
         let mut tx = self.transaction(&mut connection, true).await?;
         self.bindings(&mut tx, true).await?;
-        find(&mut tx, input.provider_id).await?;
+        Box::pin(self.find_provider(&mut tx, input.provider_id)).await?;
         let mapped = ModelMapping::all()
             .filter(ModelMapping::fields().provider_id().eq(input.provider_id))
             .filter(

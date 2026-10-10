@@ -22,7 +22,7 @@ pub(super) async fn resource_workspace(
     controls: &Controls,
 ) -> Result<impl View> {
     let group = find_group(cx, group_id).await?;
-    let store = app_context::<AppState>(cx).store.for_group(group_id);
+    let store = crate::app::store(cx).for_group(group_id);
     let models = store.list_all_models().await?;
     let routes = store.list_all_routes().await?;
     let model_count = models
@@ -211,7 +211,7 @@ pub struct RemoveResource {
 pub async fn remove_group_resource(cx: &Cx, payload: String) -> Result<Outcome> {
     let Form(input) = Form::<RemoveResource>::from_bytes(payload.as_bytes())?;
     check_csrf(cx, &input.csrf)?;
-    let store = app_context::<AppState>(cx).store.for_group(input.group_id);
+    let store = crate::app::store(cx).for_group(input.group_id);
     let mut models: Vec<_> = store
         .list_models()
         .await?
@@ -370,8 +370,7 @@ pub async fn save_group_resources(cx: &Cx, payload: String) -> Result<Outcome> {
             .map(|(_, v)| v.parse())
             .collect()
     };
-    let result = app_context::<AppState>(cx)
-        .store
+    let result = crate::app::store(cx)
         .for_group(group_id)
         .set_group_resources(version, ids("model_id")?, ids("route_id")?)
         .await;
